@@ -1,0 +1,36 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { TimelineService } from './timeline.service';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+
+@ApiTags('Patient Timeline')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
+@Controller('timeline')
+export class TimelineController {
+  constructor(private readonly timelineService: TimelineService) {}
+
+  @Get(':uhid')
+  @ApiOperation({ summary: 'Get longitudinal encounter timeline for patient' })
+  @ApiQuery({ name: 'category', required: false })
+  async findByPatient(
+    @Param('uhid') uhid: string,
+    @Query('category') category?: string,
+  ) {
+    return this.timelineService.findByPatient(uhid, category);
+  }
+
+  @Post()
+  @ApiOperation({ summary: 'Add a new timeline milestone or event' })
+  async create(@Body() body: any) {
+    return this.timelineService.create(body);
+  }
+}
