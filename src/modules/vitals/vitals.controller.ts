@@ -10,6 +10,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { VitalsService } from './vitals.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Vitals & Trends')
 @ApiBearerAuth()
@@ -36,7 +37,7 @@ export class VitalsController {
 
   @Post()
   @ApiOperation({ summary: 'Log a new vitals measurement' })
-  async create(@Body() body: any) {
-    return this.vitalsService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.vitalsService.create({ ...body, recordedBy: body.recordedBy || userName });
   }
 }

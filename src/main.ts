@@ -9,7 +9,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   const configService = app.get(ConfigService);
-  const port = configService.get<number>('port') || 5000;
+  const port = configService.get<number>('port') || 4000;
   const corsOrigin = configService.get<string>('cors.origin') || '*';
 
   // Global prefix for all API routes: /api/*

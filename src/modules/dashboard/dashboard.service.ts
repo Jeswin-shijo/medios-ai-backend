@@ -8,6 +8,12 @@ import { ImagingStudy, ImagingStudyDocument } from '../imaging/schemas/imaging.s
 import { BillInvoice, BillInvoiceDocument } from '../billing/schemas/bill.schema';
 import { Consultation, ConsultationDocument } from '../consultations/schemas/consultation.schema';
 import { TaskAlertItem, TaskAlertDocument } from '../tasks-alerts/schemas/task-alert.schema';
+import { clockMinutes, displayDate, isoDate } from '../../common/utils/clinic-time';
+
+const countBy = (values: string[]) =>
+  [...values.reduce((acc, v) => acc.set(v, (acc.get(v) ?? 0) + 1), new Map<string, number>())].map(
+    ([label, count]) => ({ label, count }),
+  );
 
 @Injectable()
 export class DashboardService {
@@ -21,97 +27,93 @@ export class DashboardService {
     @InjectModel(TaskAlertItem.name) private taskModel: Model<TaskAlertDocument>,
   ) {}
 
-  async getDashboardStats() {
+  /**
+   * Everything the dashboard shows for one day, computed from the records. Numbers
+   * only; labels, colours and formatting belong to the client.
+   */
+  async getDashboardStats(day: Date) {
+    const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    const displayDay = displayDate(day);
+
     const [
       totalPatients,
+      newPatients,
       appointments,
+      consultations,
       totalLabs,
+      pendingLabs,
       totalImaging,
+      pendingImaging,
       bills,
-      totalConsultations,
       criticalAlerts,
+      recentPatients,
     ] = await Promise.all([
       this.patientModel.countDocuments().exec(),
-      this.appointmentModel.find({}).sort({ time: 1 }).limit(10).exec(),
+      this.patientModel.countDocuments({ createdAt: { $gte: dayStart, $lt: dayEnd } }).exec(),
+      this.appointmentModel.find({ date: isoDate(day) }).exec(),
+      this.consultationModel.find({ visitDate: displayDay }).exec(),
       this.labModel.countDocuments().exec(),
+      this.labModel.countDocuments({ status: 'Pending' }).exec(),
       this.imagingModel.countDocuments().exec(),
-      this.billModel.find({}).exec(),
-      this.consultationModel.countDocuments().exec(),
-      this.taskModel.find({ priority: 'High' }).limit(5).exec(),
+      this.imagingModel.countDocuments({ status: 'Pending' }).exec(),
+      this.billModel.find({ billDate: displayDay }).exec(),
+      this.taskModel
+        .find({ priority: 'High', status: { $ne: 'Completed' } })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .exec(),
+      this.patientModel.find().sort({ updatedAt: -1 }).limit(6).exec(),
     ]);
 
-    const todayAppointmentsCount = appointments.length || 18;
-    const completedApts = appointments.filter(a => a.status === 'Completed').length;
-    const pendingApts = todayAppointmentsCount - completedApts;
-
-    const todayRevenue = bills.reduce((acc, b) => acc + (b.paidAmount || 0), 0) || 24850;
+    const active = appointments.filter((a) => a.status !== 'Canceled');
+    const completed = active.filter((a) => a.status === 'Completed').length;
+    const schedule = [...appointments].sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time));
 
     return {
-      kpis: [
-        {
-          label: "Today's Appointments",
-          value: todayAppointmentsCount.toString(),
-          sub: `${completedApts || 12} Completed • ${pendingApts || 6} Pending`,
-          color: 'blue',
-        },
-        {
-          label: 'Total Patients',
-          value: totalPatients.toString() || '124',
-          sub: '+12 new today',
-          color: 'green',
-        },
-        {
-          label: 'Consultations',
-          value: totalConsultations.toString() || '16',
-          sub: '4 AI Notes Generated',
-          color: 'red',
-        },
-        {
-          label: 'Lab Reports',
-          value: totalLabs.toString() || '28',
-          sub: '5 Pending',
-          color: 'sky',
-        },
-        {
-          label: 'Imaging Reports',
-          value: totalImaging.toString() || '12',
-          sub: '3 Pending',
-          color: 'orange',
-        },
-        {
-          label: 'Billing (Today)',
-          value: `₹ ${todayRevenue.toLocaleString()}`,
-          sub: `${bills.length || 21} Invoices`,
-          color: 'purple',
-        },
-      ],
-      todaySchedule: appointments.map(a => ({
-        id: a._id,
+      date: isoDate(day),
+      appointments: { total: active.length, completed, pending: active.length - completed },
+      patients: { total: totalPatients, newToday: newPatients },
+      consultations: {
+        total: consultations.length,
+        finalised: consultations.filter((c) => c.isFinal).length,
+      },
+      labReports: { total: totalLabs, pending: pendingLabs },
+      imaging: { total: totalImaging, pending: pendingImaging },
+      billing: {
+        revenue: bills.reduce((acc, b) => acc + (b.paidAmount || 0), 0),
+        invoices: bills.length,
+      },
+      schedule: schedule.map((a) => ({
+        id: String(a._id),
         uhid: a.uhid,
         time: a.time,
-        name: a.patientName,
-        reason: `${a.type} • ${a.condition}`,
+        patientName: a.patientName,
+        type: a.type,
+        condition: a.condition,
         status: a.status,
       })),
-      patientFlow: [
-        { label: 'Completed', value: 82, pct: 66, color: 'var(--chart-green)' },
-        { label: 'In Consultation', value: 16, pct: 13, color: 'var(--chart-blue)' },
-        { label: 'Waiting', value: 12, pct: 10, color: 'var(--chart-orange)' },
-        { label: 'Scheduled', value: 14, pct: 11, color: 'var(--chart-gray)' },
-      ],
-      consultationTypes: [
-        { label: 'General', count: 8, color: 'var(--chart-blue)' },
-        { label: 'Follow-up', count: 5, color: 'var(--chart-sky)' },
-        { label: 'Diabetes', count: 4, color: 'var(--chart-green)' },
-        { label: 'Hypertension', count: 3, color: 'var(--chart-orange)' },
-        { label: 'Others', count: 2, color: 'var(--chart-purple)' },
-      ],
-      criticalAlerts: criticalAlerts.map(c => ({
-        id: c._id,
-        title: c.title,
-        sub: c.subtitle,
-        due: c.dueDateTime,
-        priority: c.priority,
+      patientFlow: countBy(active.map((a) => a.status)),
+      consultationTypes: countBy(active.map((a) => a.type)),
+      criticalAlerts: criticalAlerts.map((t) => ({
+        id: String(t._id),
+        title: t.title,
+        subtitle: t.subtitle,
+        patientName: t.patientName,
+        uhid: t.uhid,
+        type: t.type,
+        category: t.category,
+        dueDateTime: t.dueDateTime,
+      })),
+      recentPatients: recentPatients.map((p) => ({
+        id: String(p._id),
+        uhid: p.uhid,
+        name: p.name,
+        age: p.age,
+        gender: p.gender,
+        avatar: p.avatar,
+        reason: p.conditions[0] ?? '',
+        lastVisit: p.lastVisit,
       })),
     };
   }

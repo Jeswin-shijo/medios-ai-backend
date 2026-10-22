@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ImagingStudy, ImagingStudyDocument } from './schemas/imaging.schema';
+import { displayDateTime } from '../../common/utils/clinic-time';
 
 @Injectable()
 export class ImagingService {
@@ -34,9 +35,9 @@ export class ImagingService {
   async updateReport(id: string, reportData: any): Promise<ImagingStudyDocument> {
     const study = await this.findOne(id);
     study.radiologistReport = {
-      ...study.radiologistReport,
+      ...(study.toObject().radiologistReport ?? {}),
       ...reportData,
-      reportedOn: new Date().toLocaleString(),
+      reportedOn: displayDateTime(),
       status: 'Final Report',
     };
     study.status = 'Reported';

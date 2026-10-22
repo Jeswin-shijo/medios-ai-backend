@@ -66,8 +66,30 @@ export class PatientsService {
   }
 
   async create(createPatientDto: CreatePatientDto): Promise<PatientDocument> {
-    const created = new this.patientModel(createPatientDto);
-    return created.save();
+    if (createPatientDto.uhid) {
+      return new this.patientModel(createPatientDto).save();
+    }
+    // Assign the next UHID in the MHK<year><5-digit serial> series, retrying if a
+    // concurrent registration took the same number.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await new this.patientModel({ ...createPatientDto, uhid: await this.nextUhid() }).save();
+      } catch (err) {
+        if (attempt < 2 && (err as { code?: number })?.code === 11000) continue;
+        throw err;
+      }
+    }
+  }
+
+  private async nextUhid(): Promise<string> {
+    const prefix = `MHK${new Date().getFullYear()}`;
+    const last = await this.patientModel
+      .findOne({ uhid: { $regex: `^${prefix}\\d{5}$` } })
+      .sort({ uhid: -1 })
+      .select('uhid')
+      .exec();
+    const serial = last ? Number(last.uhid.slice(prefix.length)) + 1 : 1;
+    return `${prefix}${String(serial).padStart(5, '0')}`;
   }
 
   async update(idOrUhid: string, updates: Partial<Patient>): Promise<PatientDocument> {

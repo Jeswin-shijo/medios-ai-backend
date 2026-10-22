@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Appointment, AppointmentDocument } from './schemas/appointment.schema';
+import { clockMinutes, isoDate } from '../../common/utils/clinic-time';
 
 @Injectable()
 export class AppointmentsService {
@@ -51,13 +52,10 @@ export class AppointmentsService {
     return { appointments, total };
   }
 
-  async findToday(): Promise<Appointment[]> {
-    // Return appointments scheduled for today or active in queue
-    return this.appointmentModel
-      .find({})
-      .sort({ time: 1 })
-      .limit(20)
-      .exec();
+  /** The day's queue in clock order ("02:00 PM" after "09:30 AM"). */
+  async findToday(day: Date = new Date()): Promise<Appointment[]> {
+    const appointments = await this.appointmentModel.find({ date: isoDate(day) }).exec();
+    return appointments.sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time));
   }
 
   async findOne(id: string): Promise<AppointmentDocument> {

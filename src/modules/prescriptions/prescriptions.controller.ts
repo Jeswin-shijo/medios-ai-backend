@@ -11,6 +11,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { PrescriptionsService } from './prescriptions.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Prescriptions')
 @ApiBearerAuth()
@@ -34,8 +35,8 @@ export class PrescriptionsController {
 
   @Post()
   @ApiOperation({ summary: 'Create new prescription' })
-  async create(@Body() body: any) {
-    return this.prescriptionsService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.prescriptionsService.create({ ...body, doctor: body.doctor || userName });
   }
 
   @Put(':id')

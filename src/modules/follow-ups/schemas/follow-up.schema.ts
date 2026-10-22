@@ -20,16 +20,16 @@ export class FollowUpItem {
   @Prop({ default: '' })
   avatar: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: '' })
   lastVisit: string;
 
   @Prop({ required: true, index: true })
   followUpDate: string;
 
-  @Prop({ default: '10:00 AM' })
+  @Prop({ default: '' })
   followUpTime: string;
 
-  @Prop({ default: 'Diabetes & BP Review' })
+  @Prop({ required: true })
   followUpType: string;
 
   @Prop({
@@ -38,10 +38,10 @@ export class FollowUpItem {
   })
   status: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   assignedTo: string;
 
-  @Prop({ default: 'SMS + WhatsApp (24h before)' })
+  @Prop({ default: '' })
   reminders: string;
 }
 

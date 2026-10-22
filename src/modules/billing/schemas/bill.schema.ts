@@ -1,9 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate } from '../../../common/utils/clinic-time';
 
 export type BillInvoiceDocument = BillInvoice & Document;
 
-@Schema({ _id: false })
+@Schema()
 export class BillItem {
   @Prop({ required: true })
   service: string;
@@ -41,23 +42,24 @@ export class BillInvoice {
   @Prop({ required: true })
   patientName: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   billDate: string;
 
-  @Prop({ default: 'OPD Regular' })
+  @Prop({ default: '' })
   visitType: string;
 
   @Prop({ default: '' })
   consultationId: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   createdBy: string;
 
-  @Prop({ default: 'UPI / GPay' })
+  @Prop({ default: '' })
   paymentMode: string;
 
+  // Derived from paidAmount vs totalAmount by BillingService; never assume payment.
   @Prop({
-    default: 'Paid',
+    default: 'Unpaid',
     enum: ['Paid', 'Unpaid', 'Partially Paid'],
   })
   status: string;

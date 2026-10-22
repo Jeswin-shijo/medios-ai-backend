@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayTime } from '../../../common/utils/clinic-time';
 
 export type MessageThreadDocument = MessageThread & Document;
 
@@ -15,18 +16,19 @@ export class ChatAttachment {
   size: string;
 }
 
-@Schema({ _id: false })
+@Schema()
 export class ChatMessage {
   @Prop({ required: true, enum: ['doctor', 'patient', 'system', 'staff'] })
   sender: string;
 
-  @Prop({ required: true })
+  // Empty when the message is only an attachment.
+  @Prop({ default: '' })
   text: string;
 
-  @Prop({ default: '10:00 AM' })
+  @Prop({ default: () => displayTime() })
   time: string;
 
-  @Prop({ default: 'delivered', enum: ['sent', 'delivered', 'read'] })
+  @Prop({ default: 'sent', enum: ['sent', 'delivered', 'read'] })
   status: string;
 
   @Prop({ type: ChatAttachment, default: null })
@@ -41,10 +43,10 @@ export class MessageThread {
   @Prop({ default: '' })
   uhid: string;
 
-  @Prop({ default: 0 })
-  age: number;
+  @Prop()
+  age?: number;
 
-  @Prop({ default: 'Male' })
+  @Prop({ default: '' })
   gender: string;
 
   @Prop({
@@ -56,13 +58,13 @@ export class MessageThread {
   @Prop({ default: '' })
   preview: string;
 
-  @Prop({ default: 'Just now' })
+  @Prop({ default: () => displayTime() })
   time: string;
 
   @Prop({ default: 0 })
   unreadCount: number;
 
-  @Prop({ default: true })
+  @Prop({ default: false })
   online: boolean;
 
   @Prop({ default: '' })

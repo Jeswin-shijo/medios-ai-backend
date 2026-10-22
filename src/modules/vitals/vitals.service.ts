@@ -2,12 +2,15 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { VitalsRecord, VitalsRecordDocument } from './schemas/vitals.schema';
+import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 
 @Injectable()
 export class VitalsService {
   constructor(
     @InjectModel(VitalsRecord.name)
     private vitalsModel: Model<VitalsRecordDocument>,
+    @InjectModel(Patient.name)
+    private patientModel: Model<PatientDocument>,
   ) {}
 
   async findByPatient(uhid: string, range?: string): Promise<VitalsRecord[]> {
@@ -52,7 +55,17 @@ export class VitalsService {
       data.status = 'Normal';
     }
 
-    const record = new this.vitalsModel(data);
-    return record.save();
+    const record = await new this.vitalsModel(data).save();
+
+    // The patient record keeps a snapshot of the latest reading for banners and summaries.
+    const { recordedAt, bpSystolic, bpDiastolic, heartRate, temperature, spo2, weightKg, heightCm, bmi, bmiStatus } = record;
+    await this.patientModel
+      .updateOne(
+        { uhid: record.uhid },
+        { vitals: { recordedAt, bpSystolic, bpDiastolic, heartRate, temperature, spo2, weightKg, heightCm, bmi, bmiStatus } },
+      )
+      .exec();
+
+    return record;
   }
 }

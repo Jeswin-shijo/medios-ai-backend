@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate, displayTime } from '../../../common/utils/clinic-time';
 
 export type ConsultationDocument = Consultation & Document;
 
@@ -20,23 +21,27 @@ export class Consultation {
   @Prop({ required: true, index: true })
   uhid: string;
 
-  @Prop({ default: 'Arun Kumar' })
+  @Prop({ default: '' })
   patientName: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   visitDate: string;
 
-  @Prop({ default: '09:30 AM' })
+  @Prop({ default: () => displayTime() })
   visitTime: string;
 
-  @Prop({ default: 'OPD Regular' })
+  @Prop({ default: '' })
   visitType: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   doctor: string;
 
-  @Prop({ default: 'General Medicine' })
+  @Prop({ default: '' })
   department: string;
+
+  /** Chief complaint, shown in the visit list. */
+  @Prop({ default: '' })
+  reason: string;
 
   @Prop({ default: '' })
   subjective: string;
@@ -49,6 +54,10 @@ export class Consultation {
 
   @Prop({ default: '' })
   plan: string;
+
+  /** Unstructured note written in the EMR's Free Text mode. */
+  @Prop({ default: '' })
+  freeText: string;
 
   @Prop({ type: [Icd10Diagnosis], default: [] })
   icd10: Icd10Diagnosis[];

@@ -11,6 +11,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { FollowUpsService } from './follow-ups.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Follow-ups & Recalls')
 @ApiBearerAuth()
@@ -34,8 +35,8 @@ export class FollowUpsController {
 
   @Post()
   @ApiOperation({ summary: 'Schedule a follow-up appointment' })
-  async create(@Body() body: any) {
-    return this.followUpsService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.followUpsService.create({ ...body, assignedTo: body.assignedTo || userName });
   }
 
   @Patch(':id/status')

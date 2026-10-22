@@ -54,9 +54,9 @@ export class AuthService {
       name: registerDto.name,
       email: registerDto.email,
       passwordHash,
-      specialty: registerDto.specialty || 'General Physician',
-      department: registerDto.department || 'OPD / General Medicine',
-      phone: registerDto.phone || '+91 98765 43210',
+      specialty: registerDto.specialty ?? '',
+      department: registerDto.department ?? '',
+      phone: registerDto.phone ?? '',
     });
 
     const payload = { sub: newUser._id.toString(), email: newUser.email, role: newUser.role };

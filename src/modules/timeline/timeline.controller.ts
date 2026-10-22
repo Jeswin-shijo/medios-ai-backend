@@ -10,6 +10,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { TimelineService } from './timeline.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Patient Timeline')
 @ApiBearerAuth()
@@ -30,7 +31,7 @@ export class TimelineController {
 
   @Post()
   @ApiOperation({ summary: 'Add a new timeline milestone or event' })
-  async create(@Body() body: any) {
-    return this.timelineService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.timelineService.create({ ...body, doctor: body.doctor || userName });
   }
 }

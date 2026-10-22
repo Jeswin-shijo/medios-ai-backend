@@ -36,7 +36,7 @@ export class TaskAlertItem {
   @Prop({ default: 'Medium', enum: ['High', 'Medium', 'Low'] })
   priority: string;
 
-  @Prop({ default: 'Today' })
+  @Prop({ default: '' })
   dueDateTime: string;
 
   @Prop({
@@ -45,8 +45,9 @@ export class TaskAlertItem {
   })
   status: string;
 
+  // Required: filing a task as Critical by default would flood the critical queue.
   @Prop({
-    default: 'Critical',
+    required: true,
     enum: ['Critical', 'Follow-up', 'Lab', 'Imaging', 'Medication', 'System'],
   })
   category: string;

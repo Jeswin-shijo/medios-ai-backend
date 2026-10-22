@@ -1,15 +1,17 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, SchemaTypes } from 'mongoose';
+import { displayDate, displayTime } from '../../../common/utils/clinic-time';
 
 export type LabReportDocument = LabTestReport & Document;
 
-@Schema({ _id: false })
+@Schema()
 export class LabParameter {
   @Prop({ required: true })
   name: string;
 
-  @Prop({ required: true })
-  result: string;
+  // Numeric results stay numbers so trends and gauges can use them.
+  @Prop({ type: SchemaTypes.Mixed, required: true })
+  result: number | string;
 
   @Prop({ required: true })
   referenceRange: string;
@@ -17,11 +19,12 @@ export class LabParameter {
   @Prop({ default: '' })
   unit: string;
 
-  @Prop({ default: 'Normal', enum: ['Normal', 'Low', 'High', 'Abnormal'] })
+  // A result is only "Normal" when the lab says so.
+  @Prop({ required: true, enum: ['Normal', 'Low', 'High', 'Abnormal'] })
   status: string;
 
-  @Prop({ default: 50 })
-  relativePosition: number;
+  @Prop()
+  relativePosition?: number;
 }
 
 @Schema({ _id: false })
@@ -54,19 +57,19 @@ export class LabTestReport {
   testName: string;
 
   @Prop({
-    default: 'Blood',
+    required: true,
     enum: ['Blood', 'Urine', 'Biochemistry', 'Hematology', 'Others'],
   })
   category: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   date: string;
 
-  @Prop({ default: '08:30 AM' })
+  @Prop({ default: () => displayTime() })
   time: string;
 
   @Prop({
-    default: 'Completed',
+    default: 'Pending',
     enum: ['Completed', 'Pending', 'Abnormal'],
   })
   status: string;
@@ -74,8 +77,8 @@ export class LabTestReport {
   @Prop({ type: [LabReportGroup], default: [] })
   groups: LabReportGroup[];
 
-  @Prop({ type: LabAiSummary, default: () => ({}) })
-  aiSummary: LabAiSummary;
+  @Prop({ type: LabAiSummary })
+  aiSummary?: LabAiSummary;
 
   @Prop({ type: Object, default: null })
   trend: any;

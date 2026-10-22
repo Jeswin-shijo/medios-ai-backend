@@ -42,15 +42,20 @@ export class MedicationsService {
     const stopped = meds.filter(m => m.status === 'Stopped');
     const completed = meds.filter(m => m.status === 'Completed');
 
-    const avgScore =
-      meds.length > 0
-        ? Math.round(meds.reduce((acc, m) => acc + (m.adherenceScore || 90), 0) / meds.length)
-        : 95;
+    // Average only over medications whose adherence has actually been measured.
+    const scored = meds.filter(m => typeof m.adherenceScore === 'number');
+    const avgScore = scored.length
+      ? Math.round(scored.reduce((acc, m) => acc + m.adherenceScore!, 0) / scored.length)
+      : null;
 
     return {
       uhid,
       overallScore: avgScore,
-      rating: avgScore >= 90 ? 'Excellent' : avgScore >= 75 ? 'Good' : 'Needs Improvement',
+      rating:
+        avgScore === null
+          ? null
+          : avgScore >= 90 ? 'Excellent' : avgScore >= 75 ? 'Good' : 'Needs Improvement',
+      medications: scored.map(m => ({ id: String(m._id), medicine: m.medicine, score: m.adherenceScore })),
       counts: {
         total: meds.length,
         active: active.length,
@@ -58,10 +63,6 @@ export class MedicationsService {
         stopped: stopped.length,
         completed: completed.length,
       },
-      missedDosesLast30Days: 3,
-      refillAlerts: [
-        { medicine: 'Metformin 500mg', daysRemaining: 4, refillDue: '30 Sep 2026' },
-      ],
     };
   }
 }

@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Consultation, ConsultationDocument } from './schemas/consultation.schema';
+import { displayDate, displayTime } from '../../common/utils/clinic-time';
 
 const DEFAULT_ICD10_CODES = [
   { code: 'I10', description: 'Essential (primary) hypertension', type: 'Chronic' },
@@ -27,47 +28,52 @@ export class ConsultationsService {
     return this.consultationModel.find({ uhid }).sort({ createdAt: -1 }).exec();
   }
 
-  async getLatestSoap(uhid: string): Promise<ConsultationDocument> {
-    let consultation = await this.consultationModel
+  /**
+   * Latest note for the patient. A patient with no consultation yet gets a blank,
+   * unsaved draft (no `id`) dated now; POST /consultations/soap stores it.
+   */
+  async getLatestSoap(uhid: string, doctorName: string): Promise<ConsultationDocument | Partial<Consultation>> {
+    const consultation = await this.consultationModel
       .findOne({ uhid })
       .sort({ createdAt: -1 })
       .exec();
 
-    if (!consultation) {
-      consultation = new this.consultationModel({
+    return (
+      consultation ?? {
         uhid,
-        visitDate: '26 Sep 2026',
-        visitTime: '09:30 AM',
-        subjective:
-          'Patient presents for routine follow-up of Type 2 Diabetes and Hypertension. Reports occasional morning headaches and postprandial fatigue. Denies chest pain, shortness of breath, or visual disturbances. Compliance with Metformin has been irregular over past 2 weeks.',
-        objective:
-          'Vitals: BP 138/88 mmHg, HR 78 bpm, SpO2 98%, Temp 98.4°F, BMI 25.0 kg/m².\nCVS: S1, S2 heard, no murmurs.\nRS: Bilateral clear, vesicular breath sounds.\nAbdomen: Soft, non-tender, no organomegaly.\nExtremities: No pedal edema, peripheral pulses palpable.',
-        assessment:
-          '1. Type 2 Diabetes Mellitus - sub-optimally controlled, likely medication non-adherence.\n2. Primary Hypertension - Stage 1, moderately controlled.\n3. Overweight BMI - lifestyle intervention needed.',
-        plan:
-          '1. Reinforce medication adherence: Metformin 500mg BD after meals.\n2. Add Telmisartan 40mg OD morning for BP stabilization.\n3. Order HbA1c, Fasting Blood Sugar, Lipid Profile, and Serum Creatinine.\n4. Dietary counselling: low glycemic index diet, sodium < 2g/day.\n5. Review in 4 weeks with home BP & blood sugar log.',
-        icd10: [
-          { code: 'I10', description: 'Essential (primary) hypertension', type: 'Chronic' },
-          { code: 'E11.9', description: 'Type 2 diabetes mellitus without complications', type: 'Chronic' },
-        ],
+        patientName: '',
+        visitDate: displayDate(),
+        visitTime: displayTime(),
+        visitType: '',
+        doctor: doctorName,
+        department: '',
+        reason: '',
+        subjective: '',
+        objective: '',
+        assessment: '',
+        plan: '',
+        freeText: '',
+        icd10: [],
         isFinal: false,
-      });
-      await consultation.save();
-    }
-    return consultation;
+      }
+    );
   }
 
-  async saveSoap(data: Partial<Consultation>): Promise<ConsultationDocument> {
-    const rawData = data as any;
-    if (rawData._id) {
-      const existing = await this.consultationModel.findById(rawData._id).exec();
-      if (existing) {
-        Object.assign(existing, data);
-        return existing.save();
-      }
+  /** Updates the note named by `id`, or creates one when there is no `id`. */
+  async saveSoap(
+    data: Partial<Consultation> & { id?: string; _id?: string },
+    doctorName: string,
+  ): Promise<ConsultationDocument> {
+    const { id, _id, ...fields } = data;
+    const existingId = id ?? _id;
+    if (existingId) {
+      const existing = await this.consultationModel.findById(existingId).exec();
+      if (!existing) throw new NotFoundException(`Consultation ${existingId} not found`);
+      Object.assign(existing, fields);
+      return existing.save();
     }
 
-    const created = new this.consultationModel(data);
+    const created = new this.consultationModel({ ...fields, doctor: fields.doctor || doctorName });
     return created.save();
   }
 

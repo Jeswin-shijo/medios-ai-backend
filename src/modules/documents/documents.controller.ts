@@ -35,13 +35,13 @@ export class DocumentsController {
 
   @Post()
   @ApiOperation({ summary: 'Upload or record a clinical document' })
-  async create(@Body() body: any) {
-    return this.documentsService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.documentsService.create({ ...body, author: body.author || userName });
   }
 
   @Patch(':id/sign')
-  @ApiOperation({ summary: 'Digitally sign a clinical document' })
+  @ApiOperation({ summary: 'Digitally sign a clinical document as the current user' })
   async signDocument(@Param('id') id: string, @CurrentUser('name') doctorName: string) {
-    return this.documentsService.signDocument(id, doctorName || 'Dr. Shajin');
+    return this.documentsService.signDocument(id, doctorName);
   }
 }

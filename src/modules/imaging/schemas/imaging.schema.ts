@@ -1,23 +1,27 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate, displayTime } from '../../../common/utils/clinic-time';
 
 export type ImagingStudyDocument = ImagingStudy & Document;
 
+// A new study is Pending with no report: findings, impression and the radiologist's
+// sign-off only exist once PATCH /imaging/:id/report records them.
+
 @Schema({ _id: false })
 export class RadiologistReport {
-  @Prop({ default: 'Bilateral lung fields clear. Cardiac silhouette is normal in size and configuration.' })
+  @Prop({ default: '' })
   findings: string;
 
-  @Prop({ default: 'No active focal cardiopulmonary abnormality.' })
+  @Prop({ default: '' })
   impression: string;
 
-  @Prop({ default: 'Dr. Priya Sundaram, MD Radiodiagnosis' })
+  @Prop({ default: '' })
   reportedBy: string;
 
-  @Prop({ default: '26 Sep 2026, 11:45 AM' })
+  @Prop({ default: '' })
   reportedOn: string;
 
-  @Prop({ default: 'Final Report', enum: ['Final Report', 'Preliminary'] })
+  @Prop({ default: 'Preliminary', enum: ['Final Report', 'Preliminary'] })
   status: string;
 }
 
@@ -29,10 +33,10 @@ export class ImagingStudy {
   @Prop({ required: true })
   title: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   date: string;
 
-  @Prop({ default: '10:15 AM' })
+  @Prop({ default: () => displayTime() })
   time: string;
 
   @Prop({
@@ -41,16 +45,16 @@ export class ImagingStudy {
   })
   modality: string;
 
-  @Prop({ default: 'Chest' })
+  @Prop({ required: true })
   bodyPart: string;
 
-  @Prop({ default: 'Dr. Priya Sundaram' })
+  @Prop({ default: '' })
   radiologist: string;
 
-  @Prop({ default: 'Reported', enum: ['Completed', 'Pending', 'Reported'] })
+  @Prop({ default: 'Pending', enum: ['Completed', 'Pending', 'Reported'] })
   status: string;
 
-  @Prop({ default: 'https://images.unsplash.com/photo-1516549655169-df83a0774514?auto=format&fit=crop&w=800&q=80' })
+  @Prop({ default: '' })
   thumbnailUrl: string;
 
   @Prop({ type: [String], default: [] })
@@ -62,11 +66,11 @@ export class ImagingStudy {
   @Prop({ default: '' })
   impression: string;
 
-  @Prop({ default: 96 })
-  confidenceScore: number;
+  @Prop()
+  confidenceScore?: number;
 
-  @Prop({ type: RadiologistReport, default: () => ({}) })
-  radiologistReport: RadiologistReport;
+  @Prop({ type: RadiologistReport })
+  radiologistReport?: RadiologistReport;
 }
 
 export const ImagingStudySchema = SchemaFactory.createForClass(ImagingStudy);

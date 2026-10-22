@@ -22,19 +22,19 @@ export class User {
   @Prop({ required: true })
   name: string;
 
-  @Prop({ default: 'General Physician' })
+  @Prop({ default: '' })
   specialty: string;
 
-  @Prop({ default: 'OPD / General Medicine' })
+  @Prop({ default: '' })
   department: string;
 
-  @Prop({ default: 'MHK-DOC-042' })
+  @Prop({ default: '' })
   doctorId: string;
 
-  @Prop({ default: 'https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&w=400&q=80' })
+  @Prop({ default: '' })
   avatar: string;
 
-  @Prop({ default: '+91 98765 43210' })
+  @Prop({ default: '' })
   phone: string;
 
   @Prop({ type: String, enum: UserRole, default: UserRole.DOCTOR })

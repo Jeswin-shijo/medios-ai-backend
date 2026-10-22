@@ -20,19 +20,19 @@ export class Appointment {
   @Prop({ default: '' })
   avatar: string;
 
-  @Prop({ default: '+91 98401 23456' })
+  @Prop({ default: '' })
   phone: string;
 
   @Prop({ required: true })
   time: string;
 
   @Prop({ required: true, index: true })
-  date: string; // YYYY-MM-DD or readable string
+  date: string; // YYYY-MM-DD
 
-  @Prop({ default: 'Follow-up' })
+  @Prop({ default: 'Consultation' })
   type: string;
 
-  @Prop({ default: 'General Consultation' })
+  @Prop({ default: '' })
   condition: string;
 
   @Prop({

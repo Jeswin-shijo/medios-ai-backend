@@ -3,56 +3,68 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 
+// Used only until settings are first saved (the seed stores the demo hospital's).
+// Identity fields start blank; toggles start at conservative values, and nothing
+// claims a safeguard (2FA, IP restrictions) the backend does not enforce.
 const DEFAULT_SETTINGS = {
   profile: {
-    name: 'Dr. Shajin',
-    role: 'General Physician & Diabetologist',
-    specialty: 'Internal Medicine',
-    department: 'OPD / General Medicine',
-    doctorId: 'MHK-DOC-042',
-    email: 'doctor@medios.ai',
-    phone: '+91 98765 43210',
-    avatar: 'https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&w=400&q=80',
-    experienceYears: 14,
-    qualification: 'MBBS, MD (General Medicine), C.Diab',
-    regNumber: 'MCI-2012-84920',
+    name: '',
+    designation: '',
+    credentials: '',
+    regNo: '',
+    email: '',
+    phone: '',
+    specialization: '',
+    bio: '',
   },
   hospital: {
-    name: 'MediOS Multi-Speciality Hospital',
-    tagLine: 'Excellence in Precision Clinical Healthcare',
-    registrationNo: 'HOSP-TN-2024-0089',
-    phone: '+91 44 2847 1100',
-    email: 'contact@medioshospital.org',
-    address: '42, Health City Boulevard, Anna Nagar, Chennai, Tamil Nadu - 600040',
-    gstNumber: '33AABCM9281Q1Z6',
-    website: 'https://medios-hospital.org',
+    name: '',
+    address: '',
+    phone: '',
+    email: '',
+    timeZone: '(GMT+05:30) Chennai, Kolkata, Mumbai, New Delhi',
+    dateFormat: 'DD/MM/YYYY',
+    timeFormat: '12 Hour (AM/PM)',
   },
-  aiConfig: {
-    defaultModel: 'GPT-6 Astro Medical Tuned',
-    confidenceThreshold: 90,
-    autoSuggestCodes: true,
-    enableAmbientScribe: true,
-    autoDrugInteractionCheck: true,
-    guidelineSourcePriority: 'National First (ICMR / MOHFW)',
-  },
-  clinical: {
-    defaultConsultDuration: 15,
-    autoGenerateBillOnRx: true,
-    requireVitalsBeforeConsult: false,
-    alertOnAbnormalLabs: true,
+  ai: {
+    model: '',
+    useClinicalSuggestions: false,
+    autoGenerateNotes: false,
+    voiceToNotes: false,
+    drugInteractionAlerts: true,
+    followUpSuggestions: false,
+    responseTone: 'Professional & Concise',
+    language: 'English (Auto-detect)',
   },
   notifications: {
-    smsReminders: true,
-    whatsappAlerts: true,
-    emailReports: true,
-    criticalLabImmediateCall: true,
+    appointmentReminders: true,
+    followUpAlerts: true,
+    labResultAlerts: true,
+    criticalAlerts: true,
+    systemNotifications: true,
+    emailNotifications: false,
+    smsNotifications: false,
+    pushNotifications: false,
   },
   security: {
     twoFactorAuth: false,
-    sessionTimeoutMinutes: 60,
-    ipWhitelisting: false,
+    sessionTimeout: '30 minutes',
+    loginAlerts: false,
+    ipRestrictions: false,
+    auditLogAccess: false,
+  },
+  preferences: {
+    defaultDashboard: 'Doctor Dashboard',
+    itemsPerPage: 20,
+    defaultPatientView: 'Summary View',
+    autoSaveInterval: '30 seconds',
+    enableSoundAlerts: false,
+    showTipsAndGuides: true,
+    compactMode: false,
   },
 };
+
+const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];
 
 @Injectable()
 export class SettingsService {
@@ -70,12 +82,14 @@ export class SettingsService {
     return settings;
   }
 
+  /** Merges each supplied section over the stored one; unknown sections are ignored. */
   async updateSettings(updates: Partial<HospitalSettings>): Promise<HospitalSettings> {
-    let settings = await this.settingsModel.findOne().exec();
-    if (!settings) {
-      settings = new this.settingsModel({ ...DEFAULT_SETTINGS, ...updates });
-    } else {
-      Object.assign(settings, updates);
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    for (const section of SECTIONS) {
+      const patch = (updates as any)?.[section];
+      if (patch && typeof patch === 'object') {
+        settings.set(section, { ...(settings.get(section) ?? {}), ...patch });
+      }
     }
     return settings.save();
   }

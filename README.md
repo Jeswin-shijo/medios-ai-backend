@@ -34,7 +34,8 @@ hospital-backend/
 │   │   ├── filters/            # AllExceptionsFilter
 │   │   └── interceptors/       # TransformInterceptor (standard envelope)
 │   ├── database/
-│   │   └── seed.ts             # Initial clinical dataset seeder (Doctor, Patients, Labs, etc.)
+│   │   ├── seed.ts             # Demo hospital seeder (validates through the schemas)
+│   │   └── seed-data/          # Seed fixtures, one JSON file per collection
 │   └── modules/
 │       ├── auth/               # JWT Login, Register, Profile (/api/auth/*)
 │       ├── users/              # Doctor & Staff accounts
@@ -65,22 +66,25 @@ hospital-backend/
 ### 1. Start MongoDB (via Docker)
 
 ```bash
-docker compose up -d
+docker compose up -d mongodb
 ```
-*MongoDB will be running on `localhost:27017`.*
-*(Optional) Mongo Express UI will be available at `http://localhost:8081`.*
+*MongoDB will be running on `localhost:27017`.* The image is pinned to `mongo:8.2.12`: newer releases refuse to start on the Linux kernel current Docker Desktop VMs ship (SERVER-121912).
+*(Optional) `docker compose up -d` also starts Mongo Express on `http://localhost:8081`.*
 
 ### 2. Configure Environment
 
 Copy `.env.example` to `.env` (already created):
 
 ```env
-PORT=5000
+PORT=4000
 MONGODB_URI=mongodb://localhost:27017/medios_hospital
 JWT_SECRET=medios_clinical_jwt_secret_key_2026_xyz
 JWT_EXPIRATION=7d
 CORS_ORIGIN=*
+TZ=Asia/Kolkata
 ```
+
+The default port is 4000 because macOS's AirPlay Receiver holds port 5000. `TZ` decides what "today" means for record dates and the dashboard.
 
 ### 3. Seed Database with Initial Clinical Data
 
@@ -88,14 +92,12 @@ CORS_ORIGIN=*
 npm run seed
 ```
 
-This seeds:
-- Default Doctor: **`doctor@medios.ai`** / Password: **`Admin@123`**
-- Primary Patient: **Arun Kumar** (`UHID: MHK202500321`) + Mary Jeni, Selvi P
-- Today's appointment queue
-- CBC & Lipid lab reports with findings
-- Digital Chest X-Ray imaging study
-- OPD Billing invoices
-- Clinical alerts & messaging threads
+This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
+- Doctor login: **`doctor@medios.ai`** / Password: **`Admin@123`**
+- 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
+- The 26 Sep appointment queue, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
+
+Records are inserted through the Mongoose schemas, so a fixture that breaks an enum or required field fails the seed.
 
 ### 4. Run Development Server
 
@@ -103,8 +105,8 @@ This seeds:
 npm run start:dev
 ```
 
-- API Base: `http://localhost:5000/api`
-- Interactive Swagger UI: `http://localhost:5000/api/docs`
+- API Base: `http://localhost:4000/api`
+- Interactive Swagger UI: `http://localhost:4000/api/docs`
 
 ---
 
@@ -139,6 +141,18 @@ npm run start:dev
 
 ---
 
+## 📐 API Conventions
+
+- Every record is returned with a string `id` (no `_id`/`__v`); password hashes are never serialized.
+- Clinical facts have no defaults. Vitals, blood group, insurance, lab result status, radiology reports and evidence grades are absent until recorded; new invoices start `Unpaid`, documents `Draft`, imaging studies `Pending`.
+- Author fields (`doctor`, `createdBy`, `author`, `recordedBy`, `assignedTo`, `reportedBy`) default to the signed-in user.
+- Record dates default to "now" in the record's display format (`26 Sep 2026`, `09:30 AM`); appointments use ISO days (`2026-09-26`).
+- Endpoints that summarise a day (`/dashboard/stats`, `/appointments/today`, `/billing/stats`) take `?date=YYYY-MM-DD`, defaulting to today.
+- Validation failures return `400`, duplicate keys `409`.
+- `POST /follow-ups/:id/send-reminder` reports `sent: false`: no SMS/WhatsApp provider is integrated yet. The AI endpoints (`ai-suggestions`, `ask-ai`, `voice-to-notes`) still return canned demo text.
+
+---
+
 ## 📋 Comprehensive API Route Catalog
 
 | Module | Method | Endpoint | Description |
@@ -146,7 +160,7 @@ npm run start:dev
 | **Auth** | `POST` | `/api/auth/login` | Doctor/staff login returning JWT |
 | | `POST` | `/api/auth/register` | Register new hospital staff |
 | | `GET` | `/api/auth/me` | Current authenticated user profile |
-| **Dashboard** | `GET` | `/api/dashboard/stats` | Aggregated KPIs, today's schedule, patient flow donut, and alerts |
+| **Dashboard** | `GET` | `/api/dashboard/stats?date=` | A day's counts, schedule, patient flow, visit types, critical alerts and recent patients |
 | **Patients** | `GET` | `/api/patients` | Search & filter patients by status, visitType, department |
 | | `GET` | `/api/patients/:idOrUhid` | Get patient record by MongoDB ID or UHID |
 | | `POST` | `/api/patients` | Register a new patient |
@@ -167,9 +181,9 @@ npm run start:dev
 | | `GET` | `/api/prescriptions/alternatives/:medicine` | Drug alternatives & generics |
 | **Medications**| `GET` | `/api/medications?uhid=...` | Medication reconciliation list |
 | | `PATCH` | `/api/medications/:id/status` | Set status (Active, Paused, Stopped, Completed) |
-| | `GET` | `/api/medications/adherence/:uhid` | Patient adherence score & refill alerts |
+| | `GET` | `/api/medications/adherence/:uhid` | Adherence score over measured medications (null when none) |
 | **Lab Reports** | `GET` | `/api/lab-reports?uhid=...` | Investigation reports |
-| | `GET` | `/api/lab-reports/trends/:uhid` | Longitudinal parameter trends (HbA1c, etc.) |
+| | `GET` | `/api/lab-reports/trends/:uhid` | Per-parameter series built from the patient's own reports |
 | **Imaging** | `GET` | `/api/imaging?uhid=...` | Radiological studies (X-Ray, CT, MRI, USG) |
 | | `PATCH` | `/api/imaging/:id/report` | Radiologist report submission |
 | **Billing** | `GET` | `/api/billing/invoices` | List invoices by patient or status |
@@ -178,7 +192,7 @@ npm run start:dev
 | | `GET` | `/api/billing/stats` | Today's revenue & receivables stats |
 | **Follow-ups** | `GET` | `/api/follow-ups` | Recall schedule list |
 | | `PATCH` | `/api/follow-ups/:id/status` | Update recall status |
-| | `POST` | `/api/follow-ups/:id/send-reminder` | Trigger SMS/WhatsApp recall reminder |
+| | `POST` | `/api/follow-ups/:id/send-reminder` | Recall reminder (not sent until an SMS/WhatsApp provider is added) |
 | **Timeline** | `GET` | `/api/timeline/:uhid` | Full longitudinal chronological record |
 | **Documents** | `GET` | `/api/documents?uhid=...` | Discharge summaries, consent forms, etc. |
 | | `PATCH` | `/api/documents/:id/sign` | Digitally sign document |

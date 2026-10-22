@@ -1,9 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate } from '../../../common/utils/clinic-time';
 
 export type PrescriptionDocument = Prescription & Document;
 
-@Schema({ _id: false })
+@Schema()
 export class PrescriptionItem {
   @Prop({ required: true })
   medicine: string;
@@ -24,10 +25,9 @@ export class PrescriptionItem {
   route: string;
 
   @Prop({
-    default: 'After food',
     enum: ['After food', 'Before food', 'At night', 'SOS (Fever)', 'With warm water'],
   })
-  instructions: string;
+  instructions?: string;
 
   @Prop({ default: '' })
   indication: string;
@@ -35,7 +35,7 @@ export class PrescriptionItem {
   @Prop({ default: 'Active', enum: ['Active', 'Paused', 'Stopped', 'Completed'] })
   status: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   startDate: string;
 }
 
@@ -62,19 +62,19 @@ export class Prescription {
   @Prop({ required: true, index: true })
   uhid: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   date: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   doctor: string;
 
-  @Prop({ default: 'OPD Follow-up' })
+  @Prop({ default: '' })
   type: string;
 
   @Prop({ type: [PrescriptionItem], default: [] })
   items: PrescriptionItem[];
 
-  @Prop({ default: 'Take with full glass of water. Avoid skipping doses. Report dizziness immediately.' })
+  @Prop({ default: '' })
   additionalInstructions: string;
 
   @Prop({ type: PrescriptionOptions, default: () => ({}) })

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate } from '../../../common/utils/clinic-time';
 
 export type KnowledgeArticleDocument = KnowledgeArticle & Document;
 export type ClinicalGuidelineDocument = ClinicalGuideline & Document;
@@ -15,7 +16,7 @@ export class KnowledgeArticle {
   @Prop({ default: 'Protocol', enum: ['Guideline', 'Protocol', 'Reference', 'SOP'] })
   type: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   lastUpdated: string;
 
   @Prop({ required: true })
@@ -35,22 +36,23 @@ export class ClinicalGuideline {
   @Prop({ required: true })
   title: string;
 
-  @Prop({ default: 'v2026.2' })
+  @Prop({ default: '' })
   version: string;
 
   @Prop({ required: true })
   specialty: string;
 
-  @Prop({ default: 'National / Official Protocol' })
+  @Prop({ default: '' })
   source: string;
 
-  @Prop({ default: 'Sep 2026' })
+  @Prop({ default: '' })
   updatedDate: string;
 
-  @Prop({ default: 'High (A)', enum: ['High (A)', 'Moderate (B)', 'Low (C)'] })
+  // Evidence grading must come from the source guideline, never a default.
+  @Prop({ required: true, enum: ['High (A)', 'Moderate (B)', 'Low (C)'] })
   evidenceLevel: string;
 
-  @Prop({ default: 'Strong', enum: ['Strong', 'Recommendation', 'Conditional'] })
+  @Prop({ required: true, enum: ['Strong', 'Recommendation', 'Conditional'] })
   recommendationStrength: string;
 
   @Prop({ default: '' })

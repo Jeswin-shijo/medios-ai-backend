@@ -2,10 +2,10 @@ import { IsNotEmpty, IsNumber, IsOptional, IsString, IsArray } from 'class-valid
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreatePatientDto {
-  @ApiProperty({ example: 'MHK202500321' })
-  @IsNotEmpty()
+  @ApiPropertyOptional({ example: 'MHK202500321', description: 'Assigned by the server when omitted' })
+  @IsOptional()
   @IsString()
-  uhid: string;
+  uhid?: string;
 
   @ApiProperty({ example: 'Arun Kumar' })
   @IsNotEmpty()
@@ -46,6 +46,26 @@ export class CreatePatientDto {
   @IsOptional()
   @IsString()
   department?: string;
+
+  @ApiPropertyOptional({ example: 'Dr. Shajin', description: 'Primary doctor; defaults to the signed-in user' })
+  @IsOptional()
+  @IsString()
+  doctor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  avatar?: string;
+
+  @ApiPropertyOptional({ example: '26 Sep 2026 09:15 AM' })
+  @IsOptional()
+  @IsString()
+  lastVisit?: string;
+
+  @ApiPropertyOptional({ example: '10 Oct 2026 10:30 AM' })
+  @IsOptional()
+  @IsString()
+  nextAppointment?: string;
 
   @ApiPropertyOptional({ example: ['Type 2 Diabetes', 'Hypertension'] })
   @IsOptional()

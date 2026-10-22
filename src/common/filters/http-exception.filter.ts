@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { Error as MongooseError, mongo } from 'mongoose';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -17,23 +18,26 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const status =
-      exception instanceof HttpException
-        ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
-
-    const exceptionResponse =
-      exception instanceof HttpException ? exception.getResponse() : null;
-
+    let status: number = HttpStatus.INTERNAL_SERVER_ERROR;
     let message: any = 'Internal server error';
 
-    if (typeof exceptionResponse === 'string') {
-      message = exceptionResponse;
-    } else if (
-      typeof exceptionResponse === 'object' &&
-      exceptionResponse !== null
-    ) {
-      message = (exceptionResponse as any).message || exceptionResponse;
+    if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      const exceptionResponse = exception.getResponse();
+      message =
+        typeof exceptionResponse === 'string'
+          ? exceptionResponse
+          : (exceptionResponse as any).message || exceptionResponse;
+    } else if (exception instanceof MongooseError.ValidationError) {
+      // Missing required fields or values outside a schema enum are client errors.
+      status = HttpStatus.BAD_REQUEST;
+      message = Object.values(exception.errors).map((e) => e.message);
+    } else if (exception instanceof MongooseError.CastError) {
+      status = HttpStatus.BAD_REQUEST;
+      message = `Invalid value for ${exception.path}: ${JSON.stringify(exception.value)}`;
+    } else if (exception instanceof mongo.MongoServerError && exception.code === 11000) {
+      status = HttpStatus.CONFLICT;
+      message = `A record with this ${Object.keys(exception.keyValue ?? {}).join(', ') || 'key'} already exists`;
     } else if (exception instanceof Error) {
       message = exception.message;
     }

@@ -1,0 +1,57 @@
+{
+  "profile": {
+    "name": "Dr. Shajin",
+    "designation": "General Physician",
+    "credentials": "MBBS, MD (Internal Medicine)",
+    "regNo": "Reg. No: TNMC 12345",
+    "email": "dr.shajin@hospital.com",
+    "phone": "+91 98765 43210",
+    "specialization": "General Physician",
+    "bio": "Compassionate care with evidence-based medicine."
+  },
+  "hospital": {
+    "name": "St. Mary's Multi Speciality Hospital",
+    "address": "123, Church Road, Nagercoil,\nKanyakumari District, Tamil Nadu - 629001",
+    "phone": "+91 4652 123456",
+    "email": "info@stmaryshospital.com",
+    "timeZone": "(GMT+05:30) Chennai, Kolkata, Mumbai, New Delhi",
+    "dateFormat": "DD/MM/YYYY",
+    "timeFormat": "12 Hour (AM/PM)"
+  },
+  "ai": {
+    "model": "GPT-6 Astro (Latest)",
+    "useClinicalSuggestions": true,
+    "autoGenerateNotes": true,
+    "voiceToNotes": true,
+    "drugInteractionAlerts": true,
+    "followUpSuggestions": true,
+    "responseTone": "Professional & Concise",
+    "language": "English (Auto-detect)"
+  },
+  "notifications": {
+    "appointmentReminders": true,
+    "followUpAlerts": true,
+    "labResultAlerts": true,
+    "criticalAlerts": true,
+    "systemNotifications": true,
+    "emailNotifications": false,
+    "smsNotifications": true,
+    "pushNotifications": true
+  },
+  "security": {
+    "twoFactorAuth": false,
+    "sessionTimeout": "30 minutes",
+    "loginAlerts": true,
+    "ipRestrictions": false,
+    "auditLogAccess": true
+  },
+  "preferences": {
+    "defaultDashboard": "Doctor Dashboard",
+    "itemsPerPage": 20,
+    "defaultPatientView": "Summary View",
+    "autoSaveInterval": "30 seconds",
+    "enableSoundAlerts": true,
+    "showTipsAndGuides": true,
+    "compactMode": false
+  }
+}

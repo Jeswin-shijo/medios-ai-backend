@@ -1,17 +1,22 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDateTime } from '../../../common/utils/clinic-time';
 
 export type VitalsRecordDocument = VitalsRecord & Document;
+
+// Only BP and heart rate are mandatory; every other measurement is stored only
+// when it was actually taken. BMI, BMI status and the overall status are derived
+// by VitalsService from the values supplied.
 
 @Schema({ timestamps: true })
 export class VitalsRecord {
   @Prop({ required: true, index: true })
   uhid: string;
 
-  @Prop({ default: 'Today, 09:15 AM' })
+  @Prop({ default: () => displayDateTime() })
   recordedAt: string;
 
-  @Prop({ default: 'Nurse Anitha' })
+  @Prop({ default: '' })
   recordedBy: string;
 
   @Prop({ required: true })
@@ -23,34 +28,34 @@ export class VitalsRecord {
   @Prop({ required: true })
   heartRate: number;
 
-  @Prop({ default: 98.4 })
-  temperature: number;
+  @Prop()
+  temperature?: number;
 
-  @Prop({ default: 98 })
-  spo2: number;
+  @Prop()
+  spo2?: number;
 
-  @Prop({ default: 18 })
-  respiratoryRate: number;
+  @Prop()
+  respiratoryRate?: number;
 
-  @Prop({ default: 118 })
-  bloodSugarFasting: number;
+  @Prop()
+  bloodSugarFasting?: number;
 
-  @Prop({ default: 154 })
-  bloodSugarPostPrandial: number;
+  @Prop()
+  bloodSugarPostPrandial?: number;
 
-  @Prop({ default: 74 })
-  weightKg: number;
+  @Prop()
+  weightKg?: number;
 
-  @Prop({ default: 172 })
-  heightCm: number;
+  @Prop()
+  heightCm?: number;
 
-  @Prop({ default: 25.0 })
-  bmi: number;
+  @Prop()
+  bmi?: number;
 
-  @Prop({ default: 'Overweight', enum: ['Normal', 'Overweight', 'Underweight', 'Obese'] })
-  bmiStatus: string;
+  @Prop({ enum: ['Normal', 'Overweight', 'Underweight', 'Obese'] })
+  bmiStatus?: string;
 
-  @Prop({ default: 'Warning', enum: ['Normal', 'Warning', 'Critical'] })
+  @Prop({ enum: ['Normal', 'Warning', 'Critical'] })
   status: string;
 
   @Prop({ default: '' })

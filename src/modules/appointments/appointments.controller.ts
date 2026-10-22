@@ -13,6 +13,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { AppointmentsService } from './appointments.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { parseIsoDay } from '../../common/utils/clinic-time';
 
 @ApiTags('Appointments')
 @ApiBearerAuth()
@@ -37,9 +38,10 @@ export class AppointmentsController {
   }
 
   @Get('today')
-  @ApiOperation({ summary: "Get today's live queue appointments" })
-  async findToday() {
-    return this.appointmentsService.findToday();
+  @ApiOperation({ summary: "Get a day's appointment queue in clock order" })
+  @ApiQuery({ name: 'date', required: false, description: 'YYYY-MM-DD (default today)' })
+  async findToday(@Query('date') date?: string) {
+    return this.appointmentsService.findToday(parseIsoDay(date));
   }
 
   @Get(':id')

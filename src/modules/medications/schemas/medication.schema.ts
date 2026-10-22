@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate } from '../../../common/utils/clinic-time';
 
 export type MedicationDocument = Medication & Document;
 
@@ -26,7 +27,7 @@ export class Medication {
   @Prop({ default: 'Oral' })
   route: string;
 
-  @Prop({ default: 'After food' })
+  @Prop({ default: '' })
   instructions: string;
 
   @Prop({ default: '' })
@@ -35,11 +36,12 @@ export class Medication {
   @Prop({ default: 'Active', enum: ['Active', 'Paused', 'Stopped', 'Completed'] })
   status: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   startDate: string;
 
-  @Prop({ default: 94 })
-  adherenceScore: number;
+  /** Percentage of doses taken, once adherence has been measured. */
+  @Prop({ min: 0, max: 100 })
+  adherenceScore?: number;
 }
 
 export const MedicationSchema = SchemaFactory.createForClass(Medication);

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { displayDate } from '../../../common/utils/clinic-time';
 
 export type ClinicalDocumentDocument = ClinicalDocument & Document;
 
@@ -25,26 +26,33 @@ export class ClinicalDocument {
   })
   category: string;
 
-  @Prop({ default: '26 Sep 2026' })
+  @Prop({ default: () => displayDate() })
   date: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   author: string;
 
-  @Prop({ default: 'General Medicine' })
+  @Prop({ default: '' })
   department: string;
 
   @Prop({ default: 'pdf', enum: ['pdf', 'doc', 'image', 'dicom'] })
   fileType: string;
 
-  @Prop({ default: '2.4 MB' })
+  @Prop({ default: '' })
   fileSize: string;
 
+  // Only PATCH /documents/:id/sign marks a document Signed.
   @Prop({
-    default: 'Signed',
+    default: 'Draft',
     enum: ['Signed', 'Pending Signature', 'Draft', 'Archived'],
   })
   status: string;
+
+  @Prop({ default: '' })
+  signedBy: string;
+
+  @Prop({ default: '' })
+  signedOn: string;
 
   @Prop({ default: '' })
   description: string;

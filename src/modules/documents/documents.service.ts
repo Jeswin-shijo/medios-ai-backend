@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ClinicalDocument, ClinicalDocumentDocument } from './schemas/document.schema';
+import { displayDateTime } from '../../common/utils/clinic-time';
 
 @Injectable()
 export class DocumentsService {
@@ -37,7 +38,8 @@ export class DocumentsService {
   async signDocument(id: string, doctorName: string): Promise<ClinicalDocumentDocument> {
     const doc = await this.findOne(id);
     doc.status = 'Signed';
-    doc.author = doctorName;
+    doc.signedBy = doctorName;
+    doc.signedOn = displayDateTime();
     return doc.save();
   }
 }

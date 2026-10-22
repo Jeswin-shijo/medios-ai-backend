@@ -16,7 +16,10 @@ export class FollowUpsService {
     if (query.date) filter.followUpDate = query.date;
     if (query.uhid) filter.uhid = query.uhid;
 
-    return this.followUpModel.find(filter).sort({ followUpDate: 1 }).exec();
+    // followUpDate is a display string ("26 Sep 2026"), so order by the parsed date, not the text.
+    const items = await this.followUpModel.find(filter).exec();
+    const when = (d: string) => Date.parse(d) || Number.MAX_SAFE_INTEGER;
+    return items.sort((a, b) => when(a.followUpDate) - when(b.followUpDate));
   }
 
   async findOne(id: string): Promise<FollowUpDocument> {
@@ -36,12 +39,15 @@ export class FollowUpsService {
     return item.save();
   }
 
+  /**
+   * No SMS/WhatsApp provider is integrated yet, so nothing is sent. The response
+   * says so plainly instead of reporting a delivery that never happened.
+   */
   async sendReminder(id: string) {
     const item = await this.findOne(id);
     return {
-      success: true,
-      message: `Automated reminder successfully dispatched via SMS and WhatsApp to ${item.patientName}`,
-      dispatchedAt: new Date().toISOString(),
+      sent: false,
+      message: `No SMS/WhatsApp provider is configured, so no reminder was sent to ${item.patientName}.`,
       recipient: item.patientName,
       scheduledDate: item.followUpDate,
     };

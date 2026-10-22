@@ -1,6 +1,8 @@
 services:
   mongodb:
-    image: mongo:latest
+    # Pinned: newer MongoDB releases refuse to start on Linux kernels 6.19–7.0.13,
+    # which current Docker Desktop VMs ship (SERVER-121912).
+    image: mongo:8.2.12
     container_name: medios-mongodb
     restart: always
     ports:

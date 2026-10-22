@@ -11,6 +11,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ImagingService } from './imaging.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Imaging & RIS')
 @ApiBearerAuth()
@@ -44,7 +45,11 @@ export class ImagingController {
 
   @Patch(':id/report')
   @ApiOperation({ summary: 'Submit radiologist report for study' })
-  async updateReport(@Param('id') id: string, @Body() reportData: any) {
-    return this.imagingService.updateReport(id, reportData);
+  async updateReport(
+    @Param('id') id: string,
+    @Body() reportData: any,
+    @CurrentUser('name') userName: string,
+  ) {
+    return this.imagingService.updateReport(id, { ...reportData, reportedBy: reportData.reportedBy || userName });
   }
 }

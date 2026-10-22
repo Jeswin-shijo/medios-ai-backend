@@ -3,7 +3,9 @@ import { Document } from 'mongoose';
 
 export type HospitalSettingsDocument = HospitalSettings & Document;
 
-@Schema({ timestamps: true })
+// One document holding the workstation settings, section by section, in the
+// shape the web app's Settings screen edits.
+@Schema({ timestamps: true, minimize: false })
 export class HospitalSettings {
   @Prop({ type: Object, default: {} })
   profile: any;
@@ -12,16 +14,16 @@ export class HospitalSettings {
   hospital: any;
 
   @Prop({ type: Object, default: {} })
-  aiConfig: any;
-
-  @Prop({ type: Object, default: {} })
-  clinical: any;
+  ai: any;
 
   @Prop({ type: Object, default: {} })
   notifications: any;
 
   @Prop({ type: Object, default: {} })
   security: any;
+
+  @Prop({ type: Object, default: {} })
+  preferences: any;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

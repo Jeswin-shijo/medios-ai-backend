@@ -3,60 +3,63 @@ import { Document } from 'mongoose';
 
 export type PatientDocument = Patient & Document;
 
+// Clinical facts (vitals, blood group, insurance, AI summary) have no defaults:
+// an unrecorded value must stay absent rather than look like a real reading.
+
 @Schema({ _id: false })
 export class InsuranceInfo {
-  @Prop({ default: 'Star Health Insurance' })
+  @Prop()
   provider: string;
 
-  @Prop({ default: 'SH-POL-982341-2025' })
+  @Prop()
   policyNumber: string;
 
-  @Prop({ default: '31 Dec 2026' })
+  @Prop()
   validity: string;
 
-  @Prop({ default: 'Cashless (₹5,00,000)' })
+  @Prop()
   coverageType: string;
 
-  @Prop({ default: 'Approved', enum: ['Not Claimed', 'In Progress', 'Approved', 'Settled'] })
+  @Prop({ default: 'Not Claimed', enum: ['Not Claimed', 'In Progress', 'Approved', 'Settled'] })
   claimStatus: string;
 }
 
 @Schema({ _id: false })
 export class PatientVitals {
-  @Prop({ default: 'Today, 09:15 AM' })
+  @Prop()
   recordedAt: string;
 
-  @Prop({ default: 138 })
+  @Prop()
   bpSystolic: number;
 
-  @Prop({ default: 88 })
+  @Prop()
   bpDiastolic: number;
 
-  @Prop({ default: 78 })
+  @Prop()
   heartRate: number;
 
-  @Prop({ default: 98.4 })
+  @Prop()
   temperature: number;
 
-  @Prop({ default: 98 })
+  @Prop()
   spo2: number;
 
-  @Prop({ default: 74 })
+  @Prop()
   weightKg: number;
 
-  @Prop({ default: 172 })
+  @Prop()
   heightCm: number;
 
-  @Prop({ default: 25.0 })
+  @Prop()
   bmi: number;
 
-  @Prop({ default: 'Overweight', enum: ['Normal', 'Overweight', 'Underweight', 'Obese'] })
+  @Prop({ enum: ['Normal', 'Overweight', 'Underweight', 'Obese'] })
   bmiStatus: string;
 }
 
 @Schema({ _id: false })
 export class AiSummary {
-  @Prop({ default: '45-year-old male with poorly controlled Type 2 Diabetes and newly detected Hypertension.' })
+  @Prop()
   summary: string;
 
   @Prop({ type: [String], default: [] })
@@ -83,7 +86,7 @@ export class Patient {
   @Prop({ default: '' })
   avatar: string;
 
-  @Prop({ default: 'B+' })
+  @Prop({ default: '' })
   bloodGroup: string;
 
   @Prop({ default: 'OPD', enum: ['OPD', 'IPD'] })
@@ -95,13 +98,13 @@ export class Patient {
   @Prop({ default: 'General Medicine' })
   department: string;
 
-  @Prop({ default: 'Today, 09:30 AM' })
+  @Prop({ default: '' })
   lastVisit: string;
 
-  @Prop({ default: 'Tomorrow 10:00 AM' })
+  @Prop({ default: '' })
   nextAppointment: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   doctor: string;
 
   @Prop({ type: [String], default: [] })
@@ -110,14 +113,14 @@ export class Patient {
   @Prop({ type: [String], default: [] })
   allergies: string[];
 
-  @Prop({ type: InsuranceInfo, default: () => ({}) })
-  insurance: InsuranceInfo;
+  @Prop({ type: InsuranceInfo })
+  insurance?: InsuranceInfo;
 
-  @Prop({ type: PatientVitals, default: () => ({}) })
-  vitals: PatientVitals;
+  @Prop({ type: PatientVitals })
+  vitals?: PatientVitals;
 
-  @Prop({ type: AiSummary, default: () => ({}) })
-  aiSummary: AiSummary;
+  @Prop({ type: AiSummary })
+  aiSummary?: AiSummary;
 }
 
 export const PatientSchema = SchemaFactory.createForClass(Patient);

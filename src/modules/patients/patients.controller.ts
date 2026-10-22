@@ -13,6 +13,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@ne
 import { PatientsService } from './patients.service';
 import { CreatePatientDto } from './dto/create-patient.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Patients')
 @ApiBearerAuth()
@@ -47,8 +48,8 @@ export class PatientsController {
 
   @Post()
   @ApiOperation({ summary: 'Register a new patient' })
-  async create(@Body() createPatientDto: CreatePatientDto) {
-    return this.patientsService.create(createPatientDto);
+  async create(@Body() createPatientDto: CreatePatientDto, @CurrentUser('name') userName: string) {
+    return this.patientsService.create({ ...createPatientDto, doctor: createPatientDto.doctor || userName });
   }
 
   @Put(':idOrUhid')

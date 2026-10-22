@@ -26,10 +26,10 @@ export class TimelineEvent {
   @Prop({ default: '' })
   subtitle: string;
 
-  @Prop({ default: 'Dr. Shajin' })
+  @Prop({ default: '' })
   doctor: string;
 
-  @Prop({ default: 'General Medicine' })
+  @Prop({ default: '' })
   department: string;
 
   @Prop({

@@ -11,6 +11,8 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { parseIsoDay } from '../../common/utils/clinic-time';
 
 @ApiTags('Billing & Invoices')
 @ApiBearerAuth()
@@ -38,8 +40,8 @@ export class BillingController {
 
   @Post('invoices')
   @ApiOperation({ summary: 'Create a new invoice' })
-  async create(@Body() body: any) {
-    return this.billingService.create(body);
+  async create(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.billingService.create({ ...body, createdBy: body.createdBy || userName });
   }
 
   @Patch('invoices/:id/pay')
@@ -52,9 +54,16 @@ export class BillingController {
     return this.billingService.recordPayment(id, amount, paymentMode);
   }
 
+  @Patch('invoices/:id/notes')
+  @ApiOperation({ summary: 'Update the notes on an invoice' })
+  async updateNotes(@Param('id') id: string, @Body('notes') notes: string) {
+    return this.billingService.updateNotes(id, notes ?? '');
+  }
+
   @Get('stats')
   @ApiOperation({ summary: 'Get billing financial overview stats' })
-  async getStats() {
-    return this.billingService.getStats();
+  @ApiQuery({ name: 'date', required: false, description: 'Day for todayRevenue, YYYY-MM-DD (default today)' })
+  async getStats(@Query('date') date?: string) {
+    return this.billingService.getStats(parseIsoDay(date));
   }
 }

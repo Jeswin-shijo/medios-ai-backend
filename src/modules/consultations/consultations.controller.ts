@@ -10,6 +10,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ConsultationsService } from './consultations.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Consultations & EMR')
 @ApiBearerAuth()
@@ -26,15 +27,15 @@ export class ConsultationsController {
   }
 
   @Get('soap/:uhid')
-  @ApiOperation({ summary: 'Get active/latest SOAP note for patient' })
-  async getSoap(@Param('uhid') uhid: string) {
-    return this.consultationsService.getLatestSoap(uhid);
+  @ApiOperation({ summary: 'Get latest SOAP note for patient, or an unsaved blank draft' })
+  async getSoap(@Param('uhid') uhid: string, @CurrentUser('name') userName: string) {
+    return this.consultationsService.getLatestSoap(uhid, userName);
   }
 
   @Post('soap')
-  @ApiOperation({ summary: 'Save or update SOAP note' })
-  async saveSoap(@Body() body: any) {
-    return this.consultationsService.saveSoap(body);
+  @ApiOperation({ summary: 'Save a SOAP note (updates the note named by id, else creates one)' })
+  async saveSoap(@Body() body: any, @CurrentUser('name') userName: string) {
+    return this.consultationsService.saveSoap(body, userName);
   }
 
   @Get('icd10')

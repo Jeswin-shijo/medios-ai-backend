@@ -7,6 +7,7 @@ import configuration from './config/configuration';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { apiJsonPlugin } from './common/database/api-json.plugin';
 
 import { UsersModule } from './modules/users/users.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -39,6 +40,10 @@ import { SettingsModule } from './modules/settings/settings.module';
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({
         uri: configService.get<string>('database.uri'),
+        connectionFactory: (connection) => {
+          connection.plugin(apiJsonPlugin);
+          return connection;
+        },
       }),
       inject: [ConfigService],
     }),
