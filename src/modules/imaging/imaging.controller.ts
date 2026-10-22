@@ -6,16 +6,15 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ImagingService } from './imaging.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 
 @ApiTags('Imaging & RIS')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('imaging')
 export class ImagingController {
   constructor(private readonly imagingService: ImagingService) {}
@@ -44,6 +43,7 @@ export class ImagingController {
   }
 
   @Patch(':id/report')
+  @Roles(UserRole.DOCTOR)
   @ApiOperation({ summary: 'Submit radiologist report for study' })
   async updateReport(
     @Param('id') id: string,

@@ -16,8 +16,26 @@ export class User {
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
   email: string;
 
-  @Prop({ required: true })
+  // Credential and session-security fields are never loaded unless a query asks
+  // for them (`.select('+field')`) and are stripped from every API response.
+  @Prop({ required: true, select: false })
   passwordHash: string;
+
+  /** Bumped to invalidate every access token issued before (logout-all, password change). */
+  @Prop({ default: 0, select: false })
+  tokenVersion: number;
+
+  @Prop({ default: 0, select: false })
+  failedLoginAttempts: number;
+
+  @Prop({ type: Date, default: null, select: false })
+  lockedUntil: Date | null;
+
+  @Prop({ type: Date, default: null })
+  passwordChangedAt: Date | null;
+
+  @Prop({ type: Date, default: null })
+  lastLoginAt: Date | null;
 
   @Prop({ required: true })
   name: string;
@@ -37,7 +55,8 @@ export class User {
   @Prop({ default: '' })
   phone: string;
 
-  @Prop({ type: String, enum: UserRole, default: UserRole.DOCTOR })
+  // Least privilege by default; admins assign clinical roles explicitly.
+  @Prop({ type: String, enum: UserRole, default: UserRole.STAFF })
   role: UserRole;
 
   @Prop({ default: true })

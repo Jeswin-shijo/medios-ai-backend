@@ -6,12 +6,15 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { Error as MongooseError, mongo } from 'mongoose';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly config: ConfigService) {}
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
@@ -38,7 +41,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
     } else if (exception instanceof mongo.MongoServerError && exception.code === 11000) {
       status = HttpStatus.CONFLICT;
       message = `A record with this ${Object.keys(exception.keyValue ?? {}).join(', ') || 'key'} already exists`;
-    } else if (exception instanceof Error) {
+    } else if (exception instanceof Error && !this.config.get<boolean>('isProduction')) {
+      // Internal error details help in development but are not shown in production.
       message = exception.message;
     }
 

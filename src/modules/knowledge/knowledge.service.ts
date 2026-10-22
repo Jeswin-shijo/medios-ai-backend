@@ -7,6 +7,7 @@ import {
   ClinicalGuideline,
   ClinicalGuidelineDocument,
 } from './schemas/knowledge.schema';
+import { escapeRegex } from '../../common/utils/escape-regex';
 
 @Injectable()
 export class KnowledgeService {
@@ -20,12 +21,12 @@ export class KnowledgeService {
   async findArticles(query: { category?: string; search?: string }): Promise<KnowledgeArticle[]> {
     const filter: any = {};
     if (query.category && query.category !== 'all') {
-      filter.category = { $regex: query.category, $options: 'i' };
+      filter.category = { $regex: escapeRegex(query.category), $options: 'i' };
     }
     if (query.search) {
       filter.$or = [
-        { title: { $regex: query.search, $options: 'i' } },
-        { summary: { $regex: query.search, $options: 'i' } },
+        { title: { $regex: escapeRegex(query.search), $options: 'i' } },
+        { summary: { $regex: escapeRegex(query.search), $options: 'i' } },
       ];
     }
     return this.articleModel.find(filter).sort({ createdAt: -1 }).exec();
@@ -34,12 +35,12 @@ export class KnowledgeService {
   async findGuidelines(query: { specialty?: string; search?: string }): Promise<ClinicalGuideline[]> {
     const filter: any = {};
     if (query.specialty && query.specialty !== 'all' && query.specialty !== 'All Guidelines') {
-      filter.specialty = { $regex: query.specialty, $options: 'i' };
+      filter.specialty = { $regex: escapeRegex(query.specialty), $options: 'i' };
     }
     if (query.search) {
       filter.$or = [
-        { title: { $regex: query.search, $options: 'i' } },
-        { source: { $regex: query.search, $options: 'i' } },
+        { title: { $regex: escapeRegex(query.search), $options: 'i' } },
+        { source: { $regex: escapeRegex(query.search), $options: 'i' } },
       ];
     }
     return this.guidelineModel.find(filter).sort({ createdAt: -1 }).exec();

@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { Patient, PatientDocument } from './schemas/patient.schema';
 import { CreatePatientDto } from './dto/create-patient.dto';
+import { escapeRegex } from '../../common/utils/escape-regex';
 
 @Injectable()
 export class PatientsService {
@@ -22,9 +23,9 @@ export class PatientsService {
 
     if (query.search) {
       filter.$or = [
-        { name: { $regex: query.search, $options: 'i' } },
-        { uhid: { $regex: query.search, $options: 'i' } },
-        { phone: { $regex: query.search, $options: 'i' } },
+        { name: { $regex: escapeRegex(query.search), $options: 'i' } },
+        { uhid: { $regex: escapeRegex(query.search), $options: 'i' } },
+        { phone: { $regex: escapeRegex(query.search), $options: 'i' } },
       ];
     }
 
@@ -40,8 +41,8 @@ export class PatientsService {
       filter.department = query.department;
     }
 
-    const limit = query.limit || 50;
-    const skip = query.skip || 0;
+    const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 500); // capped: one request cannot dump the collection
+    const skip = Math.max(Number(query.skip) || 0, 0);
 
     const [patients, total] = await Promise.all([
       this.patientModel.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limit).exec(),

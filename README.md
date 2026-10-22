@@ -9,7 +9,8 @@ Enterprise Clinical AI Workstation & Hospital SaaS REST API built with **NestJS*
 - **Framework**: [NestJS](https://nestjs.com/) v11
 - **Runtime**: Node.js v24+
 - **Database**: MongoDB with [Mongoose](https://mongoosejs.com/) v8
-- **Authentication**: JWT (`@nestjs/jwt`, `passport-jwt`, `bcryptjs`)
+- **Authentication**: short-lived JWT access tokens (`@nestjs/jwt`, `passport-jwt`) + rotating refresh cookie, `bcryptjs`
+- **Hardening**: `helmet`, `@nestjs/throttler` rate limits, role guard, env validation at boot
 - **Documentation**: Swagger OpenAPI (`@nestjs/swagger`) at `/api/docs`
 - **Validation**: `class-validator` & `class-transformer`
 
@@ -30,14 +31,14 @@ hospital-backend/
 │   │   └── configuration.ts    # ConfigService schema (Port, Mongo URI, JWT Secret)
 │   ├── common/
 │   │   ├── decorators/         # @Public(), @CurrentUser()
-│   │   ├── guards/             # JwtAuthGuard
+│   │   ├── guards/             # JwtAuthGuard, RolesGuard, ClientHeaderGuard (CSRF)
 │   │   ├── filters/            # AllExceptionsFilter
 │   │   └── interceptors/       # TransformInterceptor (standard envelope)
 │   ├── database/
 │   │   ├── seed.ts             # Demo hospital seeder (validates through the schemas)
 │   │   └── seed-data/          # Seed fixtures, one JSON file per collection
 │   └── modules/
-│       ├── auth/               # JWT Login, Register, Profile (/api/auth/*)
+│       ├── auth/               # Login, refresh/rotation, sessions, password change, register (/api/auth/*)
 │       ├── users/              # Doctor & Staff accounts
 │       ├── patients/           # Patient CRUD, search, conditions, allergies (/api/patients/*)
 │       ├── appointments/       # Scheduling, live queue, status tracking (/api/appointments/*)
@@ -73,18 +74,28 @@ docker compose up -d mongodb
 
 ### 2. Configure Environment
 
-Copy `.env.example` to `.env` (already created):
+Copy `.env.example` to `.env` and set a real `JWT_SECRET`:
 
-```env
-PORT=4000
-MONGODB_URI=mongodb://localhost:27017/medios_hospital
-JWT_SECRET=medios_clinical_jwt_secret_key_2026_xyz
-JWT_EXPIRATION=7d
-CORS_ORIGIN=*
-TZ=Asia/Kolkata
+```bash
+cp .env.example .env
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # paste as JWT_SECRET
 ```
 
-The default port is 4000 because macOS's AirPlay Receiver holds port 5000. `TZ` decides what "today" means for record dates and the dashboard.
+| Variable | Default | Purpose |
+|---|---|---|
+| `JWT_SECRET` | — (required) | HS256 signing key, 32+ characters. The API refuses to start without one, with a short one, or with the old published demo secret |
+| `JWT_ACCESS_TTL` | `15m` | Access token lifetime |
+| `REFRESH_TOKEN_TTL_DAYS` | `7` | Refresh cookie lifetime; each use rotates it |
+| `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated web origins; `*` is rejected |
+| `COOKIE_SECURE` | `true` in production | `Secure` flag on the refresh cookie (HTTPS only) |
+| `COOKIE_SAMESITE` | `lax` | Use `none` (with `COOKIE_SECURE=true`) when the web app is on another site |
+| `MAX_FAILED_LOGINS` / `LOCKOUT_MINUTES` | `5` / `15` | Account lockout after repeated wrong passwords |
+| `BCRYPT_ROUNDS` | `12` | Password hashing cost |
+| `TRUST_PROXY` | `false` | Set behind a reverse proxy so rate limits see client IPs |
+| `SWAGGER_ENABLED` | off in production | Serve `/api/docs` |
+| `PORT`, `MONGODB_URI`, `TZ` | `4000`, local Mongo, — | `TZ` decides what "today" means for record dates and the dashboard |
+
+The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 
 ### 3. Seed Database with Initial Clinical Data
 
@@ -93,7 +104,7 @@ npm run seed
 ```
 
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
-- Doctor login: **`doctor@medios.ai`** / Password: **`Admin@123`**
+- Logins (password **`Admin@123`** for both): **`doctor@medios.ai`** (doctor) and **`admin@medios.ai`** (admin, can create accounts). Change these before any real use.
 - 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
 - The 26 Sep appointment queue, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
 
@@ -110,34 +121,24 @@ npm run start:dev
 
 ---
 
-## 🔒 Authentication Flow
+## 🔒 Authentication
 
-1. Send `POST /api/auth/login` with email and password:
-   ```json
-   {
-     "email": "doctor@medios.ai",
-     "password": "Admin@123"
-   }
-   ```
-2. Response returns `accessToken`:
-   ```json
-   {
-     "success": true,
-     "statusCode": 200,
-     "data": {
-       "accessToken": "eyJhbGciOi...",
-       "user": {
-         "id": "...",
-         "name": "Dr. Shajin",
-         "role": "doctor"
-       }
-     }
-   }
-   ```
-3. Attach header to subsequent requests:
-   ```http
-   Authorization: Bearer <accessToken>
-   ```
+**Sessions.** `POST /api/auth/login` returns a 15-minute access token and sets an httpOnly refresh cookie (`medios_rt`, path `/api/auth`, `SameSite=Lax`, `Secure` in production):
+
+```json
+{ "success": true, "statusCode": 200,
+  "data": { "accessToken": "eyJhbGciOi...", "expiresIn": 900, "user": { "id": "...", "name": "Dr. Shajin", "role": "doctor" } } }
+```
+
+Send it as `Authorization: Bearer <accessToken>`. When it expires, `POST /api/auth/refresh` (cookie + `X-MediOS-Client` header) returns a new one and rotates the cookie. Browser clients should keep the access token in memory only.
+
+- **Access tokens** are HS256 JWTs with issuer, audience, `jti` and a token version. Other algorithms are rejected. Each request re-checks that the user is still active and that the version matches, so a password change or "sign out everywhere" revokes every outstanding token at once.
+- **Refresh tokens** are random 384-bit values stored only as SHA-256 hashes, one row per device (`refreshtokens`, expired rows removed by a TTL index). Each refresh token is single-use. Presenting a used one again signals theft and revokes that device's whole token family.
+- **CSRF.** Cookie-authenticated endpoints (`refresh`, `logout`) require the `X-MediOS-Client` header, which cross-site forms cannot send and CORS blocks cross-origin scripts from adding.
+- **Passwords** are bcrypt (cost 12) and must be 8–72 characters with upper and lower case, a number and a symbol. Unknown emails take as long as wrong passwords and get the same message.
+- **Brute force.** 5 wrong passwords lock the account for 15 minutes (`429`). Rate limits: sign-in 10/min, refresh 30/min, password change 5/min, everything else 300/min per IP.
+- **Roles** (`doctor`, `nurse`, `pharmacist`, `staff`, `admin`). Only admins create accounts. Only doctors sign documents, report imaging, write prescriptions and SOAP notes. Only admins delete patients. Admins and doctors delete appointments and change settings.
+- **Also:** helmet headers, a strict CORS allow-list, 1 MB body limit, Swagger off in production, internal error messages hidden in production, and search input escaped before it reaches a regex.
 
 ---
 
@@ -157,8 +158,14 @@ npm run start:dev
 
 | Module | Method | Endpoint | Description |
 |---|---|---|---|
-| **Auth** | `POST` | `/api/auth/login` | Doctor/staff login returning JWT |
-| | `POST` | `/api/auth/register` | Register new hospital staff |
+| **Auth** | `POST` | `/api/auth/login` | Sign in: access token + refresh cookie |
+| | `POST` | `/api/auth/refresh` | New access token from the refresh cookie (rotates it) |
+| | `POST` | `/api/auth/logout` | Sign out this device |
+| | `POST` | `/api/auth/logout-all` | Sign out every device, revoke all tokens |
+| | `GET` | `/api/auth/sessions` | Your signed-in devices |
+| | `DELETE` | `/api/auth/sessions/:id` | Sign one device out |
+| | `POST` | `/api/auth/change-password` | Change password; other devices are signed out |
+| | `POST` | `/api/auth/register` | Create a staff account (admin only) |
 | | `GET` | `/api/auth/me` | Current authenticated user profile |
 | **Dashboard** | `GET` | `/api/dashboard/stats?date=` | A day's counts, schedule, patient flow, visit types, critical alerts and recent patients |
 | **Patients** | `GET` | `/api/patients` | Search & filter patients by status, visitType, department |

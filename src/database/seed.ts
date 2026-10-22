@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import { User, UserSchema } from '../modules/users/schemas/user.schema';
+import { RefreshToken, RefreshTokenSchema } from '../modules/auth/schemas/refresh-token.schema';
 import { Patient, PatientSchema } from '../modules/patients/schemas/patient.schema';
 import { Appointment, AppointmentSchema } from '../modules/appointments/schemas/appointment.schema';
 import { Consultation, ConsultationSchema } from '../modules/consultations/schemas/consultation.schema';
@@ -26,8 +27,11 @@ import { HospitalSettings, HospitalSettingsSchema } from '../modules/settings/sc
 // so enums, required fields and timestamps are enforced exactly as in the API.
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital';
+// Demo accounts for local development only; never seed these into a real deployment.
 const DEMO_EMAIL = 'doctor@medios.ai';
+const ADMIN_EMAIL = 'admin@medios.ai';
 const DEMO_PASSWORD = 'Admin@123';
+const BCRYPT_ROUNDS = 12;
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
@@ -56,10 +60,11 @@ async function seed() {
   await mongoose.connect(MONGODB_URI);
 
   const [doctor] = fixture('users');
-  await replace('doctor user', model(User, UserSchema), [
+  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_ROUNDS);
+  await replace('users (doctor, admin)', model(User, UserSchema), [
     {
       email: DEMO_EMAIL,
-      passwordHash: await bcrypt.hash(DEMO_PASSWORD, 10),
+      passwordHash,
       name: doctor.name,
       avatar: doctor.avatar,
       specialty: 'General Physician',
@@ -68,8 +73,21 @@ async function seed() {
       phone: '+91 98765 43210',
       role: 'doctor',
       isActive: true,
+      passwordChangedAt: new Date(),
+    },
+    {
+      // Creates staff accounts (POST /auth/register is admin-only).
+      email: ADMIN_EMAIL,
+      passwordHash,
+      name: 'Hospital Admin',
+      department: 'Administration',
+      role: 'admin',
+      isActive: true,
+      passwordChangedAt: new Date(),
     },
   ]);
+  // Users were recreated, so every stored session is void.
+  await model(RefreshToken, RefreshTokenSchema).deleteMany({});
 
   await replace('patients', model(Patient, PatientSchema), fixture('patients'));
   await replace('appointments', model(Appointment, AppointmentSchema), fixture('appointments'));
@@ -87,7 +105,7 @@ async function seed() {
   await replace('message threads', model(MessageThread, MessageThreadSchema), fixture('messages'));
   await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
 
-  console.log(`🎉 Seeding complete. Sign in as ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
+  console.log(`🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor) or ${ADMIN_EMAIL} (admin), password ${DEMO_PASSWORD}`);
 }
 
 seed()

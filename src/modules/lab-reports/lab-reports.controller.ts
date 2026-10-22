@@ -5,15 +5,12 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { LabReportsService } from './lab-reports.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 
 @ApiTags('Lab Reports')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('lab-reports')
 export class LabReportsController {
   constructor(private readonly labReportsService: LabReportsService) {}

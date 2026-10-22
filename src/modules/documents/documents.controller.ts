@@ -6,16 +6,15 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { DocumentsService } from './documents.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 
 @ApiTags('Clinical Documents')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('documents')
 export class DocumentsController {
   constructor(private readonly documentsService: DocumentsService) {}
@@ -40,6 +39,7 @@ export class DocumentsController {
   }
 
   @Patch(':id/sign')
+  @Roles(UserRole.DOCTOR)
   @ApiOperation({ summary: 'Digitally sign a clinical document as the current user' })
   async signDocument(@Param('id') id: string, @CurrentUser('name') doctorName: string) {
     return this.documentsService.signDocument(id, doctorName);

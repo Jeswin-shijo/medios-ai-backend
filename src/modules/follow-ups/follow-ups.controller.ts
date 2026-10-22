@@ -6,16 +6,13 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { FollowUpsService } from './follow-ups.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Follow-ups & Recalls')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('follow-ups')
 export class FollowUpsController {
   constructor(private readonly followUpsService: FollowUpsService) {}

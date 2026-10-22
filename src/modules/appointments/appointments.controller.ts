@@ -8,16 +8,15 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { AppointmentsService } from './appointments.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { parseIsoDay } from '../../common/utils/clinic-time';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 
 @ApiTags('Appointments')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('appointments')
 export class AppointmentsController {
   constructor(private readonly appointmentsService: AppointmentsService) {}
@@ -72,6 +71,7 @@ export class AppointmentsController {
   }
 
   @Delete(':id')
+  @Roles(UserRole.ADMIN, UserRole.DOCTOR)
   @ApiOperation({ summary: 'Cancel/Delete appointment' })
   async remove(@Param('id') id: string) {
     return this.appointmentsService.remove(id);

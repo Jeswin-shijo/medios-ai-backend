@@ -6,15 +6,12 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { TasksAlertsService } from './tasks-alerts.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 
 @ApiTags('Tasks & Clinical Alerts')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('tasks-alerts')
 export class TasksAlertsController {
   constructor(private readonly tasksService: TasksAlertsService) {}

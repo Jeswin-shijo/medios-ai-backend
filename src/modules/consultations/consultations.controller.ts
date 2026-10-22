@@ -5,16 +5,15 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ConsultationsService } from './consultations.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 
 @ApiTags('Consultations & EMR')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('consultations')
 export class ConsultationsController {
   constructor(private readonly consultationsService: ConsultationsService) {}
@@ -33,6 +32,7 @@ export class ConsultationsController {
   }
 
   @Post('soap')
+  @Roles(UserRole.DOCTOR)
   @ApiOperation({ summary: 'Save a SOAP note (updates the note named by id, else creates one)' })
   async saveSoap(@Body() body: any, @CurrentUser('name') userName: string) {
     return this.consultationsService.saveSoap(body, userName);

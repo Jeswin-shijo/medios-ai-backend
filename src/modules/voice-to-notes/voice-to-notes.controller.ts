@@ -1,11 +1,9 @@
-import { Controller, Post, Get, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { VoiceToNotesService } from './voice-to-notes.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 
 @ApiTags('Voice to Notes (Ambient AI Scribe)')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('voice-to-notes')
 export class VoiceToNotesController {
   constructor(private readonly voiceService: VoiceToNotesService) {}

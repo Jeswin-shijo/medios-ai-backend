@@ -6,16 +6,15 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { PrescriptionsService } from './prescriptions.service';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 
 @ApiTags('Prescriptions')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('prescriptions')
 export class PrescriptionsController {
   constructor(private readonly prescriptionsService: PrescriptionsService) {}
@@ -34,12 +33,14 @@ export class PrescriptionsController {
   }
 
   @Post()
+  @Roles(UserRole.DOCTOR)
   @ApiOperation({ summary: 'Create new prescription' })
   async create(@Body() body: any, @CurrentUser('name') userName: string) {
     return this.prescriptionsService.create({ ...body, doctor: body.doctor || userName });
   }
 
   @Put(':id')
+  @Roles(UserRole.DOCTOR)
   @ApiOperation({ summary: 'Update prescription' })
   async update(@Param('id') id: string, @Body() updates: any) {
     return this.prescriptionsService.update(id, updates);
