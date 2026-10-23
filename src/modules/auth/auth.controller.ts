@@ -7,6 +7,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -18,7 +19,9 @@ const MINUTE = 60_000;
 
 // Sessions: a short-lived access token (Authorization: Bearer) plus a rotating
 // refresh token in an httpOnly cookie scoped to /api/auth, so page scripts can
-// never read it.
+// never read it. Native apps have no cookie jar to rely on, so they receive the
+// refresh token in the response body and send it back in the body instead (see
+// isNativeClient).
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
@@ -36,9 +39,7 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiResponse({ status: 429, description: 'Too many attempts or account temporarily locked' })
   async login(@Body() loginDto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const { refreshToken, refreshExpiresAt, ...session } = await this.authService.login(loginDto, this.meta(req));
-    this.setRefreshCookie(res, refreshToken, refreshExpiresAt);
-    return session;
+    return this.respond(req, res, await this.authService.login(loginDto, this.meta(req)));
   }
 
   @Public()
@@ -48,11 +49,9 @@ export class AuthController {
   @Throttle({ default: { limit: 30, ttl: MINUTE } })
   @ApiHeader({ name: CLIENT_HEADER, required: true })
   @ApiOperation({ summary: 'Exchange the refresh cookie for a new access token (rotates the cookie)' })
-  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+  async refresh(@Body() body: RefreshTokenDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     try {
-      const { refreshToken, refreshExpiresAt, ...session } = await this.authService.refresh(this.refreshCookie(req), this.meta(req));
-      this.setRefreshCookie(res, refreshToken, refreshExpiresAt);
-      return session;
+      return this.respond(req, res, await this.authService.refresh(this.presentedRefreshToken(req, body), this.meta(req)));
     } catch (err) {
       this.clearRefreshCookie(res);
       throw err;
@@ -65,8 +64,8 @@ export class AuthController {
   @UseGuards(ClientHeaderGuard)
   @ApiHeader({ name: CLIENT_HEADER, required: true })
   @ApiOperation({ summary: 'Sign out this device' })
-  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    await this.authService.logout(this.refreshCookie(req));
+  async logout(@Body() body: RefreshTokenDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    await this.authService.logout(this.presentedRefreshToken(req, body));
     this.clearRefreshCookie(res);
   }
 
@@ -105,9 +104,7 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { refreshToken, refreshExpiresAt, ...session } = await this.authService.changePassword(String(user._id), dto, this.meta(req));
-    this.setRefreshCookie(res, refreshToken, refreshExpiresAt);
-    return session;
+    return this.respond(req, res, await this.authService.changePassword(String(user._id), dto, this.meta(req)));
   }
 
   @Post('register')
@@ -126,6 +123,30 @@ export class AuthController {
   @ApiOperation({ summary: 'Get the signed-in user' })
   async getProfile(@CurrentUser() user: any) {
     return user;
+  }
+
+  /**
+   * A native app: it says so in the client header and sends no Origin. Browsers
+   * always send Origin on POST, so a page script can never take this path and
+   * read a refresh token that is meant to stay in the httpOnly cookie.
+   */
+  private isNativeClient(req: Request) {
+    return req.headers[CLIENT_HEADER] === 'mobile' && !req.headers.origin;
+  }
+
+  /** Browsers get the refresh token as a cookie; native apps get it in the body. */
+  private respond(
+    req: Request,
+    res: Response,
+    { refreshToken, refreshExpiresAt, ...session }: { refreshToken: string; refreshExpiresAt: Date } & Record<string, unknown>,
+  ) {
+    if (this.isNativeClient(req)) return { ...session, refreshToken, refreshExpiresAt };
+    this.setRefreshCookie(res, refreshToken, refreshExpiresAt);
+    return session;
+  }
+
+  private presentedRefreshToken(req: Request, body: RefreshTokenDto): string | undefined {
+    return this.isNativeClient(req) ? body?.refreshToken : this.refreshCookie(req);
   }
 
   private meta(req: Request): ClientMeta {

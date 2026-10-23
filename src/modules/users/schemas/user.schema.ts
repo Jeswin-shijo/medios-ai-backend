@@ -9,6 +9,7 @@ export enum UserRole {
   STAFF = 'staff',
   NURSE = 'nurse',
   PHARMACIST = 'pharmacist',
+  LAB = 'lab',
 }
 
 @Schema({ timestamps: true })

@@ -22,6 +22,8 @@ export class ClinicalDocument {
       'Lab / Diagnostic',
       'Medical Certificate',
       'Prescription / Bill',
+      'Imaging Report',
+      'ID Proof',
     ],
   })
   category: string;

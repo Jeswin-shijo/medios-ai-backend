@@ -32,6 +32,12 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios
 const DEMO_EMAIL = 'doctor@medios.ai';
 const ADMIN_EMAIL = 'admin@medios.ai';
 const DEMO_PASSWORD = 'Admin@123';
+const STAFF_ACCOUNTS = [
+  { email: 'nurse@medios.ai', name: 'Nurse Anjali Thomas', department: 'Nursing', role: 'nurse' },
+  { email: 'pharmacy@medios.ai', name: 'Neethu George', department: 'Pharmacy', role: 'pharmacist' },
+  { email: 'lab@medios.ai', name: 'Vishnu Prasad', department: 'Laboratory', role: 'lab' },
+  { email: 'frontdesk@medios.ai', name: 'Front Desk', department: 'Reception', role: 'staff' },
+];
 const BCRYPT_ROUNDS = 12;
 
 const fixture = (name: string) =>
@@ -62,7 +68,7 @@ async function seed() {
 
   const [doctor] = fixture('users');
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_ROUNDS);
-  await replace('users (doctor, admin)', model(User, UserSchema), [
+  await replace('users (doctor, admin, nurse, pharmacy, lab, front desk)', model(User, UserSchema), [
     {
       email: DEMO_EMAIL,
       passwordHash,
@@ -86,6 +92,8 @@ async function seed() {
       isActive: true,
       passwordChangedAt: new Date(),
     },
+    // One account per remaining role, so role-specific screens can be tried.
+    ...STAFF_ACCOUNTS.map((a) => ({ ...a, passwordHash, isActive: true, passwordChangedAt: new Date() })),
   ]);
   // Users were recreated, so every stored session is void.
   await model(RefreshToken, RefreshTokenSchema).deleteMany({});
@@ -108,7 +116,9 @@ async function seed() {
   // The call log refers to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
 
-  console.log(`🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor) or ${ADMIN_EMAIL} (admin), password ${DEMO_PASSWORD}`);
+  console.log(
+    `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,
+  );
 }
 
 seed()

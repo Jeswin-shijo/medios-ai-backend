@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsNumber, IsOptional, IsString, IsArray } from 'class-validator';
+import { IsArray, IsEmail, IsNotEmpty, IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreatePatientDto {
@@ -26,6 +26,30 @@ export class CreatePatientDto {
   @IsNotEmpty()
   @IsString()
   phone: string;
+
+  @ApiPropertyOptional({ example: '12 Mar 1991' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  dob?: string;
+
+  @ApiPropertyOptional({ example: '12, MG Road, Nagercoil' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  address?: string;
+
+  @ApiPropertyOptional({ example: 'arun@example.com' })
+  @IsOptional()
+  @IsEmail()
+  @MaxLength(254)
+  email?: string;
+
+  @ApiPropertyOptional({ example: 'Priya Kumar (wife) +91 98765 11111' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  emergencyContact?: string;
 
   @ApiPropertyOptional({ example: 'B+' })
   @IsOptional()

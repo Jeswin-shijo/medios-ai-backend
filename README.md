@@ -109,7 +109,7 @@ npm run seed
 ```
 
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
-- Logins (password **`Admin@123`** for both): **`doctor@medios.ai`** (doctor) and **`admin@medios.ai`** (admin, can create accounts). Change these before any real use.
+- Logins, all with password **`Admin@123`**: **`doctor@medios.ai`** (doctor), **`admin@medios.ai`** (admin, can create accounts), **`nurse@`**, **`frontdesk@`** (staff), **`pharmacy@`** (pharmacist) and **`lab@medios.ai`** (lab). Change these before any real use.
 - 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
 - The 26 Sep appointment queue plus six unconfirmed or confirmed appointments on 27–28 Sep for the AI call agent, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
 
@@ -137,12 +137,14 @@ npm run start:dev
 
 Send it as `Authorization: Bearer <accessToken>`. When it expires, `POST /api/auth/refresh` (cookie + `X-MediOS-Client` header) returns a new one and rotates the cookie. Browser clients should keep the access token in memory only.
 
+**Native apps** (the CareSync mobile app) have no cookie jar to rely on. A request with `X-MediOS-Client: mobile` and no `Origin` header (browsers always send one on POST) gets `refreshToken` in the response body of `login`, `refresh` and `change-password`, and sends it back as `{ "refreshToken": "…" }` to `refresh` and `logout`. The app keeps it in the device's secure storage.
+
 - **Access tokens** are HS256 JWTs with issuer, audience, `jti` and a token version. Other algorithms are rejected. Each request re-checks that the user is still active and that the version matches, so a password change or "sign out everywhere" revokes every outstanding token at once.
 - **Refresh tokens** are random 384-bit values stored only as SHA-256 hashes, one row per device (`refreshtokens`, expired rows removed by a TTL index). Each refresh token is single-use. Presenting a used one again signals theft and revokes that device's whole token family.
 - **CSRF.** Cookie-authenticated endpoints (`refresh`, `logout`) require the `X-MediOS-Client` header, which cross-site forms cannot send and CORS blocks cross-origin scripts from adding.
 - **Passwords** are bcrypt (cost 12) and must be 8–72 characters with upper and lower case, a number and a symbol. Unknown emails take as long as wrong passwords and get the same message.
 - **Brute force.** 5 wrong passwords lock the account for 15 minutes (`429`). Rate limits: sign-in 10/min, refresh 30/min, password change 5/min, everything else 300/min per IP.
-- **Roles** (`doctor`, `nurse`, `pharmacist`, `staff`, `admin`). Only admins create accounts. Only doctors sign documents, report imaging, write prescriptions and SOAP notes. Only admins delete patients. Admins and doctors delete appointments and change settings.
+- **Roles** (`doctor`, `nurse`, `pharmacist`, `lab`, `staff`, `admin`). Only admins create accounts. Only doctors sign documents, report imaging, write prescriptions and SOAP notes. Only admins delete patients. Admins and doctors delete appointments and change settings.
 - **Also:** helmet headers, a strict CORS allow-list, 1 MB body limit, Swagger off in production, internal error messages hidden in production, and search input escaped before it reaches a regex.
 
 ---

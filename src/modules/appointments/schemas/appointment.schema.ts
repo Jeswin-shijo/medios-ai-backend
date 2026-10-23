@@ -39,7 +39,7 @@ export class Appointment {
 
   @Prop({
     default: 'Scheduled',
-    enum: ['Checked In', 'Waiting', 'In Consultation', 'Scheduled', 'Completed', 'Canceled'],
+    enum: ['Checked In', 'Waiting', 'In Consultation', 'Scheduled', 'Completed', 'Canceled', 'No Show'],
   })
   status: string;
 

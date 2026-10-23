@@ -83,6 +83,19 @@ export class Patient {
   @Prop({ required: true })
   phone: string;
 
+  /** "12 Mar 1991"; optional because older records only have an age. */
+  @Prop()
+  dob?: string;
+
+  @Prop()
+  address?: string;
+
+  @Prop()
+  email?: string;
+
+  @Prop()
+  emergencyContact?: string;
+
   @Prop({ default: '' })
   avatar: string;
 
