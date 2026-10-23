@@ -121,6 +121,14 @@ export class Patient {
 
   @Prop({ type: AiSummary })
   aiSummary?: AiSummary;
+
+  // Set when the patient asks not to be called or the number is wrong; the AI call
+  // agent never dials a patient with this flag. Staff clear it once fixed.
+  @Prop({ default: false })
+  doNotCall: boolean;
+
+  @Prop({ default: '' })
+  doNotCallReason: string;
 }
 
 export const PatientSchema = SchemaFactory.createForClass(Patient);

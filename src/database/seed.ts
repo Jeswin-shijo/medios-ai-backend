@@ -20,6 +20,7 @@ import { VitalsRecord, VitalsRecordSchema } from '../modules/vitals/schemas/vita
 import { TaskAlertItem, TaskAlertItemSchema } from '../modules/tasks-alerts/schemas/task-alert.schema';
 import { MessageThread, MessageThreadSchema } from '../modules/messages/schemas/message.schema';
 import { HospitalSettings, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
+import { AgentCall, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -104,6 +105,8 @@ async function seed() {
   await replace('tasks and alerts', model(TaskAlertItem, TaskAlertItemSchema), fixture('tasks-alerts'));
   await replace('message threads', model(MessageThread, MessageThreadSchema), fixture('messages'));
   await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
+  // The call log refers to the appointments just replaced.
+  await model(AgentCall, AgentCallSchema).deleteMany({});
 
   console.log(`🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor) or ${ADMIN_EMAIL} (admin), password ${DEMO_PASSWORD}`);
 }

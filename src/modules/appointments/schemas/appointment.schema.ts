@@ -3,6 +3,8 @@ import { Document } from 'mongoose';
 
 export type AppointmentDocument = Appointment & Document;
 
+export const APPOINTMENT_CONFIRMATIONS = ['Unconfirmed', 'Confirmed', 'Reschedule Requested', 'Cancelled by Patient', 'Unreachable'];
+
 @Schema({ timestamps: true })
 export class Appointment {
   @Prop({ required: true, index: true })
@@ -52,6 +54,17 @@ export class Appointment {
 
   @Prop({ type: [String], default: [] })
   tags: string[];
+
+  // Whether the patient has said they will come; set by the AI call agent or the front desk.
+  @Prop({ default: 'Unconfirmed', enum: APPOINTMENT_CONFIRMATIONS })
+  confirmation: string;
+
+  @Prop()
+  confirmedAt?: Date;
+
+  /** How the slot was booked: '' (front desk) or 'AI call'. */
+  @Prop({ default: '' })
+  bookedVia: string;
 }
 
 export const AppointmentSchema = SchemaFactory.createForClass(Appointment);

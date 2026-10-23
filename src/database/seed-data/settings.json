@@ -53,5 +53,19 @@
     "enableSoundAlerts": true,
     "showTipsAndGuides": true,
     "compactMode": false
+  },
+  "callAgent": {
+    "autoConfirm": false,
+    "confirmHoursBefore": 24,
+    "callingHoursStart": "09:00",
+    "callingHoursEnd": "20:00",
+    "maxAttempts": 3,
+    "retryMinutes": 30,
+    "agentName": "Asha",
+    "language": "English",
+    "clinicSessions": "09:00-13:00, 14:00-17:00",
+    "slotMinutes": 30,
+    "closedDays": [],
+    "simulatedResponse": "random"
   }
 }

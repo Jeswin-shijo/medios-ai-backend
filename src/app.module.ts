@@ -32,6 +32,7 @@ import { KnowledgeModule } from './modules/knowledge/knowledge.module';
 import { VoiceToNotesModule } from './modules/voice-to-notes/voice-to-notes.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { CallsModule } from './modules/calls/calls.module';
 
 @Module({
   imports: [
@@ -73,6 +74,7 @@ import { SettingsModule } from './modules/settings/settings.module';
     VoiceToNotesModule,
     DashboardModule,
     SettingsModule,
+    CallsModule,
   ],
   // Guards run in this order: rate limit, then authentication, then role checks.
   providers: [

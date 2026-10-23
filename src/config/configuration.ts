@@ -1,6 +1,11 @@
 const nodeEnv = process.env.NODE_ENV || 'development';
 const isProduction = nodeEnv === 'production';
 
+const int = (value: string | undefined, fallback: number) => {
+  const n = parseInt(value ?? '', 10);
+  return Number.isNaN(n) ? fallback : n;
+};
+
 const list = (value: string | undefined, fallback: string) =>
   (value || fallback)
     .split(',')
@@ -38,6 +43,22 @@ export default () => ({
   },
   cors: {
     origins: list(process.env.CORS_ORIGIN, 'http://localhost:5173'),
+  },
+  callAgent: {
+    // Who runs the voice conversation: 'snapserve' (real calls), 'simulated'
+    // (development only: no phone rings) or 'none'.
+    provider: (process.env.CALL_PROVIDER || (isProduction ? 'none' : 'simulated')).toLowerCase(),
+    // Appended as ?token= to the post-call webhook URL given to the provider.
+    webhookSecret: process.env.CALL_WEBHOOK_SECRET || '',
+    // 0 turns the scheduler (automatic confirmations, retries, callbacks) off.
+    schedulerIntervalSeconds: int(process.env.CALL_SCHEDULER_INTERVAL_SECONDS, 60),
+    simulatedDelayMs: int(process.env.CALL_SIMULATED_DELAY_MS, 4000),
+    snapserve: {
+      baseUrl: process.env.SNAPSERVE_API_URL || 'https://app.snapserve.ai/api',
+      apiKey: process.env.SNAPSERVE_API_KEY || '',
+      confirmationAgentId: process.env.SNAPSERVE_CONFIRMATION_AGENT_ID || '',
+      bookingAgentId: process.env.SNAPSERVE_BOOKING_AGENT_ID || '',
+    },
   },
   swagger: {
     enabled: process.env.SWAGGER_ENABLED ? process.env.SWAGGER_ENABLED === 'true' : !isProduction,

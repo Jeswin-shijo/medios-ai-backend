@@ -30,6 +30,26 @@ export function validateEnv(config: Record<string, unknown>) {
     errors.push('COOKIE_SAMESITE=none requires secure cookies (COOKIE_SECURE=true).');
   }
 
+  const production = (config.NODE_ENV ?? 'development') === 'production';
+  const provider = String(config.CALL_PROVIDER ?? (production ? 'none' : 'simulated')).toLowerCase();
+  if (!['none', 'simulated', 'snapserve'].includes(provider)) {
+    errors.push('CALL_PROVIDER must be none, simulated or snapserve.');
+  }
+  if (provider === 'simulated' && production) {
+    errors.push('CALL_PROVIDER=simulated invents call outcomes (it would mark appointments confirmed without calling anyone). Use it in development only.');
+  }
+  if (provider === 'snapserve') {
+    for (const name of ['SNAPSERVE_API_KEY', 'SNAPSERVE_CONFIRMATION_AGENT_ID', 'SNAPSERVE_BOOKING_AGENT_ID']) {
+      if (!config[name]) errors.push(`${name} is required when CALL_PROVIDER=snapserve.`);
+    }
+    if (String(config.CALL_WEBHOOK_SECRET ?? '').length < 24) {
+      errors.push('CALL_WEBHOOK_SECRET (24+ random characters) is required when CALL_PROVIDER=snapserve; it authenticates the post-call webhook.');
+    }
+  }
+  if (config.CLINIC_DATE !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(config.CLINIC_DATE))) {
+    errors.push('CLINIC_DATE must be YYYY-MM-DD.');
+  }
+
   if (errors.length) {
     throw new Error(`Invalid environment configuration:\n- ${errors.join('\n- ')}`);
   }

@@ -94,6 +94,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `TRUST_PROXY` | `false` | Set behind a reverse proxy so rate limits see client IPs |
 | `SWAGGER_ENABLED` | off in production | Serve `/api/docs` |
 | `PORT`, `MONGODB_URI`, `TZ` | `4000`, local Mongo, — | `TZ` decides what "today" means for record dates and the dashboard |
+| `CLINIC_DATE` | unset | Development only: pins "today" to the seeded demo day (`2026-09-26`), like the web app's `VITE_CLINIC_DATE` |
+| `CALL_PROVIDER` | `simulated` (dev), `none` (production) | AI call agent voice provider: `snapserve`, `simulated` (dev only, no phone rings) or `none` |
+| `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID`, `SNAPSERVE_BOOKING_AGENT_ID` | — | Required with `CALL_PROVIDER=snapserve` |
+| `CALL_WEBHOOK_SECRET` | — | Required with `snapserve` (24+ characters); authenticates the post-call webhook |
+| `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 
@@ -106,7 +111,7 @@ npm run seed
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
 - Logins (password **`Admin@123`** for both): **`doctor@medios.ai`** (doctor) and **`admin@medios.ai`** (admin, can create accounts). Change these before any real use.
 - 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
-- The 26 Sep appointment queue, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
+- The 26 Sep appointment queue plus six unconfirmed or confirmed appointments on 27–28 Sep for the AI call agent, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
 
 Records are inserted through the Mongoose schemas, so a fixture that breaks an enum or required field fails the seed.
 
@@ -139,6 +144,56 @@ Send it as `Authorization: Bearer <accessToken>`. When it expires, `POST /api/au
 - **Brute force.** 5 wrong passwords lock the account for 15 minutes (`429`). Rate limits: sign-in 10/min, refresh 30/min, password change 5/min, everything else 300/min per IP.
 - **Roles** (`doctor`, `nurse`, `pharmacist`, `staff`, `admin`). Only admins create accounts. Only doctors sign documents, report imaging, write prescriptions and SOAP notes. Only admins delete patients. Admins and doctors delete appointments and change settings.
 - **Also:** helmet headers, a strict CORS allow-list, 1 MB body limit, Swagger off in production, internal error messages hidden in production, and search input escaped before it reaches a regex.
+
+---
+
+## 📞 AI Call Agent
+
+An AI voice agent phones patients for two jobs:
+
+- **Confirmation:** "Will you be able to come on Sunday, 27 September at 10 AM?" The patient confirms, picks one of two alternative slots, or cancels. The appointment is updated to match.
+- **Booking:** offers two free slots (on different days when possible) for a stated reason. If the patient picks one, the appointment is created and marked confirmed, and a linked follow-up is updated.
+
+**How a call works**
+1. A person (or the scheduler) asks for a call. The API checks the patient can be called (valid number, not do-not-call), fills the agent's script variables and records the call (`agentcalls` collection).
+2. Inside calling hours (09:00–20:00 by default) it is placed at once; outside them it waits for the next window. One appointment never has two live calls (unique index).
+3. The voice provider runs the conversation and reports the outcome and data fields (`chosen_slot`, `callback_time`, `notes`), summary and transcript.
+4. The API applies the outcome once (duplicate webhooks are ignored) and records what it did:
+
+| Outcome | What happens |
+|---|---|
+| Confirmed | Appointment marked `Confirmed` |
+| Reschedule + chosen slot | Appointment moved to that slot (if still free) and confirmed |
+| Reschedule, no slot / slot taken | `Reschedule Requested`; front-desk task created |
+| Cancelled | Appointment `Canceled` (`Cancelled by Patient`); slot freed |
+| Booked + chosen slot | Appointment created (`bookedVia: 'AI call'`, confirmed) |
+| Call back later | A new booking call scheduled at the requested time |
+| No answer / busy | Retry after 30, then 60 minutes (max 3 attempts, never within 2 h of the appointment); then `Unreachable` and a task |
+| Wrong number / do not call | Patient flagged `doNotCall`; never called again until staff allow it |
+| Needs staff (symptoms, asks for a person) | High-priority critical alert to call back |
+| Anything unrecognised | Low-priority task to review the transcript; nothing changed |
+
+**Scheduler.** With `autoConfirm` on (AI Call Agent → Automation), every unconfirmed appointment gets one call `confirmHoursBefore` (default 24) hours ahead. The scheduler also places due retries and callbacks, and gives up on calls whose result never arrived (30 minutes). Calls are claimed atomically, so several API instances can run it.
+
+**Safety rules in the scripts** (`src/modules/calls/agent-scripts.ts`; served at `GET /api/calls/scripts`):
+- the agent says it is an AI;
+- it gives no medical advice, results, dosing or fees;
+- symptoms or emergencies mean "call 108 / go to emergency" plus a staff alert;
+- it discusses the appointment only with the patient, or a parent or guardian for under-18s;
+- "stop" means it never calls again.
+
+**Providers** (`CALL_PROVIDER`):
+- `simulated` (development default): no phone rings. Outcomes come with a scripted transcript after a few seconds; choose the pretend patient's answer in the AI Call Agent screen. The API refuses to start with it in production.
+- `snapserve`: real calls through [SnapServe AI](https://app.snapserve.ai) and the carrier attached to its agents (e.g. Vobiz). Steps:
+  1. Create two agents from the scripts (the same variables, outcome labels and data fields).
+  2. Set `SNAPSERVE_*` and `CALL_WEBHOOK_SECRET`.
+  3. Give each agent the post-call notify URL `https://<api-host>/api/calls/webhook/snapserve?token=<CALL_WEBHOOK_SECRET>`.
+  4. Make one test call and compare its webhook payload with `parseSnapServeResult`.
+
+  The API never retries a failed start request on its own, because the call may have gone out anyway.
+- `none` (production default): call endpoints answer 503.
+
+Before using real calls, get patients' consent to automated calls and follow TRAI calling-hours and DND rules. Transcripts are health data: restrict who can read them.
 
 ---
 
@@ -214,5 +269,17 @@ Send it as `Authorization: Bearer <accessToken>`. When it expires, `POST /api/au
 | | `POST` | `/api/knowledge/ask-ai` | AI Q&A cited against guidelines |
 | **Voice Ambient**| `POST` | `/api/voice-to-notes/transcribe` | Diarized speech-to-text transcript |
 | | `POST` | `/api/voice-to-notes/generate-soap` | Convert speech transcript into structured SOAP |
+| **AI Call Agent** | `GET` | `/api/calls` | Call log (filters: purpose, status, outcome, uhid, appointmentId) |
+| | `GET` | `/api/calls/:id` | One call with transcript |
+| | `GET` | `/api/calls/stats` | Today's call counts, unconfirmed and needs-attention appointments |
+| | `GET` | `/api/calls/config` | Active provider and effective agent settings |
+| | `GET` | `/api/calls/scripts` | Agent scripts, outcomes and data fields |
+| | `GET` | `/api/calls/slots?from=` | Free slots the booking agent would offer |
+| | `POST` | `/api/calls/confirmation` | Confirmation call for a scheduled appointment |
+| | `POST` | `/api/calls/booking` | Booking call for a patient (optional follow-up link) |
+| | `POST` | `/api/calls/:id/cancel` | Withdraw a call not yet placed |
+| | `POST` | `/api/calls/run-due` | Run the scheduler now (admin, doctor) |
+| | `DELETE` | `/api/calls/do-not-call/:uhid` | Allow calls to a patient again (admin, doctor) |
+| | `POST` | `/api/calls/webhook/snapserve?token=` | Provider post-call webhook (no user token) |
 | **Settings** | `GET` | `/api/settings` | Hospital profile, staff, and AI settings |
 | | `PUT` | `/api/settings` | Update settings and preferences |

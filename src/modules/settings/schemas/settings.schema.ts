@@ -24,6 +24,10 @@ export class HospitalSettings {
 
   @Prop({ type: Object, default: {} })
   preferences: any;
+
+  /** AI call agent: automation, calling hours, bookable sessions (see calls/call-agent-settings.ts). */
+  @Prop({ type: Object, default: {} })
+  callAgent: any;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

@@ -39,3 +39,33 @@ export function clockMinutes(time: string): number {
   const hours = (Number(m[1]) % 12) + (m[3].toUpperCase() === 'PM' ? 12 : 0);
   return hours * 60 + Number(m[2]);
 }
+
+/**
+ * The current moment on the clinic's day. Development pins CLINIC_DATE to the seed's
+ * day (like the web app's VITE_CLINIC_DATE) so "today" and "tomorrow" line up with
+ * the demo schedule; the time of day is always real. Unset, this is plain `new Date()`.
+ */
+export function clinicNow(): Date {
+  const now = new Date();
+  const pinned = ISO_DAY.exec(process.env.CLINIC_DATE ?? '');
+  if (pinned) now.setFullYear(Number(pinned[1]), Number(pinned[2]) - 1, Number(pinned[3]));
+  return now;
+}
+
+/** The local moment an appointment starts: "2026-09-27" + "10:30 AM". */
+export function appointmentStart(date: string, time: string): Date {
+  const day = parseIsoDay(date);
+  const minutes = clockMinutes(time);
+  day.setMinutes(minutes === Number.MAX_SAFE_INTEGER ? 0 : minutes);
+  return day;
+}
+
+/** "10:30 AM" from minutes since midnight. */
+export const clockLabel = (minutes: number) =>
+  `${pad(Math.floor(minutes / 60) % 12 || 12)}:${pad(minutes % 60)} ${minutes < 12 * 60 ? 'AM' : 'PM'}`;
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** "Sunday, 27 September": how a voice agent should say a date. */
+export const spokenDay = (d: Date) => `${WEEKDAYS[d.getDay()]}, ${d.getDate()} ${MONTHS_LONG[d.getMonth()]}`;
