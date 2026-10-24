@@ -12,7 +12,9 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
-    "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts"
+    "preseed": "node scripts/seed-guard.js",
+    "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
+    "create-user": "ts-node -r tsconfig-paths/register src/database/create-user.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

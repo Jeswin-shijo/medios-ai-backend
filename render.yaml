@@ -1,0 +1,47 @@
+# Render Blueprint for the MediOS API (Render dashboard: New > Blueprint > this repo).
+# Settings marked `sync: false` are asked for when the Blueprint is created; see DEPLOY.md.
+services:
+  - type: web
+    name: medios-api
+    runtime: node
+    # Closest Render region to India. The database (MongoDB Atlas) should be in a nearby region too.
+    region: singapore
+    # Always on: the call scheduler, live queue updates and SnapServe webhooks need a server that never sleeps.
+    plan: starter
+    branch: main
+    # Dev dependencies hold the Nest CLI and TypeScript, which the build needs even with NODE_ENV=production.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node dist/main
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TZ
+        value: Asia/Kolkata
+      # Render's proxy sits in front of the app; rate limits must see each client's own IP.
+      - key: TRUST_PROXY
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      # mongodb+srv://USER:PASSWORD@CLUSTER.mongodb.net/medios_hospital?retryWrites=true&w=majority
+      - key: MONGODB_URI
+        sync: false
+      # The web app's address, e.g. https://medios.vercel.app (comma-separate several).
+      - key: CORS_ORIGIN
+        sync: false
+      # "none" while the web app and API are on different sites (*.vercel.app and *.onrender.com).
+      # Switch to "lax" once both share one domain (app.example.com + api.example.com).
+      - key: COOKIE_SAMESITE
+        value: none
+      # AI call agent: starts off. Set to "snapserve" once the four values below are filled in.
+      - key: CALL_PROVIDER
+        value: none
+      - key: SNAPSERVE_API_KEY
+        sync: false
+      - key: SNAPSERVE_CONFIRMATION_AGENT_ID
+        sync: false
+      - key: SNAPSERVE_BOOKING_AGENT_ID
+        sync: false
+      # 24+ characters, letters and digits only (it travels in the webhook URL): openssl rand -hex 24
+      - key: CALL_WEBHOOK_SECRET
+        sync: false
