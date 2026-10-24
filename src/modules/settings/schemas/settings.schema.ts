@@ -28,6 +28,10 @@ export class HospitalSettings {
   /** AI call agent: automation, calling hours, bookable sessions (see calls/call-agent-settings.ts). */
   @Prop({ type: Object, default: {} })
   callAgent: any;
+
+  /** Token queue: rooms, token prefix, what the waiting-room display shows (see queue/queue-settings.ts). */
+  @Prop({ type: Object, default: {} })
+  queue: any;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

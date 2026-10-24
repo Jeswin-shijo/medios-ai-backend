@@ -4,12 +4,14 @@ import { Model } from 'mongoose';
 import { Appointment, AppointmentDocument } from './schemas/appointment.schema';
 import { clockMinutes, isoDate } from '../../common/utils/clinic-time';
 import { escapeRegex } from '../../common/utils/escape-regex';
+import { AppointmentEvents } from './appointment-events';
 
 @Injectable()
 export class AppointmentsService {
   constructor(
     @InjectModel(Appointment.name)
     private appointmentModel: Model<AppointmentDocument>,
+    private readonly events: AppointmentEvents,
   ) {}
 
   async findAll(query: {
@@ -79,7 +81,9 @@ export class AppointmentsService {
       const now = new Date();
       appointment.checkedInTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
-    return appointment.save();
+    const saved = await appointment.save();
+    this.events.statusChanged({ id: String(saved._id), status });
+    return saved;
   }
 
   async update(id: string, updates: Partial<Appointment>): Promise<AppointmentDocument> {

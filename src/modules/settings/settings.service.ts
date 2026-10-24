@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 import { DEFAULT_CALL_AGENT_SETTINGS } from '../calls/call-agent-settings';
+import { DEFAULT_QUEUE_SETTINGS } from '../queue/queue-settings';
 
 // Used only until settings are first saved (the seed stores the demo hospital's).
 // Identity fields start blank; toggles start at conservative values, and nothing
@@ -64,6 +65,7 @@ const DEFAULT_SETTINGS = {
     compactMode: false,
   },
   callAgent: DEFAULT_CALL_AGENT_SETTINGS,
+  queue: DEFAULT_QUEUE_SETTINGS,
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];

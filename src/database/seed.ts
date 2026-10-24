@@ -21,6 +21,10 @@ import { TaskAlertItem, TaskAlertItemSchema } from '../modules/tasks-alerts/sche
 import { MessageThread, MessageThreadSchema } from '../modules/messages/schemas/message.schema';
 import { HospitalSettings, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 import { AgentCall, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
+import { QueueToken, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
+import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
+import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
+import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -39,6 +43,8 @@ const STAFF_ACCOUNTS = [
   { email: 'frontdesk@medios.ai', name: 'Front Desk', department: 'Reception', role: 'staff' },
 ];
 const BCRYPT_ROUNDS = 12;
+/** The clinic day the fixtures describe (CLINIC_DATE in development). */
+const DEMO_DAY = '2026-09-26';
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
@@ -60,6 +66,66 @@ async function replace(label: string, target: Model<any>, records: any[]) {
   });
   await target.insertMany(stamped);
   console.log(`✅ ${records.length} ${label}`);
+}
+
+const MINUTE = 60_000;
+const DEMO_CARDS = [
+  { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
+  { cardId: '0004567890', uhid: 'MHK202500325' }, // David Raj
+  { cardId: '04C8D9E0F1A2B3', uhid: 'MHK202500326' }, // Selvi A
+];
+
+/**
+ * The demo day's token queue, in step with its appointments: everyone who has
+ * arrived holds a token, numbered in the order they came. Display links are kept.
+ */
+async function seedQueue() {
+  const tokens = model(QueueToken, QueueTokenSchema);
+  await tokens.deleteMany({});
+  await model(QueueSequence, QueueSequenceSchema).deleteMany({});
+
+  const arrived = await model(Appointment, AppointmentSchema)
+    .find({ date: DEMO_DAY, status: { $in: ['Completed', 'In Consultation', 'Checked In', 'Waiting'] } })
+    .lean<any[]>();
+  // Arrival: the recorded check-in time, else ten minutes before the slot. Timestamps
+  // use the real date (as new tokens will), so waiting times read sensibly.
+  const realDay = isoDate();
+  const arrival = (a: any) =>
+    a.checkedInTime ? appointmentStart(realDay, a.checkedInTime) : new Date(appointmentStart(realDay, a.time).getTime() - 10 * MINUTE);
+  arrived.sort((a, b) => arrival(a).getTime() - arrival(b).getTime());
+
+  const records = arrived.map((a, i) => {
+    const issuedAt = arrival(a);
+    const calledAt = new Date(Math.max(issuedAt.getTime(), appointmentStart(realDay, a.time).getTime()));
+    const seen = a.status === 'Completed' || a.status === 'In Consultation';
+    return {
+      date: DEMO_DAY,
+      number: i + 1,
+      label: String(i + 1),
+      status: a.status === 'Completed' ? 'completed' : a.status === 'In Consultation' ? 'called' : 'waiting',
+      uhid: a.uhid,
+      patientName: a.patientName,
+      appointmentId: String(a._id),
+      appointmentTime: a.time,
+      source: 'front-desk',
+      issuedBy: 'Front Desk',
+      ...(seen && { counter: 'Consultation Room', calledAt, firstCalledAt: calledAt, calledBy: 'Dr. Shajin' }),
+      ...(a.status === 'Completed' && { completedAt: new Date(calledAt.getTime() + 15 * MINUTE) }),
+      ...(a.status !== 'Completed' && { activeKey: `${DEMO_DAY}:${a.uhid}` }),
+      createdAt: issuedAt,
+      updatedAt: issuedAt,
+    };
+  });
+  await tokens.insertMany(records);
+  await model(QueueSequence, QueueSequenceSchema).create({ date: DEMO_DAY, last: records.length });
+  console.log(`✅ ${records.length} queue tokens`);
+
+  // Demo cards for patients not checked in yet, so the kiosk can be tried without
+  // real cards. Cards linked by hand are kept (patients keep their UHIDs).
+  for (const card of DEMO_CARDS) {
+    await model(PatientCard, PatientCardSchema).updateOne({ cardId: card.cardId }, { $set: { ...card, linkedBy: 'Seed' } }, { upsert: true });
+  }
+  console.log(`✅ ${DEMO_CARDS.length} demo patient cards (${DEMO_CARDS.map((c) => c.cardId).join(', ')})`);
 }
 
 async function seed() {
@@ -115,6 +181,7 @@ async function seed() {
   await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
   // The call log refers to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
+  await seedQueue();
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

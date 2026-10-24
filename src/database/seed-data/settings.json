@@ -67,5 +67,12 @@
     "slotMinutes": 30,
     "closedDays": [],
     "simulatedResponse": "random"
+  },
+  "queue": {
+    "counters": ["Consultation Room"],
+    "tokenPrefix": "",
+    "showNamesOnDisplay": false,
+    "announce": true,
+    "upcomingOnDisplay": 6
   }
 }

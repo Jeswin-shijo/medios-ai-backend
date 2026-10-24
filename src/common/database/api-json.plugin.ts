@@ -1,7 +1,7 @@
 import { Schema } from 'mongoose';
 
 /** Never serialized, even when a query selected them. */
-const SECRET_FIELDS = ['passwordHash', 'tokenVersion', 'failedLoginAttempts', 'lockedUntil', 'tokenHash'];
+const SECRET_FIELDS = ['passwordHash', 'tokenVersion', 'failedLoginAttempts', 'lockedUntil', 'tokenHash', 'keyHash'];
 
 /**
  * Shapes every document the API returns: `_id` becomes a string `id` (clients key

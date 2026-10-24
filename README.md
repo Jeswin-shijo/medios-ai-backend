@@ -57,6 +57,8 @@ hospital-backend/
 │       ├── knowledge/          # Hospital SOPs & evidence guidelines (/api/knowledge/*)
 │       ├── voice-to-notes/     # Ambient AI medical transcription & SOAP extraction (/api/voice-to-notes/*)
 │       ├── dashboard/          # Aggregated KPIs, patient flow, live schedule (/api/dashboard/*)
+│       ├── calls/              # AI call agent: confirmation & booking calls (/api/calls/*)
+│       ├── queue/              # Check-in tokens, room calls, waiting-room displays (/api/queue/*)
 │       └── settings/           # Hospital metadata, staff & AI configs (/api/settings/*)
 ```
 
@@ -112,6 +114,7 @@ This replaces the demo collections with the fixtures in `src/database/seed-data/
 - Logins, all with password **`Admin@123`**: **`doctor@medios.ai`** (doctor), **`admin@medios.ai`** (admin, can create accounts), **`nurse@`**, **`frontdesk@`** (staff), **`pharmacy@`** (pharmacist) and **`lab@medios.ai`** (lab). Change these before any real use.
 - 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
 - The 26 Sep appointment queue plus six unconfirmed or confirmed appointments on 27–28 Sep for the AI call agent, follow-ups, 28 tasks & alerts, 10 message threads and workstation settings
+- Queue tokens for everyone who has arrived on 26 Sep, numbered in arrival order, and three demo patient cards (display and kiosk links, and cards linked by hand, survive a reseed)
 
 Records are inserted through the Mongoose schemas, so a fixture that breaks an enum or required field fails the seed.
 
@@ -199,6 +202,39 @@ Before using real calls, get patients' consent to automated calls and follow TRA
 
 ---
 
+## 🎫 Token Queue
+
+Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.
+
+**Tokens.** `POST /api/queue/tokens` takes a UHID or today's appointment.
+- Numbers restart each clinic day. A per-day counter is incremented atomically. The `queue.tokenPrefix` setting gives labels like `A12`.
+- A patient holds at most one live token a day (unique `activeKey`). Checking in again returns the same token, and a skipped token rejoins the queue. A repeated check-in or card tap is therefore harmless.
+- Given only a UHID, the API links the patient's next open appointment today; with none, the token is a walk-in. Unregistered UHIDs are refused.
+
+**Calling.** Tokens go waiting → called → completed. A called patient who does not come is *skipped* and can be put back, keeping their number.
+- Serving order: priority tokens first, then by number.
+- `POST /api/queue/next` completes the room's current token, then calls the next one. While the room has a token, the request must name it in `finish`, so a double press cannot skip a patient. A room has at most one called token (unique partial index), so two simultaneous presses cannot both call someone.
+- The linked appointment follows the token: Checked In → In Consultation → Completed (back to Checked In on a skip). Completing or cancelling the appointment through the appointments API ends its token too.
+- Rooms, the prefix and what the display shows are in the `queue` settings section (`PUT /api/settings`).
+
+**Displays.** A display is a screen allowed to show the queue without a staff sign-in.
+- An admin or doctor adds one (`POST /api/queue/displays`) and gets a random key once. Only its SHA-256 is stored. Removing the display revokes the key.
+- The display authenticates with `Authorization: Display <key>`. It reads `GET /api/queue/display/stream` (server-sent events: a snapshot on every change and every 15 s), or `GET /api/queue/display/state` when it cannot stream.
+- A snapshot holds token labels, rooms and counts, plus short names ("Priya S.") only when `showNamesOnDisplay` is on. It never carries UHIDs, full names or appointment details.
+- Change notifications are in-process. With several API instances, a display connected to another instance catches up within 15 s. Behind nginx, the stream sets `X-Accel-Buffering: no`; other proxies must not buffer `text/event-stream`.
+
+**Cards and check-in kiosks.** Patients can check themselves in by tapping a basic NFC card (NTAG or MIFARE Classic) on a USB reader.
+- Nothing is written to the card. The reader types the card's factory serial number like a keyboard, and the API links that number to a UHID (`patientcards` collection; `POST /api/queue/cards`). Separators and letter case are normalised (`04:a1:b2:c3` = `04A1B2C3`).
+- Use the same reader model and settings at the desk and the kiosk: a reader set to decimal output types a different number for the same card than one set to hex.
+- A card already linked to another patient is refused unless `reassign` is sent.
+- A basic card's serial can be copied, so a tap only gets a queue token for that patient. It never opens a record.
+- A **kiosk** is a device like a display, with `kind: 'kiosk'`, its own key prefix (`mqk_`) and `Authorization: Kiosk <key>`. Its tap (`POST /api/queue/kiosk/tap`) issues or returns the token, like any check-in. The answer has the token, a short name ("David R."), how many are ahead, and the room if already called. It never carries the UHID or full name.
+- `printSlips` per kiosk: the kiosk prints an 80 mm slip after each new token. The tap response carries the current value, so switching it applies from the next tap.
+- Taps at the front desk use `POST /api/queue/cards/tap` with a staff session. An unknown card answers 404, and the web app then offers to link it.
+- The seed links three demo cards: `04A1B2C3` (Rekha S), `0004567890` (David Raj) and `04C8D9E0F1A2B3` (Selvi A). Cards linked by hand survive a reseed.
+
+---
+
 ## 📐 API Conventions
 
 - Every record is returned with a string `id` (no `_id`/`__v`); password hashes are never serialized.
@@ -283,5 +319,20 @@ Before using real calls, get patients' consent to automated calls and follow TRA
 | | `POST` | `/api/calls/run-due` | Run the scheduler now (admin, doctor) |
 | | `DELETE` | `/api/calls/do-not-call/:uhid` | Allow calls to a patient again (admin, doctor) |
 | | `POST` | `/api/calls/webhook/snapserve?token=` | Provider post-call webhook (no user token) |
+| **Token Queue** | `GET` | `/api/queue?date=` | A day's tokens with places in line, counts and queue settings |
+| | `POST` | `/api/queue/tokens` | Check in and issue today's token (UHID or appointmentId; returns an existing one) |
+| | `POST` | `/api/queue/next` | Finish the room's current token and call the next |
+| | `POST` | `/api/queue/tokens/:id/call` | Call a waiting or skipped token out of turn |
+| | `POST` | `/api/queue/tokens/:id/recall` | Announce a called token again |
+| | `POST` | `/api/queue/tokens/:id/skip` | Called patient did not come |
+| | `POST` | `/api/queue/tokens/:id/requeue` | Put a skipped token back |
+| | `POST` | `/api/queue/tokens/:id/complete` | Doctor finished with the token |
+| | `POST` | `/api/queue/tokens/:id/cancel` | Withdraw a waiting or skipped token |
+| | `GET` `POST` `PATCH` `DELETE` | `/api/queue/displays[/:id]` | Manage displays and kiosks; `PATCH` renames or switches slip printing (admin, doctor) |
+| | `GET` | `/api/queue/display/state` · `/stream` | What a display shows (`Authorization: Display <key>`, no user token) |
+| | `GET` `POST` `DELETE` | `/api/queue/cards[/:id]` | A patient's cards (`?uhid=`), link a card, unlink a lost one |
+| | `POST` | `/api/queue/cards/tap` | Card tapped at the front desk: issue or return its token (404 if unknown) |
+| | `GET` | `/api/queue/kiosk/state` | Kiosk name, slip printing, hospital name (`Authorization: Kiosk <key>`) |
+| | `POST` | `/api/queue/kiosk/tap` | Card tapped at a kiosk: token, short name, people ahead (`Authorization: Kiosk <key>`) |
 | **Settings** | `GET` | `/api/settings` | Hospital profile, staff, and AI settings |
 | | `PUT` | `/api/settings` | Update settings and preferences |
