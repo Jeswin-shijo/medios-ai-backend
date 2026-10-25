@@ -24,6 +24,7 @@ import { AgentCall, AgentCallSchema } from '../modules/calls/schemas/agent-call.
 import { QueueToken, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
+import { seedBeds } from './seed-beds';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
@@ -182,6 +183,8 @@ async function seed() {
   // The call log refers to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
   await seedQueue();
+  // Wards, beds and the two real admissions (the patients come first); also clears admissions and bed suggestions.
+  await seedBeds();
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

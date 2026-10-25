@@ -35,6 +35,7 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { CallsModule } from './modules/calls/calls.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { AiModule } from './modules/ai/ai.module';
+import { BedsModule } from './modules/beds/beds.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -80,6 +81,7 @@ import { HealthController } from './health.controller';
     CallsModule,
     QueueModule,
     AiModule,
+    BedsModule,
   ],
   controllers: [HealthController],
   // Guards run in this order: rate limit, then authentication, then role checks.
