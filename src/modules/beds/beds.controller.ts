@@ -7,6 +7,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ADMIT_ROLES, HOUSEKEEPING_ROLES, actorOf } from './actor';
 import { BedEvents } from './bed-events';
 import { BedsService } from './beds.service';
+import { assertSuggestionFitsBed } from './transfer-check';
 import { SuggestionsService } from './suggestions.service';
 import { AdmitBedDto, BlockBedDto, HoldBedDto, SuggestBedsDto, TransferBedDto } from './dto/beds.dto';
 
@@ -119,7 +120,9 @@ export class BedsController {
   @ApiOperation({ summary: 'Move an admitted patient to a held bed' })
   async transfer(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: TransferBedDto) {
     const actor = actorOf(user);
-    await this.suggestions.authorizeChoice(dto.suggestionId, dto.toBedId, actor, dto);
+    const log = await this.suggestions.authorizeChoice(dto.suggestionId, dto.toBedId, actor, dto);
+    // Before anything changes: the suggestion must be for the patient in this bed.
+    assertSuggestionFitsBed(log, bedId, await this.beds.activeAdmissionForPatient(String(log.patient)));
     const admission = await this.beds.transfer(bedId, actor, {
       toBedId: dto.toBedId,
       suggestionId: dto.suggestionId,
