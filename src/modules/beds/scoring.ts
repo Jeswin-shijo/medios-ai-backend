@@ -15,6 +15,9 @@ const W_NEAR_NURSES = 100;
 const W_LOWER_FLOOR = 10; // per floor below the top, close-watch patients only
 const W_NEAR_DEPARTMENT = 20;
 const W_OXYGEN_POINT = 5;
+// A step-up bed is a different class from the one asked for. Larger than department + oxygen
+// combined, so it never outranks a class-matching bed on those alone.
+const W_CLASS_MISMATCH = 30;
 const MAX_STEP_UP_INDEX = 2; // a step-up bed is never placed below 3rd
 const CLOSE_WATCH_AGE = 70;
 
@@ -102,7 +105,10 @@ export function rankBeds(
       total += W_NEAR_DEPARTMENT;
       reasons.push(`Near ${req.department}`);
     }
-    if (stepUp) reasons.push(TEXT.stepUp);
+    if (stepUp) {
+      total -= W_CLASS_MISMATCH;
+      reasons.push(TEXT.stepUp);
+    }
     reasons.push(formatRate(ward?.ratePerDay ?? 0));
     return { bedId: bed.id, score: total, reasons, reason: reasons.join(' • '), stepUp };
   };

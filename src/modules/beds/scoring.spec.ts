@@ -42,6 +42,18 @@ describe('rankBeds', () => {
     assert.ok(ranked.indexOf(steps[0]) <= 2);
   });
 
+  test('step-up sits directly after the best bed for Arun', () => {
+    const { ranked } = rank(arun());
+    assert.equal(ranked[0].bedId, 'GWA-4');
+    assert.equal(ranked[1].stepUp, true);
+  });
+
+  test("Rekha's case: class-matching beds beat the step-up", () => {
+    const { ranked } = rank(req({ age: 30, gender: 'Female', needs: ['oxygen'], department: 'Obstetrics' }));
+    assert.ok(ranked[0].bedId.startsWith('GWB-'));
+    assert.equal(ranked.findIndex((r) => r.stepUp), 2);
+  });
+
   test('no step-up without oxygen', () => {
     assert.equal(rank(req()).ranked.filter((r) => r.stepUp).length, 0);
   });
