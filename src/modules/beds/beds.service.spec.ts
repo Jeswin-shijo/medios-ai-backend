@@ -206,6 +206,22 @@ describe('BedsService', () => {
     await assert.rejects(service.unblock(b2, A), /This bed is not blocked\./);
   });
 
+  test('a bed whose hold expired can be blocked; a live hold cannot', async () => {
+    await service.hold(b1, A, suggestionId);
+    await expireHold(b1);
+    await service.block(b1, B, 'Broken rail');
+    const blocked = await bed(b1);
+    assert.equal(blocked.state, 'blocked');
+    assert.equal(blocked.blockedReason, 'Broken rail');
+    assert.equal(blocked.holdBy, undefined);
+    assert.equal(blocked.holdExpiresAt, undefined);
+    assert.equal(blocked.holdSuggestion, undefined);
+
+    await service.hold(b2, A, suggestionId);
+    await assert.rejects(service.block(b2, B, 'Broken rail'), /Only a free bed can be blocked\./);
+    assert.equal((await bed(b2)).state, 'held');
+  });
+
   test('transfer moves the patient', async () => {
     await service.hold(b1, A, suggestionId);
     const admission = await service.admit(b1, A, input());

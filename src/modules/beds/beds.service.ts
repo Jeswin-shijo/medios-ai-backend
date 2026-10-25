@@ -70,6 +70,11 @@ const HOLD_RAN_OUT = 'Your hold on this bed ran out. Choose a bed again.';
 const NOT_OCCUPIED = 'This bed is not occupied.';
 const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1 };
 
+/** Free, or held with a hold that ran out (real clock): a bed the board shows as free. */
+const freeOrExpiredHold = (now: Date): FilterQuery<BedDocument> => ({
+  $or: [{ state: 'free' }, { state: 'held', holdExpiresAt: { $lt: now } }],
+});
+
 const isDuplicate = (err: unknown, field: string) =>
   err instanceof mongo.MongoServerError && err.code === 11000 && field in (err.keyPattern ?? {});
 
@@ -220,7 +225,7 @@ export class BedsService {
     const now = new Date();
     const holdExpiresAt = new Date(now.getTime() + HOLD_MINUTES * 60_000);
     await this.transition(
-      { _id: bedId, $or: [{ state: 'free' }, { state: 'held', holdExpiresAt: { $lt: now } }] },
+      { _id: bedId, ...freeOrExpiredHold(now) },
       { $set: { state: 'held', stateSince: clinicNow(), holdBy: actor.id, holdExpiresAt, holdSuggestion: suggestionId } },
       'That bed was just taken. Choose another.',
     );
@@ -369,10 +374,11 @@ export class BedsService {
     );
   }
 
+  /** Blocks a free bed, including one whose hold ran out (the board shows it as free). */
   async block(bedId: string, _actor: Actor, reason: string): Promise<void> {
     await this.transition(
-      { _id: bedId, state: 'free' },
-      { $set: { state: 'blocked', stateSince: clinicNow(), blockedReason: reason } },
+      { _id: bedId, ...freeOrExpiredHold(new Date()) },
+      { $set: { state: 'blocked', stateSince: clinicNow(), blockedReason: reason }, $unset: HOLD_FIELDS },
       'Only a free bed can be blocked.',
     );
   }
