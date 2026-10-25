@@ -62,8 +62,12 @@ type Inventory = { wards: WardInfo[]; beds: BedInfo[] };
 
 const hasText = (s?: string) => !!s?.trim();
 
-/** The bed staff should choose unless they give a reason: the AI's first pick, else the rules'. */
-const topBedId = (log: BedSuggestionDocument) => log.finalTopBedId ?? log.ruleRanking[0]?.bedId;
+/**
+ * Either top suggestion needs no reason: the rules' first bed shows at once and staff may
+ * confirm it before the AI answers; the AI's first pick then takes its place on screen.
+ */
+const isTopPick = (log: BedSuggestionDocument, bedId: string) =>
+  bedId === log.ruleRanking[0]?.bedId || bedId === log.finalTopBedId;
 
 /** The stored rule order as plain RankedBed objects (not Mongoose subdocuments). */
 const storedRanking = (log: BedSuggestionDocument): RankedBed[] =>
@@ -217,7 +221,7 @@ export class SuggestionsService {
       if (!choice.ruleOverride) throw new BadRequestException('This bed does not meet the rules for this patient.');
       if (!OVERRIDE_ROLES.includes(actor.role)) throw new ForbiddenException('Only a doctor or admin can ignore the bed rules.');
       if (!hasText(choice.reason)) throw new BadRequestException('Give a reason for ignoring the rules.');
-    } else if (bedId !== topBedId(log) && !hasText(choice.reason)) {
+    } else if (!isTopPick(log, bedId) && !hasText(choice.reason)) {
       throw new BadRequestException('Give a short reason for not choosing the top suggestion.');
     }
     return log;
@@ -236,7 +240,7 @@ export class SuggestionsService {
         {
           $set: {
             finalBedId: result.bedId,
-            wasTopPick: result.bedId === topBedId(log),
+            wasTopPick: isTopPick(log, result.bedId),
             ruleOverride: !!result.ruleOverride,
             admission: result.admissionId,
             ...(reason ? { reason } : {}),

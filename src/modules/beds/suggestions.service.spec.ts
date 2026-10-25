@@ -35,6 +35,19 @@ function fakeAi() {
   return fake;
 }
 
+/** An AI answer that puts the second rule-ranked bed first and suggests isolation. */
+const aiPicksSecondBed = (): AiResult<BedAiOutput> => ({
+  ok: true,
+  value: {
+    picks: [{ ref: 'b2', reason: 'HDU bed watches oxygen levels closely.' }],
+    extraNeeds: [{ need: 'isolation', evidence: 'COPD' }],
+  },
+  sample: false,
+  provider: 'claude',
+  model: 'claude-opus-5-5',
+  latencyMs: 120,
+});
+
 /** Rejects with an HTTP error of this status whose message matches. */
 const rejectsHttp = (promise: Promise<unknown>, status: number, message: RegExp) =>
   assert.rejects(promise, (err: unknown) => {
@@ -156,17 +169,7 @@ describe('SuggestionsService', () => {
   });
 
   test('refine applies AI order and extra needs', async () => {
-    ai.result = {
-      ok: true,
-      value: {
-        picks: [{ ref: 'b2', reason: 'HDU bed watches oxygen levels closely.' }],
-        extraNeeds: [{ need: 'isolation', evidence: 'COPD' }],
-      },
-      sample: false,
-      provider: 'claude',
-      model: 'claude-opus-5-5',
-      latencyMs: 120,
-    };
+    ai.result = aiPicksSecondBed();
     const result = await service.suggest(nurse, arun());
     const { ruleRanking, aiInput } = await log(result.suggestionId);
 
@@ -185,8 +188,23 @@ describe('SuggestionsService', () => {
     // A second refine returns what was stored, without asking the AI again.
     assert.deepEqual(await service.refine(nurse, result.suggestionId), refined);
     assert.equal(ai.tasks.length, 1);
-    // The AI's first pick is now the top suggestion: choosing it needs no reason.
-    await service.authorizeChoice(result.suggestionId, ruleRanking[1].bedId, nurse, {});
+  });
+
+  test('after an AI reorder, the rule top and the AI top both need no reason', async () => {
+    ai.result = aiPicksSecondBed();
+    const { suggestionId } = await service.suggest(nurse, arun());
+    await service.refine(nurse, suggestionId);
+    const { ruleRanking, finalTopBedId } = await log(suggestionId);
+    const [ruleTop, aiTop, third] = ruleRanking.map((r) => r.bedId);
+    assert.equal(finalTopBedId, aiTop);
+
+    // Staff may confirm the rule top they saw before the AI answered.
+    await service.authorizeChoice(suggestionId, ruleTop, nurse, {});
+    await service.authorizeChoice(suggestionId, aiTop, nurse, {});
+    await rejectsHttp(service.authorizeChoice(suggestionId, third, nurse, {}), 400, /not choosing the top suggestion/);
+
+    await service.recordChoice(suggestionId, { bedId: ruleTop, admissionId: new Types.ObjectId().toString() });
+    assert.equal((await log(suggestionId)).wasTopPick, true);
   });
 
   test('refine falls back on AI failure', async () => {
