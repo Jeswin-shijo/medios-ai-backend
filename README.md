@@ -214,6 +214,23 @@ The API key lives only in `.env` (never commit it). Each feature also has an on/
 
 ---
 
+## 🛏️ Importing the hospital's real beds
+
+The demo seed loads a made-up 138-bed layout. To load the hospital's real wards and beds, fill in a CSV (start from `docs/beds-import-template.csv`; one row per bed) and run:
+
+```bash
+MONGODB_URI=... npm run import-beds -- path/to/beds.csv
+```
+
+- Columns: `ward_code, ward_name, ward_short_name, floor, ward_type, gender, rate_per_day, near_departments, bed_number, bed_label, room, features`. `near_departments` and `features` are separated by `;`; wrap a value that contains a comma in double quotes. `bed_label` may be left empty and `room` is only for beds that share a room.
+- `ward_type`: emergency, icu, hdu, isolation, general, paediatric, maternity, twin, private or deluxe. `gender`: male, female or any. Features: oxygen, monitor, ventilator, nearNurses, singleRoom, attendantBed.
+- Rows of one ward must repeat the same ward details. Wards show on the board in the order they first appear in the file.
+- Every imported bed starts free. The script prints every problem it finds (`Row N: ...`, N counting data rows without the header) and changes nothing if there are any.
+- It refuses to run while any bed is occupied or held. `--force` replaces the wards and beds anyway, and also clears all admissions and bed suggestions, because they point at the old beds.
+- It prints the database host (never the full address). Like `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.

@@ -1,0 +1,4 @@
+ward_code,ward_name,ward_short_name,floor,ward_type,gender,rate_per_day,near_departments,bed_number,bed_label,room,features
+GWA,General Ward A,Ward A,1,general,any,1500,"General Medicine;Nephrology",1,Ward A • Bed 1,,oxygen;nearNurses
+GWA,General Ward A,Ward A,1,general,any,1500,"General Medicine;Nephrology",2,Ward A • Bed 2,,oxygen
+ICU,"Intensive Care, Main",ICU,0,icu,any,7500,"Emergency & Critical Care;Cardiology",1,ICU • Bed 1,,monitor;oxygen;ventilator;nearNurses

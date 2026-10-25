@@ -16,6 +16,7 @@
     "start:prod": "node dist/main",
     "preseed": "node scripts/seed-guard.js",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
+    "import-beds": "ts-node -r tsconfig-paths/register src/database/import-beds.ts",
     "create-user": "ts-node -r tsconfig-paths/register src/database/create-user.ts"
   },
   "dependencies": {
