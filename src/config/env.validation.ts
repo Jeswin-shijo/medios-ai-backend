@@ -46,6 +46,16 @@ export function validateEnv(config: Record<string, unknown>) {
       errors.push('CALL_WEBHOOK_SECRET (24+ random characters) is required when CALL_PROVIDER=snapserve; it authenticates the post-call webhook.');
     }
   }
+  const aiProvider = String(config.AI_PROVIDER ?? (production ? 'none' : 'sample')).toLowerCase();
+  if (!['none', 'sample', 'claude'].includes(aiProvider)) {
+    errors.push('AI_PROVIDER must be none, sample or claude.');
+  }
+  if (aiProvider === 'claude' && !config.ANTHROPIC_API_KEY) {
+    errors.push('ANTHROPIC_API_KEY is required when AI_PROVIDER=claude.');
+  }
+  if (config.AI_TIMEOUT_MS !== undefined && !/^[1-9]\d*$/.test(String(config.AI_TIMEOUT_MS))) {
+    errors.push('AI_TIMEOUT_MS must be a positive number of milliseconds.');
+  }
   if (config.CLINIC_DATE !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(config.CLINIC_DATE))) {
     errors.push('CLINIC_DATE must be YYYY-MM-DD.');
   }

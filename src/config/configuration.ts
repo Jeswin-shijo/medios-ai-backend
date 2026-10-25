@@ -60,6 +60,13 @@ export default () => ({
       bookingAgentId: process.env.SNAPSERVE_BOOKING_AGENT_ID || '',
     },
   },
+  ai: {
+    // Who answers AI requests: 'claude' (real), 'sample' (canned answers, development) or 'none'.
+    provider: (process.env.AI_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
+    model: process.env.AI_MODEL || 'claude-opus-5-5',
+    apiKey: process.env.ANTHROPIC_API_KEY || '',
+    timeoutMs: int(process.env.AI_TIMEOUT_MS, 8000),
+  },
   swagger: {
     enabled: process.env.SWAGGER_ENABLED ? process.env.SWAGGER_ENABLED === 'true' : !isProduction,
   },

@@ -202,6 +202,18 @@ Before using real calls, get patients' consent to automated calls and follow TRA
 
 ---
 
+## 🤖 AI
+
+One shared AI module (`src/modules/ai`) runs structured requests for features such as bed suggestions. `AI_PROVIDER` picks the mode:
+
+- `sample` (development default): canned answers; no AI service is called.
+- `claude`: real answers from Anthropic. Needs `ANTHROPIC_API_KEY`; `AI_MODEL` defaults to `claude-opus-5-5` and `AI_TIMEOUT_MS` to 8000.
+- `none` (production default): AI is off.
+
+The API key lives only in `.env` (never commit it). Each feature also has an on/off switch in Settings (`ai.bedSuggestions`). `GET /api/ai/status` shows the active mode; `POST /api/ai/check` (admin) tests the connection. If the AI is off, slow or answers badly, features fall back to their rules.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.

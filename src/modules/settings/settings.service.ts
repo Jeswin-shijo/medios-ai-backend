@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
     voiceToNotes: false,
     drugInteractionAlerts: true,
     followUpSuggestions: false,
+    bedSuggestions: true,
     responseTone: 'Professional & Concise',
     language: 'English (Auto-detect)',
   },
