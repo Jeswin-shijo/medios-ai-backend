@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseBedCsv } from './bed-csv';
+import { importRefusal, parseBedCsv } from './bed-csv';
 
 const HEADER =
   'ward_code,ward_name,ward_short_name,floor,ward_type,gender,rate_per_day,near_departments,bed_number,bed_label,room,features';
@@ -66,5 +66,31 @@ describe('parseBedCsv', () => {
     const { beds, errors } = parseBedCsv(`﻿${HEADER}\r\n${WARD},1,A 1,,\r\n\r\n${WARD},2,A 2,,\r\n`);
     assert.deepEqual(errors, []);
     assert.equal(beds.length, 2);
+  });
+});
+
+describe('importRefusal', () => {
+  const none = { inUse: 0, admissions: 0, suggestions: 0 };
+
+  test('no beds in use and no history proceeds', () => {
+    assert.equal(importRefusal(none, false), null);
+  });
+
+  test('history without --force is refused with the counts', () => {
+    assert.equal(
+      importRefusal({ ...none, admissions: 4, suggestions: 2 }, false),
+      'Admission history exists (4 admissions, 2 bed suggestions). Importing replaces all beds and deletes these records. Re-run with --force to replace them anyway.',
+    );
+  });
+
+  test('--force proceeds', () => {
+    assert.equal(importRefusal({ inUse: 3, admissions: 4, suggestions: 2 }, true), null);
+  });
+
+  test('beds in use are reported first', () => {
+    assert.equal(
+      importRefusal({ inUse: 3, admissions: 4, suggestions: 2 }, false),
+      'Beds are in use (3 occupied or held). Re-run with --force to replace them anyway.',
+    );
   });
 });

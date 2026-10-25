@@ -226,7 +226,7 @@ MONGODB_URI=... npm run import-beds -- path/to/beds.csv
 - `ward_type`: emergency, icu, hdu, isolation, general, paediatric, maternity, twin, private or deluxe. `gender`: male, female or any. Features: oxygen, monitor, ventilator, nearNurses, singleRoom, attendantBed.
 - Rows of one ward must repeat the same ward details. Wards show on the board in the order they first appear in the file.
 - Every imported bed starts free. The script prints every problem it finds (`Row N: ...`, N counting data rows without the header) and changes nothing if there are any.
-- It refuses to run while any bed is occupied or held. `--force` replaces the wards and beds anyway, and also clears all admissions and bed suggestions, because they point at the old beds.
+- It refuses to run while any bed is occupied or held (`Beds are in use (N occupied or held)...`), and also while any admission or bed-suggestion record exists (`Admission history exists (A admissions, S bed suggestions)...`); it changes nothing in either case. `--force` replaces the wards and beds anyway and also deletes all admissions and bed suggestions, because they point at the old beds.
 - It prints the database host (never the full address). Like `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
 
 ---

@@ -4,12 +4,12 @@ import { Ward, WardSchema } from '../modules/beds/schemas/ward.schema';
 import { Bed, BedSchema } from '../modules/beds/schemas/bed.schema';
 import { Admission, AdmissionSchema } from '../modules/beds/schemas/admission.schema';
 import { BedSuggestion, BedSuggestionSchema } from '../modules/beds/schemas/bed-suggestion.schema';
-import { parseBedCsv } from '../modules/beds/bed-csv';
+import { importRefusal, parseBedCsv } from '../modules/beds/bed-csv';
 import { clinicNow } from '../common/utils/clinic-time';
 
 // Replaces the wards and beds with the hospital's real ones from a CSV file (see
-// docs/beds-import-template.csv). Replacing also clears admissions and bed suggestions,
-// which point at the old beds.
+// docs/beds-import-template.csv). With --force it also clears admissions and bed suggestions,
+// which point at the old beds; without it, any of them make the import refuse.
 //
 //   MONGODB_URI=... npm run import-beds -- <file.csv> [--force]
 
@@ -35,9 +35,16 @@ async function importBeds() {
 
   const wardModel = model(Ward, WardSchema);
   const bedModel = model(Bed, BedSchema);
-  const inUse = await bedModel.countDocuments({ state: { $in: ['occupied', 'held'] } });
-  if (inUse > 0 && !force) {
-    console.error(`Beds are in use (${inUse} occupied or held). Re-run with --force to replace them anyway.`);
+  const admissionModel = model(Admission, AdmissionSchema);
+  const suggestionModel = model(BedSuggestion, BedSuggestionSchema);
+  const [inUse, admissions, suggestions] = await Promise.all([
+    bedModel.countDocuments({ state: { $in: ['occupied', 'held'] } }),
+    admissionModel.countDocuments({}),
+    suggestionModel.countDocuments({}),
+  ]);
+  const refusal = importRefusal({ inUse, admissions, suggestions }, force);
+  if (refusal) {
+    console.error(refusal);
     process.exitCode = 1;
     return;
   }
@@ -45,8 +52,8 @@ async function importBeds() {
   await Promise.all([
     wardModel.deleteMany({}),
     bedModel.deleteMany({}),
-    model(Admission, AdmissionSchema).deleteMany({}),
-    model(BedSuggestion, BedSuggestionSchema).deleteMany({}),
+    admissionModel.deleteMany({}),
+    suggestionModel.deleteMany({}),
   ]);
   const insertedWards = await wardModel.insertMany(wards);
   const wardId = new Map(insertedWards.map((w) => [w.code, w._id]));

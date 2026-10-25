@@ -105,3 +105,13 @@ export function parseBedCsv(text: string): { wards: WardSeed[]; beds: BedSeed[];
   });
   return { wards, beds, errors };
 }
+
+/** Why an import must not replace the beds yet (null = go ahead). Beds in use are checked first. */
+export function importRefusal(counts: { inUse: number; admissions: number; suggestions: number }, force: boolean): string | null {
+  if (force) return null;
+  if (counts.inUse > 0) return `Beds are in use (${counts.inUse} occupied or held). Re-run with --force to replace them anyway.`;
+  if (counts.admissions > 0 || counts.suggestions > 0) {
+    return `Admission history exists (${counts.admissions} admissions, ${counts.suggestions} bed suggestions). Importing replaces all beds and deletes these records. Re-run with --force to replace them anyway.`;
+  }
+  return null;
+}
