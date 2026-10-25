@@ -1,6 +1,7 @@
 import mongoose, { Model, Schema } from 'mongoose';
 import { Admission, AdmissionDocument, AdmissionSchema } from '../modules/beds/schemas/admission.schema';
 import { Bed, BedDocument, BedSchema } from '../modules/beds/schemas/bed.schema';
+import { BedSuggestion, BedSuggestionDocument, BedSuggestionSchema } from '../modules/beds/schemas/bed-suggestion.schema';
 import { Ward, WardDocument, WardSchema } from '../modules/beds/schemas/ward.schema';
 import { Patient, PatientDocument, PatientSchema } from '../modules/patients/schemas/patient.schema';
 
@@ -30,6 +31,7 @@ export function models() {
     Ward: model(Ward, WardSchema) as Model<WardDocument>,
     Bed: model(Bed, BedSchema) as Model<BedDocument>,
     Admission: model(Admission, AdmissionSchema) as Model<AdmissionDocument>,
+    BedSuggestion: model(BedSuggestion, BedSuggestionSchema) as Model<BedSuggestionDocument>,
     Patient: model(Patient, PatientSchema) as Model<PatientDocument>,
   };
 }
