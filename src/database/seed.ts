@@ -184,7 +184,8 @@ async function seed() {
   await model(AgentCall, AgentCallSchema).deleteMany({});
   await seedQueue();
   // Wards, beds and the two real admissions (the patients come first); also clears admissions and bed suggestions.
-  await seedBeds();
+  // Their times fall on the clinic day: the seed does not read .env, so CLINIC_DATE may be unset.
+  await seedBeds(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

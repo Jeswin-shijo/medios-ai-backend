@@ -20,9 +20,10 @@ const NAMED_ADMISSIONS: Record<string, { department: string; roomClass: string; 
 
 /**
  * Replaces the wards, beds, admissions and bed suggestions with the demo hospital's
- * 138 beds. Run after the patients are seeded: two beds hold real admissions.
+ * 138 beds. Run after the patients are seeded: two beds hold real admissions. Times
+ * fall on `clinicDay` (YYYY-MM-DD, the demo day) at the current time of day.
  */
-export async function seedBeds(): Promise<void> {
+export async function seedBeds(clinicDay: string): Promise<void> {
   const wards = model(Ward, WardSchema);
   const beds = model(Bed, BedSchema);
   const admissions = model(Admission, AdmissionSchema);
@@ -32,13 +33,13 @@ export async function seedBeds(): Promise<void> {
   const insertedWards = await wards.insertMany(layout.wards);
   const wardId = new Map(insertedWards.map((w) => [w.code, w._id]));
 
-  const stateSince = clinicNow();
+  const stateSince = clinicNow(clinicDay);
   const insertedBeds = await beds.insertMany(
     layout.beds.map(({ wardCode, namedPatientUhid, ...b }) => ({ ...b, ward: wardId.get(wardCode), stateSince })),
   );
 
   const patients = model(Patient, PatientSchema);
-  const admittedAt = new Date(clinicNow().getTime() - 2 * DAY);
+  const admittedAt = new Date(stateSince.getTime() - 2 * DAY);
   for (const [i, seeded] of layout.beds.entries()) {
     if (!seeded.namedPatientUhid) continue;
     const patient = await patients.findOne({ uhid: seeded.namedPatientUhid }).lean<any>();
