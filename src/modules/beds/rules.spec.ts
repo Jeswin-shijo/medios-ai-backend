@@ -112,12 +112,163 @@ describe("applyRules", () => {
       NOW,
     );
     assert.equal(out.candidates.length, 0);
-    assert.match(out.blockedBy[0], /ventilator/);
+    assert.deepEqual(out.blockedBy, [
+      "No free ICU bed that matches: Men's ward only, ICU bed with a ventilator, ICU",
+    ]);
+  });
+
+  test("ventilator raises the class to ICU", () => {
+    const inv = setState(beds, ["ICU-3"], "free");
+    const out = applyRules(req({ needs: ["ventilator"] }), wards, inv, NOW);
+    assert.deepEqual(ids(out), ["ICU-3"]);
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "ICU bed with a ventilator",
+      "ICU",
+    ]);
+  });
+
+  test("ventilator with a monitor → ICU ventilator beds", () => {
+    const inv = setState(beds, ["ICU-3"], "free");
+    const out = applyRules(
+      req({ roomClass: "hdu", needs: ["ventilator", "monitor"] }),
+      wards,
+      inv,
+      NOW,
+    );
+    assert.deepEqual(ids(out), ["ICU-3"]);
+    assert.deepEqual(out.blockedBy, []);
+    assert.ok(out.appliedRules.includes("ICU bed with a ventilator"));
+    assert.ok(out.appliedRules.includes("ICU or HDU (monitor)"));
   });
 
   test("monitor", () => {
     const out = applyRules(req({ needs: ["monitor"] }), wards, beds, NOW);
     assert.deepEqual(ids(out).sort(), ["HDU-2", "HDU-4", "ICU-4"]);
+    // The monitor rule names both classes, so no single class label follows it.
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "ICU or HDU (monitor)",
+    ]);
+  });
+
+  test("monitor needs a bed with a monitor", () => {
+    const inv = beds.map((b) =>
+      b.id === "HDU-2"
+        ? { ...b, features: b.features.filter((f) => f !== "monitor") }
+        : b,
+    );
+    const out = applyRules(req({ needs: ["monitor"] }), wards, inv, NOW);
+    assert.ok(!ids(out).includes("HDU-2"));
+  });
+
+  test("class ICU with a monitor → ICU beds only", () => {
+    const inv = setState(beds, ["ICU-5"], "free");
+    const out = applyRules(
+      req({ roomClass: "icu", needs: ["monitor"] }),
+      wards,
+      inv,
+      NOW,
+    );
+    assert.deepEqual(ids(out), ["ICU-4", "ICU-5"]);
+    assert.deepEqual(out.blockedBy, []);
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "ICU or HDU (monitor)",
+      "ICU",
+    ]);
+  });
+
+  test("class HDU with a monitor → HDU only, then ICU with the price difference", () => {
+    const inv = setState(beds, ["ICU-5"], "free");
+    const hdu = req({ roomClass: "hdu", needs: ["monitor"] });
+    const out = applyRules(hdu, wards, inv, NOW);
+    assert.deepEqual(ids(out), ["HDU-2", "HDU-4"]);
+    assert.equal(out.classNote, undefined);
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "ICU or HDU (monitor)",
+      "HDU",
+    ]);
+
+    const full = applyRules(
+      hdu,
+      wards,
+      setState(inv, ["HDU-2", "HDU-4"], "occupied"),
+      NOW,
+    );
+    assert.deepEqual(ids(full), ["ICU-4", "ICU-5"]);
+    assert.equal(full.classUsed, "icu");
+    assert.equal(
+      full.classNote,
+      "No HDU beds free for this patient. ICU, ₹3,500 more a day",
+    );
+    assert.ok(full.appliedRules.includes("ICU"));
+  });
+
+  test("ventilator with isolation → a conflict and no beds", () => {
+    // A ventilator bed and isolation rooms are free, but no bed is both.
+    const inv = setState(beds, ["ICU-3"], "free");
+    const out = applyRules(
+      req({ needs: ["ventilator", "isolation"] }),
+      wards,
+      inv,
+      NOW,
+    );
+    assert.deepEqual(ids(out), []);
+    assert.deepEqual(out.blockedBy, [
+      "No bed meets all of: Isolation room, ICU bed with a ventilator",
+    ]);
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "Isolation room",
+      "ICU bed with a ventilator",
+    ]);
+    assert.deepEqual(out.stepUpPool, []);
+  });
+
+  test("isolation with a monitor → a conflict and no beds", () => {
+    const out = applyRules(
+      req({ needs: ["isolation", "monitor", "oxygen"] }),
+      wards,
+      beds,
+      NOW,
+    );
+    assert.deepEqual(ids(out), []);
+    assert.deepEqual(out.blockedBy, [
+      "No bed meets all of: Isolation room, ICU or HDU (monitor)",
+    ]);
+    assert.deepEqual(out.appliedRules, [
+      "Free & cleaned",
+      "Men's ward only",
+      "Isolation room",
+      "ICU or HDU (monitor)",
+      "Oxygen needed",
+    ]);
+    assert.deepEqual(out.stepUpPool, []);
+  });
+
+  test("isolation comes before the children's and maternity wards", () => {
+    const child = applyRules(
+      req({ age: 9, needs: ["isolation"] }),
+      wards,
+      beds,
+      NOW,
+    );
+    assert.deepEqual(ids(child), ["ISO-1", "ISO-3"]);
+    assert.ok(!child.appliedRules.includes("Children's ward (under 14)"));
+    const pregnant = applyRules(
+      req({ gender: "Female", needs: ["pregnant", "isolation"] }),
+      wards,
+      beds,
+      NOW,
+    );
+    assert.deepEqual(ids(pregnant), ["ISO-1", "ISO-3"]);
   });
 
   test("oxygen", () => {

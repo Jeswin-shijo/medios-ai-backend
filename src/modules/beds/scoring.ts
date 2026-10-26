@@ -15,8 +15,9 @@ const W_NEAR_NURSES = 100;
 const W_LOWER_FLOOR = 10; // per floor below the top, close-watch patients only
 const W_NEAR_DEPARTMENT = 20;
 const W_OXYGEN_POINT = 5;
-// A step-up bed is a different class from the one asked for. Larger than department + oxygen
-// combined, so it never outranks a class-matching bed on those alone.
+// A bed outside the class asked for: a step-up bed, or another candidate class when the one
+// asked for is also on offer. Larger than department + oxygen combined, so such a bed never
+// outranks a class-matching bed on those alone.
 const W_CLASS_MISMATCH = 30;
 const MAX_STEP_UP_INDEX = 2; // a step-up bed is never placed below 3rd
 const CLOSE_WATCH_AGE = 70;
@@ -80,6 +81,8 @@ export function rankBeds(
   const candidates = outcome.candidates.filter((b) => !held.has(b.id));
   const stepUpPool = outcome.stepUpPool.filter((b) => !held.has(b.id));
 
+  // Room class match counts only when the class asked for is among the candidates.
+  const classOffered = candidates.some((b) => wardById.get(b.wardId)?.type === req.roomClass);
   const closeWatch = has('highFallRisk') || req.age >= CLOSE_WATCH_AGE;
   const topFloor = Math.max(0, ...wards.map((w) => w.floor));
 
@@ -105,10 +108,8 @@ export function rankBeds(
       total += W_NEAR_DEPARTMENT;
       reasons.push(`Near ${req.department}`);
     }
-    if (stepUp) {
-      total -= W_CLASS_MISMATCH;
-      reasons.push(TEXT.stepUp);
-    }
+    if (stepUp || (classOffered && ward?.type !== req.roomClass)) total -= W_CLASS_MISMATCH;
+    if (stepUp) reasons.push(TEXT.stepUp);
     reasons.push(formatRate(ward?.ratePerDay ?? 0));
     return { bedId: bed.id, score: total, reasons, reason: reasons.join(' • '), stepUp };
   };

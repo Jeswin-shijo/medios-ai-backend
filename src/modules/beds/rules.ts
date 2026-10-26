@@ -81,6 +81,18 @@ const STEP_UP_CLASSES: Array<RoomClass | "isolation"> = [
   "emergency",
 ];
 
+/** A ticked need that limits which wards can be used. */
+interface WardLimit {
+  rule: string;
+  types: WardType[];
+}
+
+/** For running text: "general ward", but acronyms stay as they are ("ICU"). */
+const lowerLabel = (type: RoomClass | "isolation"): string => {
+  const label = CLASS_LABEL[type];
+  return label === label.toUpperCase() ? label : label.toLowerCase();
+};
+
 export function applyRules(
   req: AdmissionRequestInput,
   wards: WardInfo[],
@@ -96,46 +108,58 @@ export function applyRules(
       : req.gender === "Female"
         ? RULE_TEXT.female
         : RULE_TEXT.other;
-  const needRules: string[] = [];
 
-  // Which wards are allowed, and which class that counts as (first matching rule wins).
-  let classUsed: RoomClass | "isolation" = req.roomClass;
-  let wardTypes: WardType[] = [req.roomClass];
-  let needsVentilatorBed = false;
-  let isStandardClass = false;
-  if (has("ventilator")) {
-    classUsed = "icu";
-    wardTypes = ["icu"];
-    needsVentilatorBed = true;
-    needRules.push(RULE_TEXT.ventilator);
-  } else if (has("isolation")) {
-    classUsed = "isolation";
-    wardTypes = ["isolation"];
-    needRules.push(RULE_TEXT.isolation);
-  } else if (has("monitor")) {
-    classUsed = req.roomClass === "hdu" ? "hdu" : "icu";
-    wardTypes = ["icu", "hdu"];
-    needRules.push(RULE_TEXT.monitor);
+  // Ticked needs that limit the wards, in NEEDS order. A bed must meet every one of them.
+  const limits: WardLimit[] = [];
+  if (has("isolation"))
+    limits.push({ rule: RULE_TEXT.isolation, types: ["isolation"] });
+  if (has("ventilator"))
+    limits.push({ rule: RULE_TEXT.ventilator, types: ["icu"] });
+  if (has("monitor"))
+    limits.push({ rule: RULE_TEXT.monitor, types: ["icu", "hdu"] });
+  const needRules = limits.map((l) => l.rule);
+
+  // The ward types allowed, and the classes to try in turn when none of them has a free bed.
+  let wardTypes: WardType[];
+  let nearest: RoomClass[] = [];
+  if (limits.length) {
+    // Only wards every limiting need allows. The chosen class narrows them when it is one
+    // of them (HDU with a monitor: HDU, then ICU); otherwise the needs replace it (a
+    // ventilator means ICU). Isolation outranks the children's and maternity wards.
+    const allowed = limits.reduce(
+      (types, l) => types.filter((t) => l.types.includes(t)),
+      limits[0].types,
+    );
+    if (allowed.includes(req.roomClass)) {
+      wardTypes = [req.roomClass];
+      nearest = NEAREST_CLASSES[req.roomClass].filter((c) =>
+        allowed.includes(c),
+      );
+    } else {
+      wardTypes = allowed;
+    }
   } else if (req.age < 14 && req.roomClass !== "icu") {
-    classUsed = "paediatric";
     wardTypes = ["paediatric"];
     needRules.push(RULE_TEXT.child);
   } else if (has("pregnant") && req.roomClass !== "icu") {
-    classUsed = "maternity";
     wardTypes = ["maternity"];
     needRules.push(RULE_TEXT.pregnant);
   } else {
-    isStandardClass = true;
+    wardTypes = [req.roomClass];
+    nearest = NEAREST_CLASSES[req.roomClass];
   }
   if (has("oxygen")) needRules.push(RULE_TEXT.oxygen);
+  // No ward type meets every limiting need (isolation with a ventilator, say).
+  const conflict = wardTypes.length === 0;
 
-  // Every rule except the ward class: free, not the current bed, oxygen, gender.
+  // Every rule except the ward type: free, not the current bed, features, gender.
   const passes = (bed: BedInfo): boolean => {
     const ward = wardById.get(bed.wardId);
     if (!ward || !isFree(bed, now) || bed.id === req.currentBedId) return false;
     if (has("oxygen") && !bed.features.includes("oxygen")) return false;
-    if (needsVentilatorBed && !bed.features.includes("ventilator"))
+    if (has("ventilator") && !bed.features.includes("ventilator"))
       return false;
+    if (has("monitor") && !bed.features.includes("monitor")) return false;
     if (ward.gender === "male" && req.gender !== "Male") return false;
     if (ward.gender === "female" && req.gender !== "Female") return false;
     if (ward.type === "twin" && bed.room) {
@@ -169,12 +193,12 @@ export function applyRules(
 
   let candidates = inTypes(wardTypes);
   let classNote: string | undefined;
-  if (candidates.length === 0 && isStandardClass) {
-    for (const alt of NEAREST_CLASSES[req.roomClass]) {
+  if (candidates.length === 0) {
+    for (const alt of nearest) {
       const found = inTypes([alt]);
       if (found.length === 0) continue;
       candidates = found;
-      classUsed = alt;
+      wardTypes = [alt];
       const diff = rate(alt) - rate(req.roomClass);
       const d = Math.abs(diff).toLocaleString("en-IN");
       const priceDiff =
@@ -183,24 +207,30 @@ export function applyRules(
           : diff > 0
             ? `₹${d} more a day`
             : `₹${d} less a day`;
-      classNote = `No ${CLASS_LABEL[req.roomClass].toLowerCase()} beds free for this patient. ${CLASS_LABEL[alt]}, ${priceDiff}`;
+      classNote = `No ${lowerLabel(req.roomClass)} beds free for this patient. ${CLASS_LABEL[alt]}, ${priceDiff}`;
       break;
     }
   }
 
-  const classLabel = CLASS_LABEL[classUsed];
+  // The class the beds count as; "ICU or HDU" (a monitor with another class) counts as ICU.
+  const classUsed: RoomClass | "isolation" = wardTypes[0] ?? req.roomClass;
   const appliedRules = [RULE_TEXT.free, genderRule, ...needRules];
-  if (!appliedRules.includes(classLabel)) appliedRules.push(classLabel);
+  // The class label, unless a need's rule already names it ("Isolation room") or names
+  // several classes ("ICU or HDU (monitor)").
+  if (wardTypes.length === 1 && !appliedRules.includes(CLASS_LABEL[classUsed]))
+    appliedRules.push(CLASS_LABEL[classUsed]);
 
+  // A step-up only when no ticked need decides the ward.
   const stepUpPool =
-    has("oxygen") && STEP_UP_CLASSES.includes(classUsed)
+    !limits.length && has("oxygen") && STEP_UP_CLASSES.includes(classUsed)
       ? inTypes(["hdu"])
       : [];
 
-  const blockedBy =
-    candidates.length === 0
+  const blockedBy = conflict
+    ? [`No bed meets all of: ${limits.map((l) => l.rule).join(", ")}`]
+    : candidates.length === 0
       ? [
-          `No free ${classLabel.toLowerCase()} bed that matches: ${appliedRules.slice(1).join(", ")}`,
+          `No free ${wardTypes.map(lowerLabel).join(" or ")} bed that matches: ${appliedRules.slice(1).join(", ")}`,
         ]
       : [];
 
