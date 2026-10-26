@@ -48,6 +48,10 @@ export class Bed {
   @Prop({ type: MongooseSchema.Types.ObjectId })
   holdSuggestion?: Types.ObjectId;
 
+  /** The gender of the patient the bed is held for: a held twin bed keeps its room to one gender. */
+  @Prop({ type: String })
+  holdGender?: PatientGender;
+
   /** The active admission in this bed; absent for a sample occupant. */
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Admission', default: null })
   admission?: Types.ObjectId | null;

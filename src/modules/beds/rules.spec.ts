@@ -299,6 +299,29 @@ describe("applyRules", () => {
     );
   });
 
+  test("a twin roommate's live hold counts like an occupant", () => {
+    // Room 4: TWN-7 is free; TWN-8 is held for a man instead of occupied by a woman.
+    const heldFor = (expires: string) =>
+      beds.map((b) =>
+        b.id === "TWN-8"
+          ? {
+              ...b,
+              state: "held" as const,
+              occupantGender: undefined,
+              holdGender: "Male" as const,
+              holdExpiresAt: new Date(expires),
+            }
+          : b,
+      );
+    const live = heldFor("2026-09-26T10:05:00");
+    const twin = req({ roomClass: "twin" });
+    const twinWoman = req({ roomClass: "twin", gender: "Female" });
+    assert.ok(!ids(applyRules(twinWoman, wards, live, NOW)).includes("TWN-7"));
+    assert.ok(ids(applyRules(twin, wards, live, NOW)).includes("TWN-7"));
+    const expired = heldFor("2026-09-26T09:00:00");
+    assert.ok(ids(applyRules(twinWoman, wards, expired, NOW)).includes("TWN-7"));
+  });
+
   test("Other gender falls back to private", () => {
     const out = applyRules(req({ gender: "Other" }), wards, beds, NOW);
     assert.equal(out.classUsed, "private");

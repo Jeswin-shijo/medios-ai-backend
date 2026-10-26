@@ -5,7 +5,7 @@ import { clinicNow } from '../../common/utils/clinic-time';
 import { PatientsService } from '../patients/patients.service';
 import { Actor } from './actor';
 import { BedEvents } from './bed-events';
-import { BedInfo, BedState, Feature, GenderRule, Need, RoomClass, WardInfo, WardType } from './bed-types';
+import { BedInfo, BedState, Feature, GenderRule, Need, PatientGender, RoomClass, WardInfo, WardType } from './bed-types';
 import { HOLD_MINUTES, isFree } from './rules';
 import { Admission, AdmissionDocument } from './schemas/admission.schema';
 import { Bed, BedDocument } from './schemas/bed.schema';
@@ -68,7 +68,8 @@ type AdmissionRecord = Admission & { _id: Types.ObjectId };
 
 const HOLD_RAN_OUT = 'Your hold on this bed ran out. Choose a bed again.';
 const NOT_OCCUPIED = 'This bed is not occupied.';
-const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1 };
+const OTHER_GENDER_ROOM = 'This room now has a patient of another gender. Choose another bed.';
+const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1, holdGender: 1 };
 
 /** Free, or held with a hold that ran out (real clock): a bed the board shows as free. */
 const freeOrExpiredHold = (now: Date): FilterQuery<BedDocument> => ({
@@ -90,6 +91,7 @@ function toBedInfo(b: BedRecord): BedInfo {
   };
   if (b.room) bed.room = b.room;
   if (b.holdExpiresAt) bed.holdExpiresAt = b.holdExpiresAt;
+  if (b.holdGender) bed.holdGender = b.holdGender;
   if (b.occupantGender) bed.occupantGender = b.occupantGender;
   if (b.state === 'free') bed.freeSince = b.stateSince;
   return bed;
@@ -220,16 +222,58 @@ export class BedsService {
     return before;
   }
 
-  /** Holds a free bed (or one whose hold ran out) for the caller while they confirm. */
-  async hold(bedId: string, actor: Actor, suggestionId: string): Promise<{ bedId: string; holdExpiresAt: Date }> {
+  /**
+   * Holds a free bed (or one whose hold ran out) for the caller while they confirm, for a
+   * patient of this gender. A twin room keeps to one gender: its roommate counts while in
+   * the bed or holding it.
+   */
+  async hold(
+    bedId: string,
+    actor: Actor,
+    suggestionId: string,
+    gender: PatientGender,
+  ): Promise<{ bedId: string; holdExpiresAt: Date }> {
     const now = new Date();
+    if (await this.roommateClash(bedId, gender, now)) throw new ConflictException(OTHER_GENDER_ROOM);
     const holdExpiresAt = new Date(now.getTime() + HOLD_MINUTES * 60_000);
-    await this.transition(
+    const before = await this.transition(
       { _id: bedId, ...freeOrExpiredHold(now) },
-      { $set: { state: 'held', stateSince: clinicNow(), holdBy: actor.id, holdExpiresAt, holdSuggestion: suggestionId } },
+      { $set: { state: 'held', stateSince: clinicNow(), holdBy: actor.id, holdExpiresAt, holdSuggestion: suggestionId, holdGender: gender } },
       'That bed was just taken. Choose another.',
     );
+    // Checked again now the hold is in place: of two holds for different genders placed in
+    // the same room at once, at most one stays.
+    if (await this.roommateClash(bedId, gender, now)) {
+      await this.beds
+        .updateOne(
+          { _id: bedId, state: 'held', holdBy: actor.id, holdExpiresAt },
+          { $set: { state: 'free', stateSince: before.state === 'free' ? before.stateSince : clinicNow() }, $unset: HOLD_FIELDS },
+        )
+        .exec();
+      this.events.changed();
+      throw new ConflictException(OTHER_GENDER_ROOM);
+    }
     return { bedId, holdExpiresAt };
+  }
+
+  /** Whether the bed's twin roommate is, or is held for, a patient of another gender. */
+  private async roommateClash(bedId: string, gender: PatientGender, now: Date): Promise<boolean> {
+    const bed = await this.beds.findById(bedId).lean<BedRecord>().exec();
+    if (!bed?.room) return false;
+    const ward = await this.wards.findById(bed.ward).lean<WardRecord>().exec();
+    if (ward?.type !== 'twin') return false;
+    const roommate = await this.beds
+      .exists({
+        _id: { $ne: bed._id },
+        ward: bed.ward,
+        room: bed.room,
+        $or: [
+          { state: 'occupied', occupantGender: { $exists: true, $ne: gender } },
+          { state: 'held', holdExpiresAt: { $gt: now }, holdGender: { $exists: true, $ne: gender } },
+        ],
+      })
+      .exec();
+    return !!roommate;
   }
 
   /** Gives back the caller's hold; does nothing if they no longer hold the bed. */

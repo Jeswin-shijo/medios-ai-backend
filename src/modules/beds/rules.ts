@@ -81,6 +81,14 @@ const STEP_UP_CLASSES: Array<RoomClass | "isolation"> = [
   "emergency",
 ];
 
+/** The gender a twin roommate sets: the patient in the bed, or the one it is held for. */
+const roommateGender = (bed: BedInfo, now: Date) =>
+  bed.state === "occupied"
+    ? bed.occupantGender
+    : bed.state === "held" && !isFree(bed, now)
+      ? bed.holdGender
+      : undefined;
+
 /** A ticked need that limits which wards can be used. */
 interface WardLimit {
   rule: string;
@@ -163,15 +171,12 @@ export function applyRules(
     if (ward.gender === "male" && req.gender !== "Male") return false;
     if (ward.gender === "female" && req.gender !== "Female") return false;
     if (ward.type === "twin" && bed.room) {
-      const clash = beds.some(
-        (o) =>
-          o.id !== bed.id &&
-          o.wardId === bed.wardId &&
-          o.room === bed.room &&
-          o.state === "occupied" &&
-          o.occupantGender &&
-          o.occupantGender !== req.gender,
-      );
+      const clash = beds.some((o) => {
+        if (o.id === bed.id || o.wardId !== bed.wardId || o.room !== bed.room)
+          return false;
+        const roommate = roommateGender(o, now);
+        return !!roommate && roommate !== req.gender;
+      });
       if (clash) return false;
     }
     if (

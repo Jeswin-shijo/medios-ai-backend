@@ -83,8 +83,10 @@ export class BedsController {
   @Roles(...ADMIT_ROLES)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Hold a free bed for 5 minutes while the choice is confirmed' })
-  hold(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: HoldBedDto) {
-    return this.beds.hold(bedId, actorOf(user), dto.suggestionId);
+  async hold(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: HoldBedDto) {
+    // The suggestion's patient: a held twin bed keeps its room to that patient's gender.
+    const gender = await this.suggestions.patientGender(dto.suggestionId);
+    return this.beds.hold(bedId, actorOf(user), dto.suggestionId, gender);
   }
 
   @Delete(':bedId/hold')

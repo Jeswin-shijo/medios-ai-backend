@@ -38,6 +38,8 @@ export interface BedInfo {
   features: Feature[];
   state: BedState;
   holdExpiresAt?: Date;
+  /** The gender of the patient a held bed is for (the twin-room rule). */
+  holdGender?: PatientGender;
   occupantGender?: PatientGender;
   freeSince?: Date;
 }

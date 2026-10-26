@@ -247,6 +247,12 @@ describe('SuggestionsService', () => {
     assert.equal(String(chosen._id), suggestionId);
   });
 
+  test("patientGender is the suggestion's patient's gender", async () => {
+    const { suggestionId } = await service.suggest(nurse, arun());
+    assert.equal(await service.patientGender(suggestionId), 'Male');
+    await rejectsHttp(service.patientGender(new Types.ObjectId().toString()), 404, /not found/);
+  });
+
   test('recordChoice stores the outcome', async () => {
     const { suggestionId, top } = await service.suggest(nurse, arun());
     const admissionId = new Types.ObjectId().toString();

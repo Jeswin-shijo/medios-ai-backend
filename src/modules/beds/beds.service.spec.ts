@@ -7,11 +7,18 @@ import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { Actor } from './actor';
 import { BedEvents } from './bed-events';
+import { AdmissionRequestInput } from './bed-types';
 import { AdmitInput, BedsService } from './beds.service';
+import { applyRules } from './rules';
 
 const A: Actor = { id: 'user-a', name: 'Nurse Asha', role: UserRole.NURSE };
 const B: Actor = { id: 'user-b', name: 'Dr. Bala', role: UserRole.DOCTOR };
 const suggestionId = new Types.ObjectId().toString();
+const OTHER_GENDER = 'This room now has a patient of another gender. Choose another bed.';
+/** A woman asking for a twin room. */
+const woman: AdmissionRequestInput = {
+  age: 40, gender: 'Female', roomClass: 'twin', needs: [], department: 'General Medicine', expectedStayDays: 3, notes: '',
+};
 
 /** Counts change signals. */
 class SpyEvents extends BedEvents {
@@ -55,6 +62,22 @@ describe('BedsService', () => {
   });
   const bed = (id: string) => Bed.findById(id).lean().exec();
   const expireHold = (id: string) => Bed.updateOne({ _id: id }, { holdExpiresAt: new Date(Date.now() - 60_000) }).exec();
+  /** Twin room 3: beds A and B, both free. Returns their ids. */
+  const twinRoom = async (): Promise<[string, string]> => {
+    const ward = await Ward.create({
+      code: 'TWN', name: 'Twin-sharing rooms', shortName: 'Twin', floor: 2, type: 'twin', gender: 'any',
+      ratePerDay: 1500, nearDepartments: [], sortOrder: 2,
+    });
+    const [a, b] = await Bed.create([
+      { ward: ward._id, label: 'Twin 3 • Bed A', number: 5, room: '3', features: [], state: 'free' },
+      { ward: ward._id, label: 'Twin 3 • Bed B', number: 6, room: '3', features: [], state: 'free' },
+    ]);
+    return [String(a._id), String(b._id)];
+  };
+  const offeredTo = async (req: AdmissionRequestInput) => {
+    const { wards, beds } = await service.inventory();
+    return applyRules(req, wards, beds, new Date()).candidates.map((c) => c.id);
+  };
 
   before(async () => {
     await connectTestDb();
@@ -96,7 +119,7 @@ describe('BedsService', () => {
   });
 
   test('concurrent holds: exactly one wins', async () => {
-    const results = await Promise.allSettled([service.hold(b1, A, suggestionId), service.hold(b1, B, suggestionId)]);
+    const results = await Promise.allSettled([service.hold(b1, A, suggestionId, 'Male'), service.hold(b1, B, suggestionId, 'Male')]);
     assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     assert.equal(rejected.length, 1);
@@ -105,17 +128,60 @@ describe('BedsService', () => {
   });
 
   test('expired hold can be taken', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await expireHold(b1);
-    const held = await service.hold(b1, B, suggestionId);
+    const held = await service.hold(b1, B, suggestionId, 'Male');
     assert.equal(held.bedId, b1);
     assert.ok(held.holdExpiresAt.getTime() > Date.now());
     assert.equal((await bed(b1)).holdBy, B.id);
   });
 
+  test('a twin room stays one gender: a held or occupied roommate refuses another gender', async () => {
+    const [a, b] = await twinRoom();
+    await service.hold(a, A, suggestionId, 'Male');
+    assert.equal((await bed(a)).holdGender, 'Male');
+    await assert.rejects(
+      service.hold(b, B, suggestionId, 'Female'),
+      (err: unknown) => err instanceof ConflictException && err.message === OTHER_GENDER,
+    );
+    assert.equal((await bed(b)).state, 'free');
+
+    // Admitted, the man still keeps the room male.
+    await service.admit(a, A, input());
+    assert.equal((await bed(a)).holdGender, undefined);
+    await assert.rejects(service.hold(b, B, suggestionId, 'Female'), (err: unknown) => (err as Error).message === OTHER_GENDER);
+    await service.hold(b, B, suggestionId, 'Male');
+    await service.release(b, B);
+    assert.equal((await bed(b)).holdGender, undefined);
+  });
+
+  test('two holds for different genders in one twin room at once: at most one stays', async () => {
+    const [a, b] = await twinRoom();
+    const results = await Promise.allSettled([service.hold(a, A, suggestionId, 'Male'), service.hold(b, B, suggestionId, 'Female')]);
+    const held = await Bed.countDocuments({ _id: { $in: [a, b] }, state: 'held' }).exec();
+    assert.ok(held <= 1, `${held} beds held`);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, held);
+  });
+
+  test("the rules leave out a twin bed whose roommate is held for another gender", async () => {
+    const [a, b] = await twinRoom();
+    await service.hold(a, A, suggestionId, 'Male');
+    assert.ok(!(await offeredTo(woman)).includes(b));
+    assert.ok((await offeredTo({ ...woman, gender: 'Male' })).includes(b));
+  });
+
+  test('an expired hold does not count for the twin room', async () => {
+    const [a, b] = await twinRoom();
+    await service.hold(a, A, suggestionId, 'Male');
+    await expireHold(a);
+    assert.ok((await offeredTo(woman)).includes(b));
+    await service.hold(b, B, suggestionId, 'Female');
+    assert.equal((await bed(b)).holdGender, 'Female');
+  });
+
   test("admit needs the caller's live hold", async () => {
     await assert.rejects(service.admit(b1, A, input()), /hold on this bed ran out/);
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await assert.rejects(service.admit(b1, B, input()), /hold on this bed ran out/);
     await expireHold(b1);
     await assert.rejects(service.admit(b1, A, input()), /hold on this bed ran out/);
@@ -123,7 +189,7 @@ describe('BedsService', () => {
   });
 
   test('admit occupies the bed and admits the patient', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
 
     const occupied = await bed(b1);
@@ -144,16 +210,16 @@ describe('BedsService', () => {
   });
 
   test('same patient cannot be admitted twice', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await service.admit(b1, A, input());
-    await service.hold(b2, A, suggestionId);
+    await service.hold(b2, A, suggestionId, 'Male');
     await assert.rejects(service.admit(b2, A, input()), /already admitted/);
     assert.equal((await bed(b2)).state, 'held');
     assert.equal(await Admission.countDocuments({ status: 'active' }).exec(), 1);
   });
 
   test('expired hold at confirm', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await expireHold(b1);
     await assert.rejects(service.admit(b1, A, input()), /ran out/);
     assert.equal(await Admission.countDocuments().exec(), 0);
@@ -161,7 +227,7 @@ describe('BedsService', () => {
   });
 
   test('discharge → cleaning and patient Discharged', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
     await service.discharge(b1, B);
 
@@ -207,7 +273,7 @@ describe('BedsService', () => {
   });
 
   test('a bed whose hold expired can be blocked; a live hold cannot', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await expireHold(b1);
     await service.block(b1, B, 'Broken rail');
     const blocked = await bed(b1);
@@ -216,16 +282,17 @@ describe('BedsService', () => {
     assert.equal(blocked.holdBy, undefined);
     assert.equal(blocked.holdExpiresAt, undefined);
     assert.equal(blocked.holdSuggestion, undefined);
+    assert.equal(blocked.holdGender, undefined);
 
-    await service.hold(b2, A, suggestionId);
+    await service.hold(b2, A, suggestionId, 'Male');
     await assert.rejects(service.block(b2, B, 'Broken rail'), /Only a free bed can be blocked\./);
     assert.equal((await bed(b2)).state, 'held');
   });
 
   test('transfer moves the patient', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
-    await service.hold(b2, A, suggestionId);
+    await service.hold(b2, A, suggestionId, 'Male');
     await service.transfer(b1, A, { toBedId: b2, suggestionId, reason: 'Needs to be nearer the nurses' });
 
     const to = await bed(b2);
@@ -245,7 +312,7 @@ describe('BedsService', () => {
   });
 
   test('transfer without a live hold on the new bed leaves the patient where they are', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
     await assert.rejects(service.transfer(b1, A, { toBedId: b2, suggestionId }), /hold on this bed ran out/);
 
@@ -257,7 +324,7 @@ describe('BedsService', () => {
   });
 
   test('board totals and expired holds read as free', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     await expireHold(b1);
     const board = await service.board(B);
     assert.equal(board.beds.find((b) => b.id === b1).state, 'free');
@@ -265,9 +332,9 @@ describe('BedsService', () => {
   });
 
   test('board shows holds and the admitted patient', async () => {
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
-    await service.hold(b2, A, suggestionId);
+    await service.hold(b2, A, suggestionId, 'Male');
 
     const board = await service.board(A);
     assert.deepEqual(board.wards.map((w) => w.code), ['GWA', 'ICU']);
@@ -289,7 +356,7 @@ describe('BedsService', () => {
 
   test('inventory and the active admission', async () => {
     assert.equal(await service.activeAdmissionForPatient(patientId), null);
-    await service.hold(b1, A, suggestionId);
+    await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
     assert.equal(String((await service.activeAdmissionForPatient(patientId))._id), String(admission._id));
 
@@ -311,7 +378,7 @@ describe('BedsService', () => {
       assert.ok(events.calls > last);
       last = events.calls;
     };
-    await emits(() => service.hold(b1, A, suggestionId));
+    await emits(() => service.hold(b1, A, suggestionId, 'Male'));
     await emits(() => service.admit(b1, A, input()));
     await emits(() => service.discharge(b1, A));
     await emits(() => service.markCleaned(b1, A));

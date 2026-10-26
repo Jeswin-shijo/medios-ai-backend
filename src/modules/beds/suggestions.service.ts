@@ -227,6 +227,13 @@ export class SuggestionsService {
     return log;
   }
 
+  /** The gender of the suggestion's patient, which a held bed records for the twin-room rule. */
+  async patientGender(suggestionId: string): Promise<PatientGender> {
+    const log = await this.load(suggestionId);
+    const patient = await this.patients.findOne(String(log.patient));
+    return patient.gender as PatientGender;
+  }
+
   /** Saves the bed finally chosen and the admission it went to. */
   async recordChoice(
     suggestionId: string,
