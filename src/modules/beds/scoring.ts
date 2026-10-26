@@ -22,10 +22,24 @@ const W_CLASS_MISMATCH = 30;
 const MAX_STEP_UP_INDEX = 2; // a step-up bed is never placed below 3rd
 const CLOSE_WATCH_AGE = 70;
 
-export const formatRate = (rate: number): string => `₹${rate.toLocaleString('en-IN')}/day`;
+/** Longest reason shown on a bed card, from the rules or the AI. */
+export const REASON_MAX = 140;
+/** The reason for a bed with nothing else to say about it. */
+export const PLAIN_REASON = 'Free now and matches the requested ward';
 
+/** Cuts a reason to REASON_MAX characters, at a word where it can, with an ellipsis. */
+export function clipReason(reason: string): string {
+  const text = reason.trim();
+  if (text.length <= REASON_MAX) return text;
+  const cut = text.slice(0, REASON_MAX - 1);
+  const atWord = cut.slice(0, cut.lastIndexOf(' '));
+  return `${(atWord || cut).trimEnd()}…`;
+}
+
+// Reason fragments name advantages only: the card shows the price and floor on their own.
 const TEXT = {
   nearNurses: "Near the nurses' station",
+  groundFloor: 'Ground floor',
   oxygen: 'Oxygen point',
   stepUp: 'Closer monitoring (HDU)',
   icuReserve: 'Last free ICU bed kept for critical patients',
@@ -97,7 +111,7 @@ export function rankBeds(
       }
       if (ward) {
         total += (topFloor - ward.floor) * W_LOWER_FLOOR;
-        reasons.push(`Floor ${ward.floor}`);
+        if (ward.floor === 0) reasons.push(TEXT.groundFloor);
       }
     }
     if (bed.features.includes('oxygen')) {
@@ -110,8 +124,7 @@ export function rankBeds(
     }
     if (stepUp || (classOffered && ward?.type !== req.roomClass)) total -= W_CLASS_MISMATCH;
     if (stepUp) reasons.push(TEXT.stepUp);
-    reasons.push(formatRate(ward?.ratePerDay ?? 0));
-    return { bedId: bed.id, score: total, reasons, reason: reasons.join(' • '), stepUp };
+    return { bedId: bed.id, score: total, reasons, reason: clipReason(reasons.join(' • ') || PLAIN_REASON), stepUp };
   };
 
   const freeSince = (id: string) => beds.find((b) => b.id === id)?.freeSince?.getTime() ?? Infinity;

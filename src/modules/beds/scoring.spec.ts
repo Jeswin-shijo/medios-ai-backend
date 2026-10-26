@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import { inventoryFromSeed, setState } from '../../test/bed-fixtures';
 import { AdmissionRequestInput } from './bed-types';
 import { RuleOutcome, applyRules } from './rules';
-import { formatRate, rankBeds } from './scoring';
+import { rankBeds } from './scoring';
 
 const NOW = new Date('2026-09-26T10:00:00');
 const { wards, beds } = inventoryFromSeed(NOW);
@@ -38,8 +38,39 @@ describe('rankBeds', () => {
     assert.equal(ranked[0].bedId, 'GWA-4');
     assert.ok(ranked[0].reasons.includes("Near the nurses' station"));
     assert.ok(ranked[0].reasons.includes('Oxygen point'));
-    assert.ok(ranked[0].reason.endsWith('₹800/day'));
+    // The price is shown on its own on the card, so the reason leaves it out.
+    assert.equal(ranked[0].reason, "Near the nurses' station • Oxygen point • Near General Medicine");
     assert.ok(ranked.some((r) => r.bedId === 'GWA-8'));
+  });
+
+  test('reasons have no price and no floor numbers; close watch notes the ground floor', () => {
+    const { ranked } = rank(arun());
+    for (const r of ranked) {
+      assert.ok(!/₹|\/day|Floor \d/.test(r.reason), r.reason);
+      assert.ok(r.reason.length <= 140);
+    }
+    const hdu = ranked.find((r) => r.stepUp);
+    assert.deepEqual(hdu?.reasons, ["Near the nurses' station", 'Ground floor', 'Oxygen point', 'Closer monitoring (HDU)']);
+    // Ward A is on the 1st floor: no floor fragment.
+    assert.ok(!ranked[0].reasons.some((r) => /floor/i.test(r)));
+    // Without close watch, the ground floor is not a reason.
+    assert.ok(!rank(req({ needs: ['monitor'] })).ranked.some((r) => r.reasons.includes('Ground floor')));
+  });
+
+  test('a bed with no other reason gets a plain one', () => {
+    const bed = rank(req({ department: 'Cardiology' })).ranked.find((r) => r.bedId === 'GWA-15');
+    assert.deepEqual(bed?.reasons, []);
+    assert.equal(bed?.reason, 'Free now and matches the requested ward');
+  });
+
+  test('a long department name still gives a reason of at most 140 characters', () => {
+    const department = 'Department of '.repeat(7).trim();
+    const inv = beds.map((b) => b);
+    const longWards = wards.map((w) => (w.code === 'GWA' ? { ...w, nearDepartments: [department] } : w));
+    const r = req({ age: 72, needs: ['oxygen'], department });
+    const { ranked } = rankBeds(r, applyRules(r, longWards, inv, NOW), longWards, inv, NOW);
+    assert.ok(ranked[0].reasons.includes(`Near ${department}`));
+    assert.ok(ranked[0].reason.length <= 140 && ranked[0].reason.endsWith('…'), ranked[0].reason);
   });
 
   test('one step-up in the top 3', () => {
@@ -134,9 +165,5 @@ describe('rankBeds', () => {
   test('elderly prefers near the nurses', () => {
     const { ranked } = rank(req({ age: 72, gender: 'Female' }));
     assert.equal(ranked[0].bedId, 'GWB-3');
-  });
-
-  test('formatRate', () => {
-    assert.equal(formatRate(7500), '₹7,500/day');
   });
 });

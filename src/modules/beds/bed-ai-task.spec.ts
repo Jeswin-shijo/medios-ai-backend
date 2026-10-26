@@ -117,6 +117,20 @@ describe('bed AI task', () => {
     assert.ok(bedAiTask(input).validate(out));
   });
 
+  test('sample reasons read as sentences, without price or floor numbers', () => {
+    const { input } = build();
+    const out = sampleBedAiOutput(input);
+    assert.equal(out.picks[0].reason, "Near the nurses' station, oxygen point and near General Medicine.");
+    assert.equal(out.picks[1].reason, "Near the nurses' station, ground floor, oxygen point and closer monitoring (HDU).");
+    for (const p of out.picks) assert.ok(!/₹|\/day|floor \d/i.test(p.reason), p.reason);
+  });
+
+  test('sample reason for a bed with no rule reasons', () => {
+    const { input } = build();
+    const bare: BedAiInput = { ...input, candidates: [{ ...input.candidates[0], ruleReasons: [] }] };
+    assert.equal(sampleBedAiOutput(bare).picks[0].reason, 'Free now and matches the requested ward.');
+  });
+
   test('sample matches SpO₂ and skips needs already ticked', () => {
     const base = build('SpO₂ 89% on air, fall last week').input;
     const input: BedAiInput = { ...base, possibleExtraNeeds: [...base.possibleExtraNeeds, 'oxygen'] };

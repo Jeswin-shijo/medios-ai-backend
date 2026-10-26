@@ -10,11 +10,10 @@ import {
   WardInfo,
 } from './bed-types';
 import { PatientIdentity, deidentify } from './deidentify';
-import { RankedBed } from './scoring';
+import { PLAIN_REASON, REASON_MAX, RankedBed, clipReason } from './scoring';
 
 export const AI_CANDIDATE_LIMIT = 5;
 export const AI_PICK_LIMIT = 3;
-export const AI_REASON_MAX = 140;
 export const NOTES_MAX = 4000;
 
 // Type aliases (not interfaces) so BedAiInput is assignable to Record<string, unknown>.
@@ -50,7 +49,7 @@ export type BedAiOutput = {
 const INSTRUCTIONS = [
   'You help a hospital admissions desk choose a bed. You are given a de-identified patient summary, the free-text doctor notes, and up to 5 candidate beds that already follow the hospital rules.',
   'Choose only refs that appear in candidates. Order the best first.',
-  `Give at most ${AI_PICK_LIMIT} picks, each with a reason under ${AI_REASON_MAX} characters in plain English.`,
+  `Give at most ${AI_PICK_LIMIT} picks, each with a reason under ${REASON_MAX} characters in plain English.`,
   'Suggest an extra need only from possibleExtraNeeds, and quote the exact words from notes as its evidence.',
   'Never mention or guess the patient identity.',
 ].join('\n');
@@ -144,14 +143,6 @@ export function bedAiTask(input: BedAiInput): StructuredTask<BedAiOutput> {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function truncateReason(reason: string): string {
-  const text = reason.trim();
-  if (text.length <= AI_REASON_MAX) return text;
-  const cut = text.slice(0, AI_REASON_MAX - 1);
-  const atWord = cut.slice(0, cut.lastIndexOf(' '));
-  return `${(atWord || cut).trimEnd()}…`;
-}
-
 export function validateBedAiOutput(raw: unknown, input: BedAiInput): BedAiOutput | null {
   if (!isRecord(raw) || !Array.isArray(raw.picks) || !Array.isArray(raw.extraNeeds)) return null;
 
@@ -163,7 +154,7 @@ export function validateBedAiOutput(raw: unknown, input: BedAiInput): BedAiOutpu
     if (!isRecord(p) || typeof p.ref !== 'string' || typeof p.reason !== 'string') continue;
     if (!knownRefs.has(p.ref) || seenRefs.has(p.ref)) continue;
     seenRefs.add(p.ref);
-    picks.push({ ref: p.ref, reason: truncateReason(p.reason) });
+    picks.push({ ref: p.ref, reason: clipReason(p.reason) });
   }
   if (picks.length === 0) return null;
 
@@ -191,12 +182,13 @@ const KEYWORDS: Array<[Need, RegExp]> = [
   ['highFallRisk', /\bfall\w*/i],
 ];
 
+/** The rule reasons as one sentence: "Near the nurses' station, oxygen point and near General Medicine." */
 function sampleReason(ruleReasons: string[]): string {
-  if (ruleReasons.length === 0) return 'Fits the hospital bed rules.';
+  if (ruleReasons.length === 0) return `${PLAIN_REASON}.`;
   const [first, ...rest] = ruleReasons;
-  const lowered = rest.map((r) => r.charAt(0).toLowerCase() + r.slice(1));
-  const text = lowered.length ? `${first} with ${lowered.join(' and ')}` : first;
-  return truncateReason(`${text}.`);
+  const parts = [first, ...rest.map((r) => r.charAt(0).toLowerCase() + r.slice(1))];
+  const last = parts.pop();
+  return clipReason(`${parts.length ? `${parts.join(', ')} and ${last}` : last}.`);
 }
 
 export function sampleBedAiOutput(input: BedAiInput): BedAiOutput {
