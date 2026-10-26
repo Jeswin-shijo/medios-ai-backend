@@ -33,6 +33,10 @@ services:
       # Switch to "lax" once both share one domain (app.example.com + api.example.com).
       - key: COOKIE_SAMESITE
         value: none
+      # AI bed suggestions: "sample" gives canned, clearly marked answers with no key.
+      # For real AI set "claude" and add ANTHROPIC_API_KEY in the Render dashboard (never here).
+      - key: AI_PROVIDER
+        value: sample
       # AI call agent: starts off. Set to "snapserve" once the four values below are filled in.
       - key: CALL_PROVIDER
         value: none

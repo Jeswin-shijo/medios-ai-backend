@@ -59,6 +59,8 @@ hospital-backend/
 │       ├── dashboard/          # Aggregated KPIs, patient flow, live schedule (/api/dashboard/*)
 │       ├── calls/              # AI call agent: confirmation & booking calls (/api/calls/*)
 │       ├── queue/              # Check-in tokens, room calls, waiting-room displays (/api/queue/*)
+│       ├── beds/               # Bed board, AI-assisted admit, transfer, discharge, housekeeping (/api/beds/*)
+│       ├── ai/                 # Shared AI module: none / sample / claude providers (/api/ai/*)
 │       └── settings/           # Hospital metadata, staff & AI configs (/api/settings/*)
 ```
 
@@ -202,12 +204,25 @@ Before using real calls, get patients' consent to automated calls and follow TRA
 
 ---
 
+## 🛏️ Beds and admissions
+
+The `beds` module is the live bed board and the admit flow (admit, transfer, discharge, clean, block). A bed is `free`, `held`, `occupied`, `cleaning` or `blocked`, and one bed holds one patient: holding and occupying are single conditional updates, so two people racing for a bed get one success and one clear conflict error.
+
+- **Rules decide, AI advises.** Fixed rules (free and cleaned, ward gender, room class, needed features such as oxygen or a monitor) remove beds that must not be used. The rest are ranked by preferences (nearness to the department, rate, step-up care). The AI sees only the top 5 and may reorder them and explain up to 3 in plain English (each reason at most 140 characters). If the AI is off, slow or answers badly, staff see the rule-based list and no error.
+- **Bed hold.** A chosen bed is held for 5 minutes while the admission is confirmed; `DELETE /api/beds/:bedId/hold` gives it back.
+- **Roles.** Board, stream, suggestions, hold, admit, transfer and discharge: admin, doctor, nurse, staff. Mark cleaned, block and unblock: admin, nurse, staff. Ignoring the rules (with a reason): admin and doctor. Pharmacist and lab have no access.
+- **Routes** (all under `/api/beds`): `GET board`, `GET stream` (server-sent events: `changed` and `ping`), `POST suggestions`, `POST suggestions/:id/refine`, `POST :bedId/hold`, `DELETE :bedId/hold`, `POST :bedId/admit`, `POST :bedId/transfer`, `POST :bedId/discharge`, `POST :bedId/clean`, `POST :bedId/block`, `POST :bedId/unblock`.
+- **Privacy.** The AI never gets the patient's name, UHID, phone, address, email or any database id. Doctor's notes (at most 4,000 characters) are stripped of those details first, and beds go out as per-request tokens. Every suggestion, its AI output or failure, and the bed finally chosen is saved for later review.
+- **Data.** `npm run seed` loads a demo layout of 11 wards and 138 beds. For the hospital's real layout, see the CSV import below.
+
+---
+
 ## 🤖 AI
 
 One shared AI module (`src/modules/ai`) runs structured requests for features such as bed suggestions. `AI_PROVIDER` picks the mode:
 
 - `sample` (development default): canned answers; no AI service is called.
-- `claude`: real answers from Anthropic. Needs `ANTHROPIC_API_KEY`; `AI_MODEL` defaults to `claude-opus-5-5` and `AI_TIMEOUT_MS` to 8000.
+- `claude`: real answers from Anthropic. Needs `ANTHROPIC_API_KEY`; `AI_MODEL` defaults to `claude-opus-5-5` and `AI_TIMEOUT_MS` (milliseconds to wait for the AI before using the rules) to 8000.
 - `none` (production default): AI is off.
 
 The API key lives only in `.env` (never commit it). Each feature also has an on/off switch in Settings (`ai.bedSuggestions`). `GET /api/ai/status` shows the active mode; `POST /api/ai/check` (admin) tests the connection. If the AI is off, slow or answers badly, features fall back to their rules.
@@ -261,6 +276,19 @@ Check-in gives the patient a numbered token for the day. Staff call tokens to a 
 - `printSlips` per kiosk: the kiosk prints an 80 mm slip after each new token. The tap response carries the current value, so switching it applies from the next tap.
 - Taps at the front desk use `POST /api/queue/cards/tap` with a staff session. An unknown card answers 404, and the web app then offers to link it.
 - The seed links three demo cards: `04A1B2C3` (Rekha S), `0004567890` (David Raj) and `04C8D9E0F1A2B3` (Selvi A). Cards linked by hand survive a reseed.
+
+---
+
+## 🧪 Tests
+
+```bash
+docker start medios-mongodb   # the database specs need MongoDB running
+npm test                      # every src/**/*.spec.ts, using Node's built-in runner
+npm run test:file -- src/modules/beds/rules.spec.ts   # one file
+npx tsc --noEmit -p tsconfig.json                      # type-checks the specs too
+```
+
+Specs that touch the database use `medios_test` only, never your working database.
 
 ---
 

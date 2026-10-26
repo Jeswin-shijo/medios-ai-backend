@@ -90,6 +90,16 @@ To fix it, put both under one domain you own:
 
 The API refuses to start if `CALL_PROVIDER=snapserve` is set without these values. The error message names the missing one.
 
+## 7. AI bed suggestions
+
+The Beds screen suggests where to admit a patient. The rules always work; AI only reorders and explains the top beds. `AI_PROVIDER` picks the mode (`none` is the default in production):
+
+- **Demo on Render:** `AI_PROVIDER=sample`. Answers are canned and marked SAMPLE, and no key is needed. `render.yaml` sets this.
+- **Real AI:** set `AI_PROVIDER=claude` and add `ANTHROPIC_API_KEY` in the host's dashboard (Render: Environment). Optional: `AI_MODEL` (default `claude-opus-5-5`) and `AI_TIMEOUT_MS` (default 8000). Never put the key in chat, in the repo or in `render.yaml`.
+- Changing settings in Render is the owner's call: confirm before you change them. Editing `render.yaml` only takes effect after it is pushed and Render syncs the Blueprint.
+- Then open Settings, AI Assistant and press **Check connection**. An admin can also switch AI bed suggestions off there without touching the host.
+- Load the hospital's real wards and beds with `npm run import-beds` (see the README) instead of the demo seed.
+
 ## Mobile app
 
 Build the Expo app with `EXPO_PUBLIC_API_URL=https://<api-address>/api`.
