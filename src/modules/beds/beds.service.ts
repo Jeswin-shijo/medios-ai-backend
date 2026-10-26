@@ -81,6 +81,7 @@ type AdmissionRecord = Admission & { _id: Types.ObjectId };
 const HOLD_RAN_OUT = 'Your hold on this bed ran out. Choose a bed again.';
 const NOT_OCCUPIED = 'This bed is not occupied.';
 const OTHER_GENDER_ROOM = 'This room now has a patient of another gender. Choose another bed.';
+const BED_CHANGED = 'This bed changed since you opened it. Check the board and try again.';
 const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1, holdGender: 1 };
 
 /** Free, or held with a hold that ran out (real clock): a bed the board shows as free. */
@@ -422,14 +423,25 @@ export class BedsService {
     return admission;
   }
 
-  /** The bed goes to cleaning and its admission ends. */
-  async discharge(bedId: string, actor: Actor): Promise<void> {
+  /**
+   * Ends the admission staff saw in the bed (`admissionId`; null for a sample occupant) and
+   * sends the bed to cleaning. The admission is part of the update's condition, so a panel
+   * opened before a transfer or another discharge cannot end someone else's stay.
+   */
+  async discharge(bedId: string, actor: Actor, admissionId: string | null): Promise<void> {
     const at = clinicNow();
-    const before = await this.transition(
-      { _id: bedId, state: 'occupied' },
-      { $set: { state: 'cleaning', stateSince: at, admission: null, sample: false }, $unset: { occupantGender: 1 } },
-      NOT_OCCUPIED,
-    );
+    let before: BedDocument;
+    try {
+      before = await this.transition(
+        { _id: bedId, state: 'occupied', admission: admissionId ?? null },
+        { $set: { state: 'cleaning', stateSince: at, admission: null, sample: false }, $unset: { occupantGender: 1 } },
+        BED_CHANGED,
+      );
+    } catch (err) {
+      // Still occupied: by someone other than the patient named. Otherwise it was never occupied.
+      if (await this.beds.exists({ _id: bedId, state: 'occupied' }).exec()) throw err;
+      throw new ConflictException(NOT_OCCUPIED);
+    }
     // A sample occupant has no admission and no patient record to update.
     if (!before.admission) return;
     // Matching the bed: if a transfer moved the patient meanwhile, their admission stays.

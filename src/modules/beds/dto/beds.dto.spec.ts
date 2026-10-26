@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { BlockBedDto, SuggestBedsDto } from './beds.dto';
+import { BlockBedDto, DischargeBedDto, SuggestBedsDto } from './beds.dto';
 
 const valid = {
   patientId: 'MHK202500324',
@@ -41,5 +41,15 @@ describe('BlockBedDto', () => {
     assert.equal((await validate(plainToInstance(BlockBedDto, {}))).length, 1);
     assert.equal((await validate(plainToInstance(BlockBedDto, { reason: 'x'.repeat(201) }))).length, 1);
     assert.deepEqual(await validate(plainToInstance(BlockBedDto, { reason: 'Leaking tap' })), []);
+  });
+});
+
+describe('DischargeBedDto', () => {
+  test('takes an admission id, or none for a sample occupant', async () => {
+    const check = (body: object) => validate(plainToInstance(DischargeBedDto, body));
+    assert.deepEqual(await check({}), []);
+    assert.deepEqual(await check({ admissionId: null }), []);
+    assert.deepEqual(await check({ admissionId: '66f1c0a2b3c4d5e6f7a8b9c0' }), []);
+    assert.equal((await check({ admissionId: 'bed-12' })).length, 1);
   });
 });

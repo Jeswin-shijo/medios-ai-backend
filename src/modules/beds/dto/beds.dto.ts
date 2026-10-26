@@ -91,6 +91,13 @@ export class TransferBedDto extends AdmitBedDto {
   toBedId: string;
 }
 
+export class DischargeBedDto {
+  @ApiPropertyOptional({ description: 'The admission staff saw in the bed; null or left out for a sample occupant', nullable: true })
+  @IsOptional()
+  @IsMongoId()
+  admissionId?: string | null;
+}
+
 export class BlockBedDto {
   @ApiProperty({ example: 'Repairs: oxygen point' })
   @IsString()

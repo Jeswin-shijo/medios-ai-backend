@@ -229,7 +229,7 @@ describe('BedsService', () => {
   test('discharge → cleaning and patient Discharged', async () => {
     await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
-    await service.discharge(b1, B);
+    await service.discharge(b1, B, String(admission._id));
 
     const cleaning = await bed(b1);
     assert.equal(cleaning.state, 'cleaning');
@@ -242,11 +242,32 @@ describe('BedsService', () => {
     assert.equal(stored.dischargedBy, B.name);
     assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Discharged');
 
-    await assert.rejects(service.discharge(b1, B), /This bed is not occupied\./);
+    await assert.rejects(service.discharge(b1, B, String(admission._id)), /This bed is not occupied\./);
+  });
+
+  test('discharge must name the admission in the bed: a stale one changes nothing', async () => {
+    await service.hold(b1, A, suggestionId, 'Male');
+    const admission = await service.admit(b1, A, input());
+    const changed = (err: unknown) =>
+      err instanceof ConflictException && err.message === 'This bed changed since you opened it. Check the board and try again.';
+    const calls = events.calls;
+
+    await assert.rejects(service.discharge(b1, B, new Types.ObjectId().toString()), changed);
+    await assert.rejects(service.discharge(b1, B, null), changed);
+    // A sample occupant has no admission: naming one is stale too.
+    await assert.rejects(service.discharge(b3, B, String(admission._id)), changed);
+
+    const kept = await bed(b1);
+    assert.equal(kept.state, 'occupied');
+    assert.equal(String(kept.admission), String(admission._id));
+    assert.equal((await Admission.findById(admission._id).lean().exec()).status, 'active');
+    assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
+    assert.equal((await bed(b3)).state, 'occupied');
+    assert.equal(events.calls, calls);
   });
 
   test('discharge a sample bed without admission', async () => {
-    await service.discharge(b3, A);
+    await service.discharge(b3, A, null);
     const cleaning = await bed(b3);
     assert.equal(cleaning.state, 'cleaning');
     assert.equal(cleaning.sample, false);
@@ -401,8 +422,9 @@ describe('BedsService', () => {
       last = events.calls;
     };
     await emits(() => service.hold(b1, A, suggestionId, 'Male'));
-    await emits(() => service.admit(b1, A, input()));
-    await emits(() => service.discharge(b1, A));
+    let admissionId = '';
+    await emits(async () => (admissionId = String((await service.admit(b1, A, input()))._id)));
+    await emits(() => service.discharge(b1, A, admissionId));
     await emits(() => service.markCleaned(b1, A));
     await emits(() => service.block(b1, A, 'Broken rail'));
   });

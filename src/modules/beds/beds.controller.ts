@@ -9,7 +9,7 @@ import { BedEvents } from './bed-events';
 import { BedsService } from './beds.service';
 import { assertSuggestionFitsBed } from './transfer-check';
 import { SuggestionsService } from './suggestions.service';
-import { AdmitBedDto, BlockBedDto, HoldBedDto, SuggestBedsDto, TransferBedDto } from './dto/beds.dto';
+import { AdmitBedDto, BlockBedDto, DischargeBedDto, HoldBedDto, SuggestBedsDto, TransferBedDto } from './dto/beds.dto';
 
 /** A comment line goes out this often so proxies keep the stream open. */
 const PING_MS = 25_000;
@@ -144,9 +144,9 @@ export class BedsController {
   @Post(':bedId/discharge')
   @Roles(...ADMIT_ROLES)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Discharge the patient; the bed goes to cleaning' })
-  async discharge(@CurrentUser() user: any, @Param('bedId') bedId: string) {
-    await this.beds.discharge(bedId, actorOf(user));
+  @ApiOperation({ summary: 'Discharge the admission named (none for a sample occupant); the bed goes to cleaning' })
+  async discharge(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: DischargeBedDto) {
+    await this.beds.discharge(bedId, actorOf(user), dto.admissionId ?? null);
     return OK;
   }
 
