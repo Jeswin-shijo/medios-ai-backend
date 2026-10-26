@@ -1,4 +1,4 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types, UpdateQuery, mongo } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -52,6 +52,18 @@ export interface BedBoardBed {
   /** Set on held beds: whether the viewer holds it. */
   heldByMe?: boolean;
   patient?: { id: string; name: string; uhid: string; admissionId: string; admittedAt: string };
+}
+
+/** The admitted patient in a bed and what their admission asked for: a transfer starts from it. */
+export interface BedAdmission {
+  admissionId: string;
+  patient: { id: string; name: string; uhid: string; age: number; gender: PatientGender };
+  roomClass: RoomClass;
+  needs: Need[];
+  department: string;
+  doctor: string;
+  notes: string;
+  expectedStayDays: number;
 }
 
 export interface BedBoard {
@@ -203,6 +215,27 @@ export class BedsService {
         nearDepartments: [...w.nearDepartments],
       })),
       beds: beds.map(toBedInfo),
+    };
+  }
+
+  /** The active admission in an occupied bed, with its patient. Not for the board: it has the notes. */
+  async admissionInBed(bedId: string): Promise<BedAdmission> {
+    const bed = await this.beds.findById(bedId).lean<BedRecord>().exec();
+    const admission =
+      bed?.state === 'occupied' && bed.admission
+        ? await this.admissions.findOne({ _id: bed.admission, status: 'active', bed: bed._id }).lean<AdmissionRecord>().exec()
+        : null;
+    if (!admission) throw new NotFoundException('This bed has no admitted patient.');
+    const patient = await this.patients.findOne(String(admission.patient));
+    return {
+      admissionId: String(admission._id),
+      patient: { id: String(patient._id), name: patient.name, uhid: patient.uhid, age: patient.age, gender: patient.gender as PatientGender },
+      roomClass: admission.roomClass,
+      needs: [...admission.needs],
+      department: admission.department,
+      doctor: admission.doctor,
+      notes: admission.notes,
+      expectedStayDays: admission.expectedStayDays,
     };
   }
 

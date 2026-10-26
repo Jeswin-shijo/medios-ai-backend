@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PatientsService } from '../patients/patients.service';
@@ -321,6 +321,28 @@ describe('BedsService', () => {
     const stored = await Admission.findById(admission._id).lean().exec();
     assert.equal(String(stored.bed), b1);
     assert.equal(stored.transfers.length, 0);
+  });
+
+  test('the admission in a bed, to start a transfer from', async () => {
+    await service.hold(b1, A, suggestionId, 'Male');
+    const admission = await service.admit(b1, A, { ...input(), needs: ['oxygen'] });
+    assert.deepEqual(await service.admissionInBed(b1), {
+      admissionId: String(admission._id),
+      patient: { id: patientId, name: 'Test Patient', uhid: 'MHK202600099', age: 50, gender: 'Male' },
+      roomClass: 'general',
+      needs: ['oxygen'],
+      department: 'General Medicine',
+      doctor: 'Dr. Shajin',
+      notes: 'Fever for three days',
+      expectedStayDays: 3,
+    });
+    // A free bed and a sample occupant have no admission to move.
+    for (const empty of [b2, b3]) {
+      await assert.rejects(
+        service.admissionInBed(empty),
+        (err: unknown) => err instanceof NotFoundException && err.message === 'This bed has no admitted patient.',
+      );
+    }
   });
 
   test('board totals and expired holds read as free', async () => {

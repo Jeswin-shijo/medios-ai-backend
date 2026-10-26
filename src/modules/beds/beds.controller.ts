@@ -79,6 +79,13 @@ export class BedsController {
     return this.suggestions.refine(actorOf(user), id);
   }
 
+  @Get(':bedId/admission')
+  @Roles(...ADMIT_ROLES)
+  @ApiOperation({ summary: 'The admitted patient in a bed and their admission request, to start a transfer' })
+  admission(@Param('bedId') bedId: string) {
+    return this.beds.admissionInBed(bedId);
+  }
+
   @Post(':bedId/hold')
   @Roles(...ADMIT_ROLES)
   @HttpCode(HttpStatus.OK)
