@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
@@ -216,5 +216,41 @@ describe('BedRequestsService', () => {
     );
     await service.release(id);
     assert.equal((await service.cancel(DOCTOR, id)).state, 'cancelled');
+  });
+
+  describe('checkHandAssign', () => {
+    test('checkHandAssign accepts the matching open request', async () => {
+      const id = String((await service.create(DOCTOR, input()))._id);
+      await service.checkHandAssign(id, { patientId, type: 'admission' });
+    });
+
+    test('checkHandAssign refuses an unknown request', async () => {
+      await assert.rejects(
+        service.checkHandAssign('6ae0b6c6c1d50aee80a67731', { patientId, type: 'admission' }),
+        (e: any) => e instanceof NotFoundException && e.message === 'Bed request not found.',
+      );
+    });
+
+    test('checkHandAssign refuses a closed request', async () => {
+      const id = String((await service.create(DOCTOR, input()))._id);
+      await service.cancel(DOCTOR, id);
+      await assert.rejects(
+        service.checkHandAssign(id, { patientId, type: 'admission' }),
+        (e: any) => e instanceof ConflictException && e.message === 'This request is already closed.',
+      );
+    });
+
+    test("checkHandAssign refuses another patient's request or a transfer from another bed", async () => {
+      const other = await newPatient(2);
+      const id = String((await service.create(DOCTOR, input()))._id);
+      const wrong = (e: any) => e instanceof BadRequestException && e.message === 'This bed request is for another patient or bed.';
+      await assert.rejects(service.checkHandAssign(id, { patientId: other, type: 'admission' }), wrong);
+      await assert.rejects(service.checkHandAssign(id, { patientId, type: 'transfer', fromBedId: icuBedId }), wrong);
+
+      await admitInIcu(other);
+      const tid = String((await service.create(DOCTOR, input({ type: 'transfer', patientId: other, fromBedId: icuBedId })))._id);
+      await service.checkHandAssign(tid, { patientId: other, type: 'transfer', fromBedId: icuBedId });
+      await assert.rejects(service.checkHandAssign(tid, { patientId: other, type: 'transfer', fromBedId: '6ae0b6c6c1d50aee80a67731' }), wrong);
+    });
   });
 });

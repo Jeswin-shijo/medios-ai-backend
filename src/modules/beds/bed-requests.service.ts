@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -319,6 +319,20 @@ export class BedRequestsService {
     const found = await this.requests.findById(id).exec();
     if (!found) throw new NotFoundException(NOT_FOUND);
     return toView(found, true);
+  }
+
+  /** Before staff place a patient by hand for a request: it must be open and be for this patient and bed. */
+  async checkHandAssign(
+    id: string,
+    expect: { patientId: string; type: 'admission' | 'transfer'; fromBedId?: string },
+  ): Promise<void> {
+    const req = await this.requests.findById(id).exec();
+    if (!req) throw new NotFoundException(NOT_FOUND);
+    if (!req.open) throw new ConflictException('This request is already closed.');
+    const sameBed = expect.type !== 'transfer' || String(req.fromBed ?? '') === expect.fromBedId;
+    if (String(req.patient) !== expect.patientId || req.type !== expect.type || !sameBed) {
+      throw new BadRequestException('This bed request is for another patient or bed.');
+    }
   }
 
   waiting(): Promise<BedRequestDocument[]> {

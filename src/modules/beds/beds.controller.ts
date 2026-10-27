@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Logger, Param, Post, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { debounceTime } from 'rxjs';
@@ -7,6 +7,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ADMIT_ROLES, Actor, HOUSEKEEPING_ROLES, REQUEST_ROLES, actorOf } from './actor';
 import { BedAgentService } from './bed-agent.service';
 import { BedEvents } from './bed-events';
+import { BedRequestsService } from './bed-requests.service';
 import { BedsService } from './beds.service';
 import { assertSuggestionFitsBed } from './transfer-check';
 import { SuggestionsService } from './suggestions.service';
@@ -25,7 +26,10 @@ export class BedsController {
     private readonly suggestions: SuggestionsService,
     private readonly events: BedEvents,
     private readonly agent: BedAgentService,
+    private readonly requests: BedRequestsService,
   ) {}
+
+  private readonly logger = new Logger('BedsController');
 
   @Get('board')
   @Roles(...ADMIT_ROLES)
@@ -115,6 +119,7 @@ export class BedsController {
   async admit(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: AdmitBedDto) {
     const actor = actorOf(user);
     const log = await this.suggestions.authorizeChoice(dto.suggestionId, bedId, actor, dto);
+    if (dto.requestId) await this.requests.checkHandAssign(dto.requestId, { patientId: String(log.patient), type: 'admission' });
     const admission = await this.beds.admit(bedId, actor, {
       patientId: String(log.patient),
       suggestionId: dto.suggestionId,
@@ -138,6 +143,9 @@ export class BedsController {
     const log = await this.suggestions.authorizeChoice(dto.suggestionId, dto.toBedId, actor, dto);
     // Before anything changes: the suggestion must be for the patient in this bed.
     assertSuggestionFitsBed(log, bedId, await this.beds.activeAdmissionForPatient(String(log.patient)));
+    if (dto.requestId) {
+      await this.requests.checkHandAssign(dto.requestId, { patientId: String(log.patient), type: 'transfer', fromBedId: bedId });
+    }
     const admission = await this.beds.transfer(bedId, actor, {
       toBedId: dto.toBedId,
       suggestionId: dto.suggestionId,
@@ -157,6 +165,21 @@ export class BedsController {
     dto: { suggestionId: string; reason?: string; ruleOverride?: boolean },
   ) {
     if (!requestId) return;
+    // The staff action has already happened: closing the request must not fail it.
+    try {
+      await this.completeRequest(requestId, bedId, admission, actor, dto);
+    } catch (err: any) {
+      this.logger.warn(`Could not close bed request ${requestId} after a hand assignment: ${err?.message ?? err}`);
+    }
+  }
+
+  private async completeRequest(
+    requestId: string,
+    bedId: string,
+    admission: { _id: unknown },
+    actor: Actor,
+    dto: { suggestionId: string; reason?: string; ruleOverride?: boolean },
+  ) {
     const { wards, beds } = await this.beds.inventory();
     const bed = beds.find((b) => b.id === bedId);
     const ward = wards.find((w) => w.id === bed?.wardId);
