@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
     drugInteractionAlerts: true,
     followUpSuggestions: false,
     bedSuggestions: true,
+    bedAutoAllocate: true,
     responseTone: 'Professional & Concise',
     language: 'English (Auto-detect)',
   },

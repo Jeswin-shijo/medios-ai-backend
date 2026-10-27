@@ -42,16 +42,16 @@ export function autoClasses(req: AdmissionRequestInput): WardType[] {
 }
 
 /** Ranked beds the agent may assign: no step-up beds, only the right ward types, best type first. */
-export function autoAssignable(
+export function autoAssignable<T extends RankedBed>(
   req: AdmissionRequestInput,
-  ordered: RankedBed[],
+  ordered: T[],
   wards: WardInfo[],
   beds: BedInfo[],
-): RankedBed[] {
+): T[] {
   const wardById = new Map(wards.map((w) => [w.id, w]));
   const bedById = new Map(beds.map((b) => [b.id, b]));
   const classes = autoClasses(req);
-  const typeOf = (r: RankedBed): WardType | undefined => {
+  const typeOf = (r: T): WardType | undefined => {
     const bed = bedById.get(r.bedId);
     return bed ? wardById.get(bed.wardId)?.type : undefined;
   };

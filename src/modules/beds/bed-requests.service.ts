@@ -85,6 +85,11 @@ const MAX_LIMIT = 200;
 
 const iso = (d?: Date) => (d ? d.toISOString() : undefined);
 
+/** No agent pass holds the request: its lock is absent or has run out (real clock). */
+const unlocked = (now: Date): FilterQuery<BedRequestDocument> => ({
+  $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }],
+});
+
 function toView(r: BedRequestDocument, withNotes: boolean): BedRequestView {
   return {
     id: String(r._id),
@@ -247,7 +252,7 @@ export class BedRequestsService {
     const now = new Date();
     return this.requests
       .findOneAndUpdate(
-        { _id: id, open: true, $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] },
+        { _id: id, open: true, ...unlocked(now) },
         { lockedUntil: new Date(now.getTime() + LOCK_MS) },
         { new: true },
       )
@@ -263,7 +268,7 @@ export class BedRequestsService {
     const now = new Date();
     const cancelled = await this.requests
       .findOneAndUpdate(
-        { _id: id, open: true, $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] },
+        { _id: id, open: true, ...unlocked(now) },
         {
           state: 'cancelled',
           stateReason: `Cancelled by ${actor.name}.`,
@@ -305,6 +310,14 @@ export class BedRequestsService {
 
   waiting(): Promise<BedRequestDocument[]> {
     return this.requests.find({ state: 'waiting' }).sort({ priorityRank: 1, requestedAt: 1, _id: 1 }).exec();
+  }
+
+  /** Searching requests no agent pass holds (one stopped mid-pass, say), priority then oldest. */
+  unclaimedSearching(): Promise<BedRequestDocument[]> {
+    return this.requests
+      .find({ state: 'searching', open: true, ...unlocked(new Date()) })
+      .sort({ priorityRank: 1, requestedAt: 1, _id: 1 })
+      .exec();
   }
 
   private emit(r: BedRequestDocument) {

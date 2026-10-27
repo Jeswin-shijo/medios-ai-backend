@@ -49,12 +49,27 @@ export interface SuggestionResult {
   top: RankedBedView[];
   eligible: RankedBedView[];
   ai: 'pending' | 'off';
+  /** True when no ward type meets every ticked need (isolation with a ventilator, say). */
+  conflict: boolean;
 }
 
 export interface AiRefinement {
   status: Exclude<SuggestionAiStatus, 'pending'>;
   sample: boolean;
   top: RankedBedView[];
+  extraNeeds: { need: Need; evidence: string }[];
+}
+
+/** The Bed Agent's view of a suggestion: every eligible bed, the AI's picks first. */
+export interface AgentRanking {
+  suggestionId: string;
+  ordered: Array<RankedBed & { aiReason?: string }>;
+  /** True when the AI answered; its first pick is then `ordered[0]`. */
+  aiAnswered: boolean;
+  conflict: boolean;
+  appliedRules: string[];
+  blockedBy: string[];
+  classNote?: string;
   extraNeeds: { need: Need; evidence: string }[];
 }
 
@@ -72,6 +87,9 @@ const isTopPick = (log: BedSuggestionDocument, bedId: string) =>
 /** The stored rule order as plain RankedBed objects (not Mongoose subdocuments). */
 const storedRanking = (log: BedSuggestionDocument): RankedBed[] =>
   log.ruleRanking.map((r) => ({ bedId: r.bedId, score: r.score, reasons: [...r.reasons], reason: r.reason, stepUp: r.stepUp }));
+
+/** The AI's stored answer, when it gave one. */
+const aiOutput = (log: BedSuggestionDocument): BedAiOutput | null => (log.ai.status === 'ok' ? log.ai.output : null);
 
 /** Ranked beds with their ward and bed details, skipping any bed no longer in the inventory. */
 function toViews(ranked: Array<RankedBed & { aiReason?: string }>, inventory: Inventory): RankedBedView[] {
@@ -169,6 +187,7 @@ export class SuggestionsService {
       top: eligible.slice(0, AI_PICK_LIMIT),
       eligible,
       ai: aiOn ? 'pending' : 'off',
+      conflict: outcome.conflict,
     };
     if (outcome.classNote) result.classNote = outcome.classNote;
     return result;
@@ -176,34 +195,59 @@ export class SuggestionsService {
 
   /** Asks the AI once to reorder and explain the top beds; later calls return the stored answer. */
   async refine(actor: Actor, suggestionId: string): Promise<AiRefinement> {
-    let log = await this.load(suggestionId);
-    if (log.createdBy !== actor.id && !ADMIT_ROLES.includes(actor.role)) {
+    const found = await this.load(suggestionId);
+    if (found.createdBy !== actor.id && !ADMIT_ROLES.includes(actor.role)) {
       throw new ForbiddenException('You cannot use this bed suggestion.');
     }
 
-    if (log.ai.status === 'pending') {
-      const result = await this.ai.runStructured(bedAiTask(log.aiInput));
-      const base = { provider: result.provider, model: result.model, latencyMs: result.latencyMs };
-      // `=== true`: without strictNullChecks, a truthiness test does not narrow the failure branch.
-      const ai =
-        result.ok === true
-          ? { status: 'ok', sample: result.sample, output: result.value, ...base }
-          : { status: result.failure, ...base, ...(result.detail ? { detail: result.detail } : {}) };
-      const finalTopBedId = mergePicks(storedRanking(log), result.ok === true ? result.value : null, log.refs)[0]?.bedId;
-      const stored = await this.suggestions
-        .findOneAndUpdate({ _id: log._id, 'ai.status': 'pending' }, { $set: { ai, finalTopBedId } }, { new: true })
-        .exec();
-      // If another refine of this suggestion stored its answer first, use that one.
-      log = stored ?? (await this.load(suggestionId));
-    }
-
-    const output: BedAiOutput | null = log.ai.status === 'ok' ? log.ai.output : null;
+    const log = await this.askAi(found);
+    const output = aiOutput(log);
     return {
       status: log.ai.status as AiRefinement['status'],
       sample: !!log.ai.sample,
       top: toViews(mergePicks(storedRanking(log), output, log.refs), await this.beds.inventory()),
       extraNeeds: output?.extraNeeds ?? [],
     };
+  }
+
+  /**
+   * Ranks the beds for the Bed Agent: the rules, then the AI once (within its timeout).
+   * Without an answer from the AI, the order is the rules' own.
+   */
+  async rankForAgent(actor: Actor, dto: SuggestInput): Promise<AgentRanking> {
+    const result = await this.suggest(actor, dto);
+    let log = await this.load(result.suggestionId);
+    if (result.ai === 'pending') log = await this.askAi(log);
+    const output = aiOutput(log);
+    const ranking: AgentRanking = {
+      suggestionId: result.suggestionId,
+      ordered: mergePicks(storedRanking(log), output, log.refs, Infinity),
+      aiAnswered: !!output,
+      conflict: result.conflict,
+      appliedRules: result.appliedRules,
+      blockedBy: result.blockedBy,
+      extraNeeds: output?.extraNeeds ?? [],
+    };
+    if (result.classNote) ranking.classNote = result.classNote;
+    return ranking;
+  }
+
+  /** Asks the AI about a pending suggestion and stores its answer (or why there is none). */
+  private async askAi(log: BedSuggestionDocument): Promise<BedSuggestionDocument> {
+    if (log.ai.status !== 'pending') return log;
+    const result = await this.ai.runStructured(bedAiTask(log.aiInput));
+    const base = { provider: result.provider, model: result.model, latencyMs: result.latencyMs };
+    // `=== true`: without strictNullChecks, a truthiness test does not narrow the failure branch.
+    const ai =
+      result.ok === true
+        ? { status: 'ok', sample: result.sample, output: result.value, ...base }
+        : { status: result.failure, ...base, ...(result.detail ? { detail: result.detail } : {}) };
+    const finalTopBedId = mergePicks(storedRanking(log), result.ok === true ? result.value : null, log.refs)[0]?.bedId;
+    const stored = await this.suggestions
+      .findOneAndUpdate({ _id: log._id, 'ai.status': 'pending' }, { $set: { ai, finalTopBedId } }, { new: true })
+      .exec();
+    // If another refine of this suggestion stored its answer first, use that one.
+    return stored ?? (await this.load(String(log._id)));
   }
 
   /**
