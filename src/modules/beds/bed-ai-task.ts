@@ -191,13 +191,22 @@ function sampleReason(ruleReasons: string[]): string {
   return clipReason(`${parts.length ? `${parts.join(', ')} and ${last}` : last}.`);
 }
 
-export function sampleBedAiOutput(input: BedAiInput): BedAiOutput {
+/**
+ * Needs the notes mention by keyword, among those not yet ticked, quoting the words found.
+ * Sample mode answers with it, and the Bed Agent falls back on it when the AI gives no answer.
+ */
+export function keywordExtraNeeds(notes: string, possibleExtraNeeds: Need[]): BedAiOutput['extraNeeds'] {
   const extraNeeds: BedAiOutput['extraNeeds'] = [];
   for (const [need, pattern] of KEYWORDS) {
-    if (!input.possibleExtraNeeds.includes(need)) continue;
-    const match = pattern.exec(input.notes);
+    if (!possibleExtraNeeds.includes(need)) continue;
+    const match = pattern.exec(notes);
     if (match) extraNeeds.push({ need, evidence: match[0] });
   }
+  return extraNeeds;
+}
+
+export function sampleBedAiOutput(input: BedAiInput): BedAiOutput {
+  const extraNeeds = keywordExtraNeeds(input.notes, input.possibleExtraNeeds);
   const picks = input.candidates
     .slice(0, AI_PICK_LIMIT)
     .map((c) => ({ ref: c.ref, reason: sampleReason(c.ruleReasons) }));

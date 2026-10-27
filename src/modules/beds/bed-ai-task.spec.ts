@@ -5,6 +5,7 @@ import {
   BedAiInput,
   buildBedAiInput,
   bedAiTask,
+  keywordExtraNeeds,
   mergePicks,
   sampleBedAiOutput,
   validateBedAiOutput,
@@ -138,6 +139,15 @@ describe('bed AI task', () => {
     assert.ok(out.extraNeeds.some((e) => e.need === 'oxygen' && e.evidence === 'SpO₂'));
     // highFallRisk is ticked in the request, so not suggested
     assert.ok(!sampleBedAiOutput(base).extraNeeds.some((e) => e.need === 'highFallRisk'));
+  });
+
+  test('keywordExtraNeeds finds needs in the notes, only among those still possible', () => {
+    assert.deepEqual(keywordExtraNeeds('Suspected TB. SpO₂ 90% on air', ['isolation', 'oxygen']), [
+      { need: 'isolation', evidence: 'TB' },
+      { need: 'oxygen', evidence: 'SpO₂' },
+    ]);
+    assert.deepEqual(keywordExtraNeeds('Suspected TB', ['oxygen', 'highFallRisk']), []);
+    assert.deepEqual(keywordExtraNeeds('Fever for three days', ['isolation', 'oxygen']), []);
   });
 
   test('mergePicks applies AI order and fills to 3', () => {

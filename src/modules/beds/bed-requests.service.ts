@@ -210,8 +210,9 @@ export class BedRequestsService {
   }
 
   /**
-   * Moves a request to a state. With `onlyIfOpen`, a request that closed meanwhile is left
-   * alone: nothing is written, raised or emitted, and null comes back.
+   * Moves a request to a state. `stateSince` changes only with the state: a new reason for
+   * the same state (still waiting, say) keeps it. With `onlyIfOpen`, a request that closed
+   * meanwhile is left alone: nothing is written, raised or emitted, and null comes back.
    */
   async toState(
     id: string,
@@ -222,9 +223,12 @@ export class BedRequestsService {
   ): Promise<BedRequestDocument | null> {
     const open = OPEN_STATES.includes(state);
     const filter: FilterQuery<BedRequestDocument> = opts.onlyIfOpen ? { _id: id, open: true } : { _id: id };
-    const updated = await this.requests
-      .findOneAndUpdate(filter, { ...patch, state, stateReason: reason, stateSince: clinicNow(), open }, { new: true })
-      .exec();
+    // An update pipeline, so stateSince can depend on the state before, in the same atomic
+    // write. Pipelines are not cast, so every value goes in as a literal.
+    const fields = Object.entries({ ...patch, state, stateReason: reason, open }).filter(([, v]) => v !== undefined);
+    const set = Object.fromEntries(fields.map(([key, value]) => [key, { $literal: value }]));
+    const stateSince = { $cond: [{ $eq: ['$state', { $literal: state }] }, '$stateSince', clinicNow()] };
+    const updated = await this.requests.findOneAndUpdate(filter, [{ $set: { ...set, stateSince } }], { new: true }).exec();
     if (!updated) {
       if (opts.onlyIfOpen && (await this.requests.exists({ _id: id }))) return null;
       throw new NotFoundException(NOT_FOUND);

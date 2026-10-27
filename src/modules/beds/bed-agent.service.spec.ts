@@ -84,6 +84,8 @@ describe('BedAgentService', () => {
   const bed = (code: string) => bedIds.get(code)!;
   const load = (id: string) => BedRequest.findById(id).lean().exec();
   const alertFor = (id: string) => TaskAlertItem.findOne({ link: `bed-request:${id}` }).lean().exec();
+  /** When the request's alert was last written (schema timestamps). */
+  const alertWritten = async (id: string) => ((await alertFor(id)) as unknown as { updatedAt: Date }).updatedAt.getTime();
   const wardTypeOf = async (bedId: unknown) => {
     const found = await Bed.findById(bedId).lean().exec();
     return (await Ward.findById(found.ward).lean().exec()).type;
@@ -577,6 +579,127 @@ describe('BedAgentService', () => {
     await requests.cancel(DOCTOR, other);
     await agent.completeByHand(other, byHand);
     assert.equal((await load(other)).state, 'cancelled');
+  });
+
+  test('a retry that is still waiting changes nothing', async () => {
+    await fillGeneralMen();
+    const id = await ask({ patientId: await patient() });
+    await agent.process(id);
+    const first = await load(id);
+    assert.equal(first.state, 'waiting');
+    const alertBefore = await alertWritten(id);
+    const eventsBefore = seen.length;
+
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await agent.retryWaiting();
+      await agent.idle();
+    }
+
+    const after = await load(id);
+    assert.equal(after.state, 'waiting');
+    assert.equal(after.stateReason, first.stateReason);
+    assert.equal(after.stateSince.getTime(), first.stateSince.getTime());
+    assert.equal(after.lockedUntil, undefined);
+    assert.equal(await TaskAlertItem.countDocuments(), 1);
+    assert.equal(await alertWritten(id), alertBefore);
+    assert.equal(seen.length, eventsBefore);
+  });
+
+  test('a waiting request with still no bed makes no suggestion log and no AI call on retry', async () => {
+    await fillGeneralMen();
+    const id = await ask({ patientId: await patient() });
+    await agent.process(id);
+    assert.equal((await load(id)).state, 'waiting');
+    // The first pass ranked once and asked the AI (Twin 1 Bed B was a candidate).
+    assert.equal(await BedSuggestion.countDocuments(), 1);
+    assert.equal(ai.tasks.length, 1);
+
+    await agent.retryWaiting();
+    await agent.idle();
+
+    assert.equal(await BedSuggestion.countDocuments(), 1);
+    assert.equal(ai.tasks.length, 1);
+
+    // Once a bed the agent may take is free, the full pass runs again.
+    await beds.markCleaned(bed('GWA-9'), NURSE);
+    await agent.retryWaiting();
+    await agent.idle();
+    assert.equal((await load(id)).state, 'assigned');
+    assert.equal(await BedSuggestion.countDocuments(), 2);
+    assert.equal(ai.tasks.length, 2);
+  });
+
+  test('a transfer request whose patient left the bed is closed', async () => {
+    await fillGeneralMen();
+    const [leaves, moves] = [await patient(), await patient()];
+    const inHdu = (pid: string, code: string) =>
+      beds.admitToFreeBed(bed(code), DOCTOR, {
+        patientId: pid, doctor: 'Dr. Shajin', department: 'Cardiology', roomClass: 'hdu', needs: ['monitor'], notes: 'Chest pain', expectedStayDays: 4,
+      });
+    const leaving = await inHdu(leaves, 'HDU-2');
+    await inHdu(moves, 'HDU-4');
+    const discharged = await ask({ type: 'transfer', patientId: leaves, fromBedId: bed('HDU-2') });
+    const moved = await ask({ type: 'transfer', patientId: moves, fromBedId: bed('HDU-4') });
+    for (const id of [discharged, moved]) await agent.process(id);
+    assert.deepEqual([(await load(discharged)).state, (await load(moved)).state], ['waiting', 'waiting']);
+
+    // One is discharged, the other moved by hand without the request.
+    await beds.discharge(bed('HDU-2'), NURSE, String(leaving._id));
+    await beds.transferToFreeBed(bed('HDU-4'), bed('TWN-2'), DOCTOR);
+    const logs = await BedSuggestion.countDocuments();
+    await agent.retryWaiting();
+    await agent.idle();
+
+    for (const [id, label] of [[discharged, 'HDU • Bed 2'], [moved, 'HDU • Bed 4']]) {
+      const req = await load(id);
+      assert.equal(req.state, 'cancelled');
+      assert.equal(req.open, false);
+      assert.equal(req.stateReason, `Closed: the patient is no longer in ${label}.`);
+      assert.equal(req.closedByName, 'Bed Agent');
+      assert.equal(req.assignedBed, undefined);
+      assert.equal(req.lockedUntil, undefined);
+      assert.equal((await alertFor(id)).status, 'Completed');
+    }
+    assert.equal(await BedSuggestion.countDocuments(), logs);
+  });
+
+  test('an admission request for a patient admitted by hand is closed', async () => {
+    await fillGeneralMen();
+    const pid = await patient();
+    const id = await ask({ patientId: pid });
+    await agent.process(id);
+    assert.equal((await load(id)).state, 'waiting');
+    await beds.admitToFreeBed(bed('TWN-2'), DOCTOR, {
+      patientId: pid, doctor: 'Dr. Shajin', department: 'General Medicine', roomClass: 'twin', needs: [], notes: '', expectedStayDays: 3,
+    });
+
+    await agent.retryWaiting();
+    await agent.idle();
+
+    const req = await load(id);
+    assert.equal(req.state, 'cancelled');
+    assert.equal(req.stateReason, 'Closed: the patient was admitted to Twin 1 • Bed B by hand.');
+    assert.equal(req.closedByName, 'Bed Agent');
+    assert.equal(req.assignedBed, undefined);
+    assert.equal((await alertFor(id)).status, 'Completed');
+    assert.equal(await Admission.countDocuments({ patient: pid }), 1);
+  });
+
+  test('with the AI timed out, a TB note still goes to attention for a doctor to confirm', { timeout: 10_000 }, async () => {
+    const silent = provider(({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))));
+    const slowAgent = newAgent({ ai: new AiService(silent, settings, { get: () => 50 } as unknown as ConfigService) });
+    const pid = await patient('Male', 50, 'Suresh P');
+    const id = await ask({ patientId: pid, notes: 'Cough for three weeks, suspected TB' });
+
+    await slowAgent.process(id);
+
+    assert.equal(silent.calls, 1);
+    const req = await load(id);
+    assert.equal(req.state, 'attention');
+    assert.equal(req.stateReason, 'Notes mention “TB”. Confirm isolation for Suresh P?');
+    assert.deepEqual(req.pendingNeeds, [{ need: 'isolation', evidence: 'TB' }]);
+    assert.equal(await Admission.countDocuments({ patient: pid }), 0);
   });
 
   test('a bed change wakes the agent for waiting requests, until the module stops', { timeout: 10_000 }, async () => {

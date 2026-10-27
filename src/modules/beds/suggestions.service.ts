@@ -10,10 +10,10 @@ import { Model, isValidObjectId } from 'mongoose';
 import { AiService } from '../ai/ai.service';
 import { PatientsService } from '../patients/patients.service';
 import { ADMIT_ROLES, Actor, OVERRIDE_ROLES } from './actor';
-import { AI_PICK_LIMIT, BedAiOutput, bedAiTask, buildBedAiInput, mergePicks } from './bed-ai-task';
+import { AI_PICK_LIMIT, BedAiOutput, bedAiTask, buildBedAiInput, keywordExtraNeeds, mergePicks } from './bed-ai-task';
 import { AdmissionRequestInput, BedInfo, Feature, Need, PatientGender, RoomClass, WardInfo } from './bed-types';
 import { BedsService } from './beds.service';
-import { applyRules } from './rules';
+import { RuleOutcome, applyRules } from './rules';
 import { RankedBed, rankBeds } from './scoring';
 import { BedSuggestion, BedSuggestionDocument, SuggestionAiStatus } from './schemas/bed-suggestion.schema';
 
@@ -88,6 +88,21 @@ const isTopPick = (log: BedSuggestionDocument, bedId: string) =>
 const storedRanking = (log: BedSuggestionDocument): RankedBed[] =>
   log.ruleRanking.map((r) => ({ bedId: r.bedId, score: r.score, reasons: [...r.reasons], reason: r.reason, stepUp: r.stepUp }));
 
+/**
+ * The fixed rules and scoring over the inventory, with no log and no AI: the beds `suggest`
+ * offers, and why none when there are none (a scarce bed kept in reserve, say).
+ */
+export function rankByRules(
+  req: AdmissionRequestInput,
+  inventory: Inventory,
+  now: Date,
+): { outcome: RuleOutcome; ranked: RankedBed[]; blockedBy: string[] } {
+  const outcome = applyRules(req, inventory.wards, inventory.beds, now);
+  const { ranked, reserveBlocked } = rankBeds(req, outcome, inventory.wards, inventory.beds, now);
+  const blockedBy = ranked.length ? outcome.blockedBy : [...outcome.blockedBy, ...reserveBlocked];
+  return { outcome, ranked, blockedBy };
+}
+
 /** The AI's stored answer, when it gave one. */
 const aiOutput = (log: BedSuggestionDocument): BedAiOutput | null => (log.ai.status === 'ok' ? log.ai.output : null);
 
@@ -142,9 +157,7 @@ export class SuggestionsService {
       notes: dto.notes,
       currentBedId: dto.currentBedId,
     };
-    const outcome = applyRules(req, inventory.wards, inventory.beds, now);
-    const { ranked, reserveBlocked } = rankBeds(req, outcome, inventory.wards, inventory.beds, now);
-    const blockedBy = ranked.length ? outcome.blockedBy : [...outcome.blockedBy, ...reserveBlocked];
+    const { outcome, ranked, blockedBy } = rankByRules(req, inventory, now);
 
     const { input, refs } = buildBedAiInput({
       req,
@@ -212,7 +225,8 @@ export class SuggestionsService {
 
   /**
    * Ranks the beds for the Bed Agent: the rules, then the AI once (within its timeout).
-   * Without an answer from the AI, the order is the rules' own.
+   * Without an answer from the AI (off, timed out, invalid, or not asked), the order is the
+   * rules' own and the notes are still read, by the keyword check sample mode uses.
    */
   async rankForAgent(actor: Actor, dto: SuggestInput): Promise<AgentRanking> {
     const result = await this.suggest(actor, dto);
@@ -226,7 +240,7 @@ export class SuggestionsService {
       conflict: result.conflict,
       appliedRules: result.appliedRules,
       blockedBy: result.blockedBy,
-      extraNeeds: output?.extraNeeds ?? [],
+      extraNeeds: output ? output.extraNeeds : keywordExtraNeeds(log.aiInput.notes, log.aiInput.possibleExtraNeeds),
     };
     if (result.classNote) ranking.classNote = result.classNote;
     return ranking;

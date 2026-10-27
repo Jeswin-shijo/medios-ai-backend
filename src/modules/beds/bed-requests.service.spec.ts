@@ -165,6 +165,22 @@ describe('BedRequestsService', () => {
     assert.equal((await service.list({ state: 'waiting' })).length, 0);
   });
 
+  test('toState keeps stateSince while the state stays the same', async () => {
+    const id = String((await service.create(DOCTOR, input()))._id);
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const waiting = await service.toState(id, 'waiting', 'No bed.');
+    await pause();
+    // A reason-only change updates the reason and the alert, not when the state began.
+    const reworded = await service.toState(id, 'waiting', '$5 deposit pending.', { attempts: 1 });
+    assert.equal(reworded.stateSince.getTime(), waiting.stateSince.getTime());
+    assert.equal(reworded.stateReason, '$5 deposit pending.');
+    assert.equal(reworded.attempts, 1);
+    assert.equal((await alerts())[0].subtitle, '$5 deposit pending.');
+    await pause();
+    const attention = await service.toState(id, 'attention', 'A doctor must decide.');
+    assert.ok(attention.stateSince.getTime() > reworded.stateSince.getTime());
+  });
+
   test('two concurrent moves to waiting leave exactly one alert', async () => {
     const id = String((await service.create(DOCTOR, input()))._id);
     await Promise.all([service.toState(id, 'waiting', 'No bed.'), service.toState(id, 'waiting', 'No bed.')]);

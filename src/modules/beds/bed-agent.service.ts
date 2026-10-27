@@ -10,8 +10,8 @@ import { BedRequestsService } from './bed-requests.service';
 import { AdmissionRequestInput, BedInfo, Need, WardInfo } from './bed-types';
 import { BedsService } from './beds.service';
 import { BedDecision, BedRequest, BedRequestDocument, NeedEvidence, RequestState } from './schemas/bed-request.schema';
-import { clipReason } from './scoring';
-import { AgentRanking, SuggestInput, SuggestionsService } from './suggestions.service';
+import { RankedBed, clipReason } from './scoring';
+import { AgentRanking, SuggestInput, SuggestionsService, rankByRules } from './suggestions.service';
 
 type Inventory = { wards: WardInfo[]; beds: BedInfo[] };
 type RankedChoice = AgentRanking['ordered'][number];
@@ -33,6 +33,8 @@ const RETRYING = 'Something went wrong while assigning a bed. Trying again.';
 const GAVE_UP = 'Something went wrong while assigning a bed. Assign one by hand.';
 const BUSY = 'The Bed Agent is working on this request. Try again in a moment.';
 const CLOSED = 'This request is already closed.';
+/** States that keep an alert raised. */
+const ALERTED: RequestState[] = ['waiting', 'attention'];
 
 /** A need in running text: "Confirm isolation for …", "Added oxygen: …". */
 const NEED_LABEL: Record<Need, string> = {
@@ -75,6 +77,10 @@ function suggestInput(req: BedRequestDocument): SuggestInput {
   const { roomClass, needs, department, expectedStayDays, notes, currentBedId } = ruleInput(req);
   return { patientId: String(req.patient), roomClass, needs, department, doctor: req.doctor, expectedStayDays, notes, currentBedId };
 }
+
+/** Why a request waits: the nearest class on offer, else what the rules blocked. */
+const waitReason = (input: AdmissionRequestInput, ordered: RankedBed[], blockedBy: string[], inventory: Inventory) =>
+  nearestOptionText(input, ordered, inventory.wards, inventory.beds) ?? blockedBy[0] ?? NO_BED;
 
 /**
  * Places patients for doctors' bed requests, inside the fixed rules, with nobody approving.
@@ -146,7 +152,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     if (!req) return;
     try {
       if (req.state !== 'searching' && req.state !== 'waiting') return;
-      await this.allocate(req);
+      await this.pass(req);
     } catch (err) {
       await this.failed(req, err).catch((e) => this.logger.error(`Bed request ${id}: ${errorText(e)}`));
     } finally {
@@ -175,8 +181,8 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       };
       const decided = `${actor.name} ${confirm ? 'confirmed' : 'dismissed'} ${NEED_LABEL[need]}. ${SEARCHING}`;
       const updated = remaining.length
-        ? await this.to(id, 'attention', confirmText(remaining[0], req.patientName), patch)
-        : await this.to(id, 'searching', decided, patch);
+        ? await this.to(req, 'attention', confirmText(remaining[0], req.patientName), patch)
+        : await this.to(req, 'searching', decided, patch);
       if (!updated) throw new ConflictException(CLOSED);
       carryOn = updated.state === 'searching';
     } finally {
@@ -213,29 +219,70 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       candidates: [],
       ...(result.ruleOverride ? { ruleOverride: true } : {}),
     };
-    await this.to(id, 'assigned', `Assigned to ${result.bedLabel} by ${result.actor.name}.`, {
+    const patch: Partial<BedRequest> = {
       assignedBed: new Types.ObjectId(result.bedId),
       assignedBedLabel: result.bedLabel,
       assignedAt: clinicNow(),
       admission: new Types.ObjectId(result.admissionId),
       decision,
       closedByName: result.actor.name,
-    });
+    };
+    const reason = clipReason(`Assigned to ${result.bedLabel} by ${result.actor.name}.`);
+    await this.requests.toState(id, 'assigned', reason, patch, { onlyIfOpen: true });
+  }
+
+  /** One pass over a claimed request that is searching or waiting. */
+  private async pass(req: BedRequestDocument): Promise<void> {
+    if (await this.closeIfMoot(req)) return;
+    if (!(await this.autoAllocateOn())) {
+      await this.to(req, 'attention', ALLOCATION_OFF);
+      return;
+    }
+    // A retry looks with the rules alone first: no suggestion log or AI call while no bed is in sight.
+    if (req.state === 'waiting' && !(await this.bedInSight(req))) return;
+    await this.allocate(req);
+  }
+
+  /**
+   * Closes a request that no longer makes sense: the patient to transfer has left the bed
+   * (discharged, or moved by hand), or the patient to admit was admitted by hand.
+   */
+  private async closeIfMoot(req: BedRequestDocument): Promise<boolean> {
+    const active = await this.beds.activeAdmissionForPatient(String(req.patient));
+    let reason: string;
+    if (req.type === 'transfer') {
+      if (active && String(active.bed) === String(req.fromBed)) return false;
+      reason = `Closed: the patient is no longer in ${req.fromBedLabel ?? 'the bed'}.`;
+    } else {
+      if (!active) return false;
+      const { beds } = await this.beds.inventory();
+      const label = beds.find((b) => b.id === String(active.bed))?.label ?? 'a bed';
+      reason = `Closed: the patient was admitted to ${label} by hand.`;
+    }
+    await this.to(req, 'cancelled', reason, { closedByName: AGENT_ACTOR.name });
+    return true;
+  }
+
+  /**
+   * A retry's first look, with the rules alone on the request's own fields: is there a bed
+   * the agent could take? If not, the request keeps waiting.
+   */
+  private async bedInSight(req: BedRequestDocument): Promise<boolean> {
+    const inventory = await this.beds.inventory();
+    const input = ruleInput(req);
+    const { outcome, ranked, blockedBy } = rankByRules(input, inventory, new Date());
+    if (outcome.conflict || autoAssignable(input, ranked, inventory.wards, inventory.beds).length) return true;
+    await this.to(req, 'waiting', waitReason(input, ranked, blockedBy, inventory));
+    return false;
   }
 
   /** Rank, settle needs from the notes, then take the best bed the agent may assign on its own. */
   private async allocate(claimed: BedRequestDocument): Promise<void> {
     let req = claimed;
-    const id = String(req._id);
-    if (!(await this.autoAllocateOn())) {
-      await this.to(id, 'attention', ALLOCATION_OFF);
-      return;
-    }
-
     let rank = await this.rank(req);
     const { auto, confirm } = splitExtraNeeds(rank.extraNeeds, req.needs, req.dismissedNeeds);
     if (confirm.length) {
-      await this.to(id, 'attention', confirmText(confirm[0], req.patientName), { pendingNeeds: confirm });
+      await this.to(req, 'attention', confirmText(confirm[0], req.patientName), { pendingNeeds: confirm });
       return;
     }
     if (auto.length) {
@@ -245,7 +292,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       rank = await this.rank(req);
     }
     if (rank.conflict) {
-      await this.to(id, 'attention', rank.blockedBy[0]);
+      await this.to(req, 'attention', rank.blockedBy[0]);
       return;
     }
 
@@ -253,8 +300,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     const input = ruleInput(req);
     const options = autoAssignable(input, rank.ordered, inventory.wards, inventory.beds);
     if (!options.length) {
-      const nearest = nearestOptionText(input, rank.ordered, inventory.wards, inventory.beds);
-      await this.to(id, 'waiting', nearest ?? rank.blockedBy[0] ?? NO_BED);
+      await this.to(req, 'waiting', waitReason(input, rank.ordered, rank.blockedBy, inventory));
       return;
     }
     for (const choice of options.slice(0, BEDS_PER_PASS)) {
@@ -263,7 +309,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       await this.recordAssigned(req, rank, choice, admissionId, inventory);
       return;
     }
-    await this.to(id, 'waiting', BEDS_TAKEN);
+    await this.to(req, 'waiting', BEDS_TAKEN);
   }
 
   private rank(req: BedRequestDocument): Promise<AgentRanking> {
@@ -272,7 +318,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
 
   /** Adds needs the notes showed that never change the ward, and keeps them on the request. */
   private addNeeds(req: BedRequestDocument, auto: NeedEvidence[]): Promise<BedRequestDocument | null> {
-    return this.to(String(req._id), 'searching', addedText(auto), {
+    return this.to(req, 'searching', addedText(auto), {
       needs: [...req.needs, ...auto.map((a) => a.need)],
       addedNeeds: [...plain(req.addedNeeds), ...plain(auto)],
     });
@@ -333,7 +379,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
         reason: r.aiReason ?? r.reason,
       })),
     };
-    await this.to(String(req._id), 'assigned', `Assigned to ${bed.label}.`, {
+    await this.to(req, 'assigned', `Assigned to ${bed.label}.`, {
       assignedBed: new Types.ObjectId(choice.bedId),
       assignedBedLabel: bed.label,
       assignedAt: clinicNow(),
@@ -348,15 +394,14 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
    * for a retry, and the third goes to staff.
    */
   private async failed(req: BedRequestDocument, err: unknown): Promise<void> {
-    const id = String(req._id);
     if (err instanceof ConflictException) {
-      await this.to(id, 'attention', err.message);
+      await this.to(req, 'attention', err.message);
       return;
     }
-    this.logger.warn(`Bed request ${id} failed: ${errorText(err)}`);
+    this.logger.warn(`Bed request ${req._id} failed: ${errorText(err)}`);
     const attempts = req.attempts + 1;
     const gaveUp = attempts >= MAX_ATTEMPTS;
-    await this.to(id, gaveUp ? 'attention' : 'waiting', gaveUp ? GAVE_UP : RETRYING, { attempts });
+    await this.to(req, gaveUp ? 'attention' : 'waiting', gaveUp ? GAVE_UP : RETRYING, { attempts });
   }
 
   private async autoAllocateOn(): Promise<boolean> {
@@ -366,9 +411,20 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Every state change the agent makes, with its reason cut to 140 characters. A request
-   * closed meanwhile (cancelled, say) is left alone: null.
+   * closed meanwhile (cancelled, say) is left alone: null. When nothing would change (a
+   * retry still waiting for the same reason, its alert raised), nothing is written, raised
+   * or emitted. `req` is the request as this pass last wrote or claimed it.
    */
-  private to(id: string, state: RequestState, reason: string, patch: Partial<BedRequest> = {}) {
-    return this.requests.toState(id, state, clipReason(reason), patch, { onlyIfOpen: true });
+  private async to(
+    req: BedRequestDocument,
+    state: RequestState,
+    reason: string,
+    patch: Partial<BedRequest> = {},
+  ): Promise<BedRequestDocument | null> {
+    const text = clipReason(reason);
+    const unchanged =
+      req.state === state && req.stateReason === text && !Object.keys(patch).length && (!!req.alert || !ALERTED.includes(state));
+    if (unchanged) return req;
+    return this.requests.toState(String(req._id), state, text, patch, { onlyIfOpen: true });
   }
 }
