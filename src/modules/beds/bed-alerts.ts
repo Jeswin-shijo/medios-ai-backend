@@ -9,9 +9,10 @@ import { BedRequestDocument } from './schemas/bed-request.schema';
 export class BedAlerts {
   constructor(@InjectModel(TaskAlertItem.name) private readonly alerts: Model<TaskAlertDocument>) {}
 
-  /** Creates the request's alert, or updates it when it has one. Returns its id. */
+  /** Creates the request's alert, or updates it: one alert per request, keyed on its link. Returns its id. */
   async raise(req: BedRequestDocument): Promise<string> {
     const who = `${req.patientName} (${req.patientUhid})`;
+    const link = `bed-request:${req._id}`;
     const fields = {
       title: req.state === 'waiting' ? `No bed for ${who}` : `Bed request needs attention: ${who}`,
       subtitle: req.stateReason,
@@ -21,17 +22,18 @@ export class BedAlerts {
       category: 'Critical',
       priority: 'High',
       status: 'Pending',
-      link: `bed-request:${req._id}`,
     };
-    if (req.alert) {
-      const updated = await this.alerts.findByIdAndUpdate(req.alert, fields, { new: true }).exec();
-      if (updated) return String(updated._id);
-    }
-    return String((await this.alerts.create(fields))._id);
+    const upsert = () => this.alerts.findOneAndUpdate({ link }, { $set: fields, $setOnInsert: { link } }, { upsert: true, new: true }).exec();
+    // Two upserts at once can both try to insert; the unique index stops one, which then updates.
+    const alert = await upsert().catch((e: any) => {
+      if (e?.code === 11000) return upsert();
+      throw e;
+    });
+    return String(alert!._id);
   }
 
-  async resolve(alertId?: string): Promise<void> {
-    if (!alertId) return;
-    await this.alerts.updateOne({ _id: alertId }, { status: 'Completed' }).exec();
+  /** Marks the request's alert done. Nothing happens when it has none. */
+  async resolve(requestId: string): Promise<void> {
+    await this.alerts.updateOne({ link: `bed-request:${requestId}` }, { status: 'Completed' }).exec();
   }
 }

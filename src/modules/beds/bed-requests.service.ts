@@ -204,23 +204,42 @@ export class BedRequestsService {
     return { id: admission.admissionId, bed: bedId, bedLabel: bed.label, wardType: ward.type };
   }
 
-  async toState(id: string, state: RequestState, reason: string, patch: Partial<BedRequest> = {}): Promise<BedRequestDocument> {
+  /**
+   * Moves a request to a state. With `onlyIfOpen`, a request that closed meanwhile is left
+   * alone: nothing is written, raised or emitted, and null comes back.
+   */
+  async toState(
+    id: string,
+    state: RequestState,
+    reason: string,
+    patch: Partial<BedRequest> = {},
+    opts: { onlyIfOpen?: boolean } = {},
+  ): Promise<BedRequestDocument | null> {
     const open = OPEN_STATES.includes(state);
+    const filter: FilterQuery<BedRequestDocument> = opts.onlyIfOpen ? { _id: id, open: true } : { _id: id };
     const updated = await this.requests
-      .findByIdAndUpdate(id, { ...patch, state, stateReason: reason, stateSince: clinicNow(), open }, { new: true })
+      .findOneAndUpdate(filter, { ...patch, state, stateReason: reason, stateSince: clinicNow(), open }, { new: true })
       .exec();
-    if (!updated) throw new NotFoundException(NOT_FOUND);
-    if (state === 'waiting' || state === 'attention') {
-      const alert = await this.alerts.raise(updated);
-      if (!updated.alert) {
-        updated.alert = alert as any;
-        await this.requests.updateOne({ _id: id }, { alert }).exec();
-      }
-    } else if (state === 'assigned' || state === 'cancelled') {
-      await this.alerts.resolve(updated.alert ? String(updated.alert) : undefined);
+    if (!updated) {
+      if (opts.onlyIfOpen && (await this.requests.exists({ _id: id }))) return null;
+      throw new NotFoundException(NOT_FOUND);
     }
+    await this.syncAlert(updated);
     this.emit(updated);
     return updated;
+  }
+
+  /** A failure here propagates; the next toState re-raises, and the upsert makes that safe. */
+  private async syncAlert(req: BedRequestDocument) {
+    if (req.state === 'waiting' || req.state === 'attention') {
+      const alert = await this.alerts.raise(req);
+      if (!req.alert) {
+        req.alert = alert as any;
+        await this.requests.updateOne({ _id: req._id }, { alert }).exec();
+      }
+    } else if (req.state === 'assigned' || req.state === 'cancelled') {
+      await this.alerts.resolve(String(req._id));
+    }
   }
 
   /** Takes a request for one agent pass. Null when it is closed or another pass holds it. */
@@ -239,11 +258,32 @@ export class BedRequestsService {
     await this.requests.updateOne({ _id: id }, { $unset: { lockedUntil: '' } }).exec();
   }
 
+  /** Cancels an open request that the agent is not working on, in one atomic update. */
   async cancel(actor: Actor, id: string): Promise<BedRequestDocument> {
-    const found = await this.requests.findById(id).exec();
-    if (!found) throw new NotFoundException(NOT_FOUND);
-    if (!found.open) throw new ConflictException('This request is already closed.');
-    return this.toState(id, 'cancelled', `Cancelled by ${actor.name}.`, { closedByName: actor.name });
+    const now = new Date();
+    const cancelled = await this.requests
+      .findOneAndUpdate(
+        { _id: id, open: true, $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] },
+        {
+          state: 'cancelled',
+          stateReason: `Cancelled by ${actor.name}.`,
+          stateSince: clinicNow(),
+          open: false,
+          closedByName: actor.name,
+          $unset: { lockedUntil: '' },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!cancelled) {
+      const found = await this.requests.findById(id).exec();
+      if (!found) throw new NotFoundException(NOT_FOUND);
+      if (found.open) throw new ConflictException('The Bed Agent is placing this patient right now. Try again in a moment.');
+      throw new ConflictException('This request is already closed.');
+    }
+    await this.syncAlert(cancelled);
+    this.emit(cancelled);
+    return cancelled;
   }
 
   async list(q: BedRequestQuery): Promise<BedRequestView[]> {

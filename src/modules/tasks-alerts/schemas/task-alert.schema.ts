@@ -58,3 +58,5 @@ export class TaskAlertItem {
 }
 
 export const TaskAlertItemSchema = SchemaFactory.createForClass(TaskAlertItem);
+// One alert per linked thing: lets an upsert on `link` run twice at once without a duplicate.
+TaskAlertItemSchema.index({ link: 1 }, { unique: true, partialFilterExpression: { link: { $type: 'string' } } });

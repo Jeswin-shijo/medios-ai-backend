@@ -120,7 +120,7 @@ describe('BedRequestsService', () => {
     assert.equal(found.length, 1);
     assert.equal(found[0].title, 'Bed request needs attention: Patient 1 (MHK202600101)');
     const done = await service.toState(id, 'assigned', 'Placed.', { assignedBedLabel: 'Ward A • Bed 1' });
-    assert.equal(done.open, false);
+    assert.equal(done?.open, false);
     assert.equal((await alerts())[0].status, 'Completed');
     assert.equal(seen.at(-1)?.bedLabel, 'Ward A • Bed 1');
   });
@@ -163,5 +163,41 @@ describe('BedRequestsService', () => {
     assert.equal((await service.list({})).length, 2);
     assert.equal((await service.list({ type: 'admission' })).length, 1);
     assert.equal((await service.list({ state: 'waiting' })).length, 0);
+  });
+
+  test('two concurrent moves to waiting leave exactly one alert', async () => {
+    const id = String((await service.create(DOCTOR, input()))._id);
+    await Promise.all([service.toState(id, 'waiting', 'No bed.'), service.toState(id, 'waiting', 'No bed.')]);
+    assert.equal((await alerts()).length, 1);
+  });
+
+  test('toState onlyIfOpen does nothing to a cancelled request', async () => {
+    const id = String((await service.create(DOCTOR, input()))._id);
+    await service.cancel(DOCTOR, id);
+    const before = seen.length;
+    assert.equal(await service.toState(id, 'waiting', 'No bed.', {}, { onlyIfOpen: true }), null);
+    assert.equal((await service.get(id)).state, 'cancelled');
+    assert.equal((await alerts()).filter((a) => a.status === 'Pending').length, 0);
+    assert.equal(seen.length, before);
+  });
+
+  test('cancel resolves the request\'s alert and records who cancelled', async () => {
+    const id = String((await service.create(DOCTOR, input()))._id);
+    await service.toState(id, 'waiting', 'No bed.');
+    const done = await service.cancel(DOCTOR, id);
+    assert.equal(done.closedByName, 'Dr. Shajin');
+    assert.equal((await alerts())[0].status, 'Completed');
+    assert.equal(seen.at(-1)?.state, 'cancelled');
+  });
+
+  test('cancel refuses while the agent holds the lock', async () => {
+    const id = String((await service.create(DOCTOR, input()))._id);
+    await service.claim(id);
+    await assert.rejects(
+      service.cancel(DOCTOR, id),
+      (e: any) => e instanceof ConflictException && e.message === 'The Bed Agent is placing this patient right now. Try again in a moment.',
+    );
+    await service.release(id);
+    assert.equal((await service.cancel(DOCTOR, id)).state, 'cancelled');
   });
 });
