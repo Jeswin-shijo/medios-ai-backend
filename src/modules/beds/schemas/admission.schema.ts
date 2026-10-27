@@ -85,6 +85,10 @@ export class Admission {
   /** The bed suggestion this admission was made from. */
   @Prop({ type: MongooseSchema.Types.ObjectId })
   suggestion?: Types.ObjectId;
+
+  /** A demo inpatient: `patient` is a made-up id with no Patient record behind it. */
+  @Prop({ default: false })
+  sample: boolean;
 }
 
 export const AdmissionSchema = SchemaFactory.createForClass(Admission);

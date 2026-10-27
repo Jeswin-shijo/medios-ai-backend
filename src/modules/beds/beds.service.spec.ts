@@ -389,6 +389,7 @@ describe('BedsService', () => {
       uhid: 'MHK202600099',
       admissionId: String(admission._id),
       admittedAt: admission.admittedAt.toISOString(),
+      sample: false,
     });
     assert.equal(view(b2).state, 'held');
     assert.equal(view(b2).heldByMe, true);
@@ -412,6 +413,98 @@ describe('BedsService', () => {
     const occupied = beds.find((b) => b.id === b3);
     assert.equal(occupied.occupantGender, 'Male');
     assert.equal(occupied.freeSince, undefined);
+  });
+
+  /** A second patient, for races and twin rooms. */
+  const otherPatient = async (gender: 'Male' | 'Female', n: number) =>
+    String((await Patient.create({ uhid: `MHK20260010${n}`, name: `Other ${n}`, age: 40, gender, phone: `900000010${n}` }))._id);
+  const sampleAdmission = (bedId: string) =>
+    Admission.create({
+      patient: new Types.ObjectId(), patientUhid: 'SAMPLE-1', patientName: 'Sample Sam', bed: bedId, roomClass: 'general',
+      expectedStayDays: 2, status: 'active', admittedAt: new Date(), admittedBy: 'Seed', sample: true,
+    });
+
+  test('admitToFreeBed admits to a free bed with no hold', async () => {
+    const { suggestionId: _omit, ...noSuggestion } = input();
+    const admission = await service.admitToFreeBed(b1, A, noSuggestion);
+    assert.equal(admission.status, 'active');
+    assert.equal(admission.suggestion, undefined);
+    const after = await bed(b1);
+    assert.equal(after.state, 'occupied');
+    assert.equal(String(after.admission), String(admission._id));
+    assert.equal(after.occupantGender, 'Male');
+    assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
+    const withSuggestion = await service.admitToFreeBed(b2, A, { ...input(), patientId: await otherPatient('Male', 1) });
+    assert.equal(String(withSuggestion.suggestion), suggestionId);
+  });
+
+  test('admitToFreeBed treats an expired hold as free and refuses a live hold', async () => {
+    await service.hold(b1, B, suggestionId, 'Male');
+    await assert.rejects(() => service.admitToFreeBed(b1, A, input()), ConflictException);
+    assert.equal(await Admission.countDocuments(), 0);
+    await expireHold(b1);
+    await service.admitToFreeBed(b1, A, input());
+    const after = await bed(b1);
+    assert.equal(after.state, 'occupied');
+    assert.equal(after.holdBy, undefined);
+  });
+
+  test('admitToFreeBed: of two admits to one free bed at once, exactly one wins', async () => {
+    const other = await otherPatient('Male', 2);
+    const results = await Promise.allSettled([
+      service.admitToFreeBed(b1, A, input()),
+      service.admitToFreeBed(b1, B, { ...input(), patientId: other }),
+    ]);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0].reason instanceof ConflictException);
+    assert.equal(await Admission.countDocuments(), 1);
+  });
+
+  test('admitToFreeBed refuses a twin bed whose roommate is another gender', async () => {
+    const [a, b] = await twinRoom();
+    const femaleId = await otherPatient('Female', 3);
+    await service.admitToFreeBed(a, A, { ...input(), patientId: femaleId });
+    await assert.rejects(() => service.admitToFreeBed(b, A, input()), { message: OTHER_GENDER });
+    assert.equal((await bed(b)).state, 'free');
+    assert.equal(await Admission.countDocuments({ patient: patientId }), 0);
+    assert.equal(patients.updates, 1);
+  });
+
+  test('transferToFreeBed moves the patient and sends the old bed to cleaning', async () => {
+    const admission = await service.admitToFreeBed(b1, A, input());
+    const moved = await service.transferToFreeBed(b1, b2, A, 'Closer to the nurses');
+    assert.equal(String(moved.bed), b2);
+    assert.equal(moved.transfers.length, 1);
+    assert.equal(moved.transfers[0].reason, 'Closer to the nurses');
+    const [from, to] = [await bed(b1), await bed(b2)];
+    assert.equal(from.state, 'cleaning');
+    assert.equal(from.admission, null);
+    assert.equal(to.state, 'occupied');
+    assert.equal(String(to.admission), String(admission._id));
+    assert.equal(to.occupantGender, 'Male');
+    await assert.rejects(() => service.transferToFreeBed(b2, b4, A), ConflictException);
+    assert.equal(String((await Admission.findById(admission._id).lean().exec()).bed), b2);
+  });
+
+  test('discharging a sample admission ends it and never updates a patient', async () => {
+    const sample = await sampleAdmission(b3);
+    await Bed.updateOne({ _id: b3 }, { admission: sample._id });
+    await service.discharge(b3, A, String(sample._id));
+    assert.equal((await Admission.findById(sample._id).lean().exec()).status, 'discharged');
+    assert.equal((await bed(b3)).state, 'cleaning');
+    assert.equal(patients.updates, 0);
+  });
+
+  test("the board shows a sample admission's name with sample: true", async () => {
+    const sample = await sampleAdmission(b3);
+    await Bed.updateOne({ _id: b3 }, { admission: sample._id });
+    const shown = (await service.board(A)).beds.find((x) => x.id === b3).patient;
+    assert.equal(shown.name, 'Sample Sam');
+    assert.equal(shown.sample, true);
+    assert.equal(shown.id, '');
+    await assert.rejects(() => service.admissionInBed(b3), { message: 'A sample inpatient cannot be transferred.' });
   });
 
   test('every change emits', async () => {

@@ -51,7 +51,8 @@ export interface BedBoardBed {
   blockedReason?: string;
   /** Set on held beds: whether the viewer holds it. */
   heldByMe?: boolean;
-  patient?: { id: string; name: string; uhid: string; admissionId: string; admittedAt: string };
+  /** A sample inpatient has no patient record: `id` is ''. */
+  patient?: { id: string; name: string; uhid: string; admissionId: string; admittedAt: string; sample: boolean };
 }
 
 /** The admitted patient in a bed and what their admission asked for: a transfer starts from it. */
@@ -162,11 +163,12 @@ export class BedsService {
       const admission = state === 'occupied' && b.admission ? admissionById.get(String(b.admission)) : undefined;
       if (admission) {
         view.patient = {
-          id: String(admission.patient),
+          id: admission.sample ? '' : String(admission.patient),
           name: admission.patientName,
           uhid: admission.patientUhid,
           admissionId: String(admission._id),
           admittedAt: admission.admittedAt.toISOString(),
+          sample: !!admission.sample,
         };
       }
       return view;
@@ -227,6 +229,7 @@ export class BedsService {
         ? await this.admissions.findOne({ _id: bed.admission, status: 'active', bed: bed._id }).lean<AdmissionRecord>().exec()
         : null;
     if (!admission) throw new NotFoundException('This bed has no admitted patient.');
+    if (admission.sample) throw new ConflictException('A sample inpatient cannot be transferred.');
     const patient = await this.patients.findOne(String(admission.patient));
     return {
       admissionId: String(admission._id),
@@ -321,14 +324,16 @@ export class BedsService {
     if (released) this.events.changed();
   }
 
-  async admit(bedId: string, actor: Actor, input: AdmitInput): Promise<AdmissionDocument> {
-    const patient = await this.patients.findOne(input.patientId);
-    const admittedAt = clinicNow();
-
-    // 1. The admission first: its unique index allows one active admission per patient.
-    let admission: AdmissionDocument;
+  /** The admission record for an admit. Its unique index allows one active admission per patient. */
+  private async createAdmission(
+    bedId: string,
+    actor: Actor,
+    patient: { _id: Types.ObjectId; uhid: string; name: string },
+    input: Omit<AdmitInput, 'suggestionId'> & { suggestionId?: string },
+    admittedAt: Date,
+  ): Promise<AdmissionDocument> {
     try {
-      admission = await this.admissions.create({
+      return await this.admissions.create({
         patient: patient._id,
         patientUhid: patient.uhid,
         patientName: patient.name,
@@ -348,6 +353,14 @@ export class BedsService {
       if (isDuplicate(err, 'patient')) throw new ConflictException('This patient is already admitted.');
       throw err;
     }
+  }
+
+  async admit(bedId: string, actor: Actor, input: AdmitInput): Promise<AdmissionDocument> {
+    const patient = await this.patients.findOne(input.patientId);
+    const admittedAt = clinicNow();
+
+    // 1. The admission first.
+    const admission = await this.createAdmission(bedId, actor, patient, input, admittedAt);
 
     // 2. Then the bed, which needs the caller's live hold. Without it, undo the admission.
     try {
@@ -369,11 +382,77 @@ export class BedsService {
     return admission;
   }
 
-  /** Moves an admitted patient to a bed the caller holds; the old bed goes to cleaning. */
-  async transfer(
-    fromBedId: string,
+  /**
+   * Admits straight into a free bed (or one whose hold ran out), with no hold: for the bed
+   * agent. Of two admits to one bed at once, one wins. A twin room keeps to one gender,
+   * checked before and again after the bed is taken, like `hold`.
+   */
+  async admitToFreeBed(
+    bedId: string,
     actor: Actor,
-    input: { toBedId: string; suggestionId: string; reason?: string },
+    input: Omit<AdmitInput, 'suggestionId'> & { suggestionId?: string },
+  ): Promise<AdmissionDocument> {
+    const patient = await this.patients.findOne(input.patientId);
+    const gender = patient.gender as PatientGender;
+    if (await this.roommateClash(bedId, gender, new Date())) throw new ConflictException(OTHER_GENDER_ROOM);
+    const admittedAt = clinicNow();
+
+    // 1. The admission first.
+    const admission = await this.createAdmission(bedId, actor, patient, input, admittedAt);
+
+    // 2. Then the bed. Without it, undo the admission.
+    let before: BedDocument;
+    try {
+      before = await this.transition(
+        { _id: bedId, ...freeOrExpiredHold(new Date()) },
+        {
+          $set: { state: 'occupied', stateSince: admittedAt, admission: admission._id, occupantGender: gender },
+          $unset: HOLD_FIELDS,
+        },
+        'That bed was just taken.',
+      );
+    } catch (err) {
+      await this.admissions.deleteOne({ _id: admission._id }).exec();
+      throw err;
+    }
+
+    // Checked again now the bed is taken: of two patients of different genders placed in
+    // one twin room at once, at most one stays.
+    if (await this.roommateClash(bedId, gender, new Date())) {
+      await this.freeBed(bedId, admission._id, before);
+      await this.admissions.deleteOne({ _id: admission._id }).exec();
+      throw new ConflictException(OTHER_GENDER_ROOM);
+    }
+
+    // 3. Then the patient record.
+    await this.patients.update(String(patient._id), { status: 'Admitted', visitType: 'IPD' });
+    return admission;
+  }
+
+  /** Puts back a bed an agent just took (`before` is the bed as it was), if it still holds that admission. */
+  private async freeBed(bedId: string, admissionId: Types.ObjectId, before: BedDocument): Promise<void> {
+    await this.beds
+      .updateOne(
+        { _id: bedId, state: 'occupied', admission: admissionId },
+        {
+          $set: { state: 'free', stateSince: before.state === 'free' ? before.stateSince : clinicNow(), admission: null },
+          $unset: { occupantGender: 1 },
+        },
+      )
+      .exec();
+    this.events.changed();
+  }
+
+  /**
+   * Moves an admitted patient into the bed `claim` takes, then sends the old bed to cleaning.
+   * `claim` returns the new bed as it was before, or throws; the move is undone then.
+   */
+  private async moveAdmission(
+    fromBedId: string,
+    toBedId: string,
+    actor: Actor,
+    reason: string | undefined,
+    claim: (from: BedDocument, admission: AdmissionDocument, at: Date) => Promise<void>,
   ): Promise<AdmissionDocument> {
     const from = await this.beds.findById(fromBedId).exec();
     if (from?.state !== 'occupied') throw new ConflictException(NOT_OCCUPIED);
@@ -385,29 +464,20 @@ export class BedsService {
       .findOneAndUpdate(
         { _id: from.admission, status: 'active', bed: from._id },
         {
-          $set: { bed: input.toBedId },
-          $push: { transfers: { fromBed: from._id, toBed: input.toBedId, at, by: actor.name, reason: input.reason } },
+          $set: { bed: toBedId },
+          $push: { transfers: { fromBed: from._id, toBed: toBedId, at, by: actor.name, reason } },
         },
         { new: true },
       )
       .exec();
     if (!admission) throw new ConflictException(NOT_OCCUPIED);
 
-    // 2. Then the new bed, which needs the caller's live hold. Without it, undo the move.
+    // 2. Then the new bed. Without it, undo the move.
     try {
-      const to = await this.beds
-        .findOneAndUpdate(
-          { _id: input.toBedId, state: 'held', holdBy: actor.id, holdExpiresAt: { $gt: new Date() } },
-          {
-            $set: { state: 'occupied', stateSince: at, admission: admission._id, occupantGender: from.occupantGender },
-            $unset: HOLD_FIELDS,
-          },
-        )
-        .exec();
-      if (!to) throw new ConflictException(HOLD_RAN_OUT);
+      await claim(from, admission, at);
     } catch (err) {
       await this.admissions
-        .updateOne({ _id: admission._id, bed: input.toBedId }, { $set: { bed: from._id }, $pop: { transfers: 1 } })
+        .updateOne({ _id: admission._id, bed: toBedId }, { $set: { bed: from._id }, $pop: { transfers: 1 } })
         .exec();
       throw err;
     }
@@ -421,6 +491,46 @@ export class BedsService {
       .exec();
     this.events.changed();
     return admission;
+  }
+
+  /** Moves an admitted patient to a bed the caller holds; the old bed goes to cleaning. */
+  transfer(
+    fromBedId: string,
+    actor: Actor,
+    input: { toBedId: string; suggestionId: string; reason?: string },
+  ): Promise<AdmissionDocument> {
+    return this.moveAdmission(fromBedId, input.toBedId, actor, input.reason, async (from, admission, at) => {
+      const to = await this.beds
+        .findOneAndUpdate(
+          { _id: input.toBedId, state: 'held', holdBy: actor.id, holdExpiresAt: { $gt: new Date() } },
+          {
+            $set: { state: 'occupied', stateSince: at, admission: admission._id, occupantGender: from.occupantGender },
+            $unset: HOLD_FIELDS,
+          },
+        )
+        .exec();
+      if (!to) throw new ConflictException(HOLD_RAN_OUT);
+    });
+  }
+
+  /** Like `transfer`, but into a free bed with no hold: for the bed agent. Twin rooms keep to one gender. */
+  transferToFreeBed(fromBedId: string, toBedId: string, actor: Actor, reason?: string): Promise<AdmissionDocument> {
+    return this.moveAdmission(fromBedId, toBedId, actor, reason, async (from, admission, at) => {
+      const gender = from.occupantGender;
+      if (gender && (await this.roommateClash(toBedId, gender, new Date()))) throw new ConflictException(OTHER_GENDER_ROOM);
+      const before = await this.transition(
+        { _id: toBedId, ...freeOrExpiredHold(new Date()) },
+        {
+          $set: { state: 'occupied', stateSince: at, admission: admission._id, occupantGender: from.occupantGender },
+          $unset: HOLD_FIELDS,
+        },
+        'That bed was just taken.',
+      );
+      if (gender && (await this.roommateClash(toBedId, gender, new Date()))) {
+        await this.freeBed(toBedId, admission._id, before);
+        throw new ConflictException(OTHER_GENDER_ROOM);
+      }
+    });
   }
 
   /**
@@ -452,7 +562,7 @@ export class BedsService {
         { new: true },
       )
       .exec();
-    if (admission) await this.patients.update(String(admission.patient), { status: 'Discharged' });
+    if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: 'Discharged' });
   }
 
   async markCleaned(bedId: string, _actor: Actor): Promise<void> {
