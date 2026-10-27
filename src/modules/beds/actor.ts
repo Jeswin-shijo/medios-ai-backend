@@ -16,3 +16,7 @@ export const ADMIT_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, Use
 export const HOUSEKEEPING_ROLES = [UserRole.ADMIN, UserRole.NURSE, UserRole.STAFF];
 /** Choose a bed the rules exclude, with a reason. */
 export const OVERRIDE_ROLES = [UserRole.ADMIN, UserRole.DOCTOR];
+/** Create or cancel a bed request, and the other doctor-level bed actions. */
+export const REQUEST_ROLES = [UserRole.ADMIN, UserRole.DOCTOR];
+/** Who the Bed Agent acts as when it places a patient. */
+export const AGENT_ACTOR: Actor = { id: 'bed-agent', name: 'Bed Agent', role: UserRole.ADMIN };

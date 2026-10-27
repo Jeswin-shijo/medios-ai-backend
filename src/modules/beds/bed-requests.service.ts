@@ -1,0 +1,280 @@
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { FilterQuery, Model } from 'mongoose';
+import { clinicNow } from '../../common/utils/clinic-time';
+import { PatientsService } from '../patients/patients.service';
+import { isStepDown } from './agent-policy';
+import { Actor } from './actor';
+import { BedAlerts } from './bed-alerts';
+import { BedEvents } from './bed-events';
+import { Need, PatientGender, RoomClass, WardType } from './bed-types';
+import { BedsService } from './beds.service';
+import {
+  BedDecision,
+  BedRequest,
+  BedRequestDocument,
+  NeedEvidence,
+  OPEN_STATES,
+  RequestPriority,
+  RequestState,
+} from './schemas/bed-request.schema';
+
+export interface CreateBedRequestInput {
+  type: 'admission' | 'transfer';
+  patientId: string;
+  fromBedId?: string;
+  roomClass: RoomClass;
+  needs: Need[];
+  notes: string;
+  department: string;
+  doctor: string;
+  expectedStayDays: number;
+  priority: RequestPriority;
+}
+
+export interface BedRequestView {
+  id: string;
+  type: 'admission' | 'transfer';
+  stepDown: boolean;
+  patientId: string;
+  patientName: string;
+  patientUhid: string;
+  patientAge: number;
+  patientGender: PatientGender;
+  fromBedId?: string;
+  fromBedLabel?: string;
+  fromWardType?: WardType;
+  admissionId?: string;
+  roomClass: RoomClass;
+  needs: Need[];
+  addedNeeds: NeedEvidence[];
+  pendingNeeds: NeedEvidence[];
+  dismissedNeeds: Need[];
+  /** Only in `get`: lists leave the clinical notes out. */
+  notes?: string;
+  department: string;
+  doctor: string;
+  expectedStayDays: number;
+  priority: RequestPriority;
+  state: RequestState;
+  stateReason: string;
+  stateSince: string;
+  open: boolean;
+  attempts: number;
+  requestedBy: string;
+  requestedByName: string;
+  requestedAt: string;
+  assignedBedId?: string;
+  assignedBedLabel?: string;
+  assignedAt?: string;
+  decision?: BedDecision;
+  closedByName?: string;
+}
+
+export interface BedRequestQuery {
+  state?: string;
+  type?: 'admission' | 'transfer' | 'step-down';
+  limit?: number;
+  before?: string;
+}
+
+const PRIORITY_RANK: Record<RequestPriority, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const LOCK_MS = 60_000;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
+const iso = (d?: Date) => (d ? d.toISOString() : undefined);
+
+function toView(r: BedRequestDocument, withNotes: boolean): BedRequestView {
+  return {
+    id: String(r._id),
+    type: r.type,
+    stepDown: r.stepDown,
+    patientId: String(r.patient),
+    patientName: r.patientName,
+    patientUhid: r.patientUhid,
+    patientAge: r.patientAge,
+    patientGender: r.patientGender,
+    fromBedId: r.fromBed ? String(r.fromBed) : undefined,
+    fromBedLabel: r.fromBedLabel,
+    fromWardType: r.fromWardType,
+    admissionId: r.admission ? String(r.admission) : undefined,
+    roomClass: r.roomClass,
+    needs: [...r.needs],
+    addedNeeds: r.addedNeeds.map((n) => ({ need: n.need, evidence: n.evidence })),
+    pendingNeeds: r.pendingNeeds.map((n) => ({ need: n.need, evidence: n.evidence })),
+    dismissedNeeds: [...r.dismissedNeeds],
+    ...(withNotes ? { notes: r.notes } : {}),
+    department: r.department,
+    doctor: r.doctor,
+    expectedStayDays: r.expectedStayDays,
+    priority: r.priority,
+    state: r.state,
+    stateReason: r.stateReason,
+    stateSince: r.stateSince.toISOString(),
+    open: r.open,
+    attempts: r.attempts,
+    requestedBy: r.requestedBy,
+    requestedByName: r.requestedByName,
+    requestedAt: r.requestedAt.toISOString(),
+    assignedBedId: r.assignedBed ? String(r.assignedBed) : undefined,
+    assignedBedLabel: r.assignedBedLabel,
+    assignedAt: iso(r.assignedAt),
+    decision: r.decision,
+    closedByName: r.closedByName,
+  };
+}
+
+const NOT_FOUND = 'Bed request not found.';
+
+@Injectable()
+export class BedRequestsService {
+  constructor(
+    @InjectModel(BedRequest.name) private readonly requests: Model<BedRequestDocument>,
+    private readonly patients: PatientsService,
+    private readonly beds: BedsService,
+    private readonly alerts: BedAlerts,
+    private readonly events: BedEvents,
+  ) {}
+
+  async create(actor: Actor, dto: CreateBedRequestInput): Promise<BedRequestDocument> {
+    const patient = await this.patients.findOne(dto.patientId);
+    const patientId = String(patient._id);
+    const transfer: Record<string, unknown> = {};
+
+    if (dto.type === 'admission') {
+      if (await this.beds.activeAdmissionForPatient(patientId)) throw new ConflictException('This patient is already admitted.');
+    } else {
+      const admission = await this.admissionInBed(dto.fromBedId, patientId);
+      transfer.fromBed = admission.bed;
+      transfer.fromBedLabel = admission.bedLabel;
+      transfer.fromWardType = admission.wardType;
+      transfer.admission = admission.id;
+    }
+
+    const now = clinicNow();
+    const stepDown = dto.type === 'transfer' && !!transfer.fromWardType && isStepDown(transfer.fromWardType as WardType, dto.roomClass);
+    try {
+      const created = await this.requests.create({
+        type: dto.type,
+        patient: patient._id,
+        patientName: patient.name,
+        patientUhid: patient.uhid,
+        patientAge: patient.age,
+        patientGender: patient.gender as PatientGender,
+        ...transfer,
+        stepDown,
+        roomClass: dto.roomClass,
+        needs: dto.needs,
+        notes: dto.notes,
+        department: dto.department,
+        doctor: dto.doctor,
+        expectedStayDays: dto.expectedStayDays,
+        priority: dto.priority,
+        priorityRank: PRIORITY_RANK[dto.priority],
+        state: 'searching',
+        stateReason: 'Bed Agent is looking for a bed.',
+        stateSince: now,
+        open: true,
+        attempts: 0,
+        requestedBy: actor.id,
+        requestedByName: actor.name,
+        requestedAt: now,
+      });
+      this.emit(created);
+      return created;
+    } catch (e: any) {
+      if (e?.code === 11000) throw new ConflictException('This patient already has an open bed request.');
+      throw e;
+    }
+  }
+
+  /** The admitted patient in a bed, which must be the request's patient. */
+  private async admissionInBed(bedId: string | undefined, patientId: string) {
+    const none = new ConflictException('This bed has no admitted patient.');
+    if (!bedId) throw none;
+    const admission = await this.beds.admissionInBed(bedId).catch(() => {
+      throw none;
+    });
+    if (admission.patient.id !== patientId) throw none;
+    const { wards, beds } = await this.beds.inventory();
+    const bed = beds.find((b) => b.id === bedId);
+    const ward = wards.find((w) => w.id === bed?.wardId);
+    if (!bed || !ward) throw none;
+    return { id: admission.admissionId, bed: bedId, bedLabel: bed.label, wardType: ward.type };
+  }
+
+  async toState(id: string, state: RequestState, reason: string, patch: Partial<BedRequest> = {}): Promise<BedRequestDocument> {
+    const open = OPEN_STATES.includes(state);
+    const updated = await this.requests
+      .findByIdAndUpdate(id, { ...patch, state, stateReason: reason, stateSince: clinicNow(), open }, { new: true })
+      .exec();
+    if (!updated) throw new NotFoundException(NOT_FOUND);
+    if (state === 'waiting' || state === 'attention') {
+      const alert = await this.alerts.raise(updated);
+      if (!updated.alert) {
+        updated.alert = alert as any;
+        await this.requests.updateOne({ _id: id }, { alert }).exec();
+      }
+    } else if (state === 'assigned' || state === 'cancelled') {
+      await this.alerts.resolve(updated.alert ? String(updated.alert) : undefined);
+    }
+    this.emit(updated);
+    return updated;
+  }
+
+  /** Takes a request for one agent pass. Null when it is closed or another pass holds it. */
+  claim(id: string): Promise<BedRequestDocument | null> {
+    const now = new Date();
+    return this.requests
+      .findOneAndUpdate(
+        { _id: id, open: true, $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] },
+        { lockedUntil: new Date(now.getTime() + LOCK_MS) },
+        { new: true },
+      )
+      .exec();
+  }
+
+  async release(id: string): Promise<void> {
+    await this.requests.updateOne({ _id: id }, { $unset: { lockedUntil: '' } }).exec();
+  }
+
+  async cancel(actor: Actor, id: string): Promise<BedRequestDocument> {
+    const found = await this.requests.findById(id).exec();
+    if (!found) throw new NotFoundException(NOT_FOUND);
+    if (!found.open) throw new ConflictException('This request is already closed.');
+    return this.toState(id, 'cancelled', `Cancelled by ${actor.name}.`, { closedByName: actor.name });
+  }
+
+  async list(q: BedRequestQuery): Promise<BedRequestView[]> {
+    const filter: FilterQuery<BedRequestDocument> = {};
+    if (q.state) filter.state = q.state;
+    if (q.type === 'step-down') filter.stepDown = true;
+    else if (q.type) filter.type = q.type;
+    if (q.before) filter.requestedAt = { $lt: new Date(q.before) };
+    const limit = Math.min(Math.max(q.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const rows = await this.requests.find(filter).sort({ requestedAt: -1, _id: -1 }).limit(limit).exec();
+    return rows.map((r) => toView(r, false));
+  }
+
+  async get(id: string): Promise<BedRequestView> {
+    const found = await this.requests.findById(id).exec();
+    if (!found) throw new NotFoundException(NOT_FOUND);
+    return toView(found, true);
+  }
+
+  waiting(): Promise<BedRequestDocument[]> {
+    return this.requests.find({ state: 'waiting' }).sort({ priorityRank: 1, requestedAt: 1, _id: 1 }).exec();
+  }
+
+  private emit(r: BedRequestDocument) {
+    this.events.requestChanged({
+      id: String(r._id),
+      state: r.state,
+      type: r.type,
+      patientName: r.patientName,
+      bedLabel: r.assignedBedLabel,
+      reason: r.stateReason,
+    });
+  }
+}

@@ -8,6 +8,10 @@ import { BedsController } from './beds.controller';
 import { BedsService } from './beds.service';
 import { SuggestionsService } from './suggestions.service';
 import { BedEvents } from './bed-events';
+import { BedAlerts } from './bed-alerts';
+import { BedRequestsService } from './bed-requests.service';
+import { BedRequest, BedRequestSchema } from './schemas/bed-request.schema';
+import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { AiModule } from '../ai/ai.module';
 import { PatientsModule } from '../patients/patients.module';
 
@@ -18,12 +22,14 @@ import { PatientsModule } from '../patients/patients.module';
       { name: Bed.name, schema: BedSchema },
       { name: Admission.name, schema: AdmissionSchema },
       { name: BedSuggestion.name, schema: BedSuggestionSchema },
+      { name: BedRequest.name, schema: BedRequestSchema },
     ]),
     AiModule,
     PatientsModule,
+    TasksAlertsModule,
   ],
   controllers: [BedsController],
-  providers: [BedsService, SuggestionsService, BedEvents],
+  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService],
   exports: [BedsService],
 })
 export class BedsModule {}

@@ -51,6 +51,10 @@ export class TaskAlertItem {
     enum: ['Critical', 'Follow-up', 'Lab', 'Imaging', 'Medication', 'System'],
   })
   category: string;
+
+  /** What the alert points at, e.g. `bed-request:<id>`. */
+  @Prop()
+  link?: string;
 }
 
 export const TaskAlertItemSchema = SchemaFactory.createForClass(TaskAlertItem);
