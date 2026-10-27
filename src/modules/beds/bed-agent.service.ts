@@ -9,7 +9,14 @@ import { BedEvents } from './bed-events';
 import { BedRequestsService } from './bed-requests.service';
 import { AdmissionRequestInput, BedInfo, Need, WardInfo } from './bed-types';
 import { BedsService } from './beds.service';
-import { BedDecision, BedRequest, BedRequestDocument, NeedEvidence, RequestState } from './schemas/bed-request.schema';
+import {
+  BedDecision,
+  BedRequest,
+  BedRequestDocument,
+  NeedEvidence,
+  RequestState,
+  ResolvedNeed,
+} from './schemas/bed-request.schema';
 import { RankedBed, clipReason } from './scoring';
 import { AgentRanking, SuggestInput, SuggestionsService, rankByRules } from './suggestions.service';
 
@@ -49,6 +56,9 @@ const NEED_LABEL: Record<Need, string> = {
 const quote = (text: string) => `“${text}”`;
 const listed = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0]);
 const plain = (needs: NeedEvidence[]): NeedEvidence[] => needs.map(({ need, evidence }) => ({ need, evidence }));
+/** Plain copies with a real Date: toState's update is not cast. */
+const plainResolved = (needs: Array<Omit<ResolvedNeed, 'at'> & { at: Date | string }>): ResolvedNeed[] =>
+  needs.map(({ need, evidence, confirmed, byName, at }) => ({ need, evidence, confirmed, byName, at: new Date(at) }));
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** "Notes mention “TB”. Confirm isolation for Suresh P?" */
@@ -170,14 +180,17 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     if (!req) throw new ConflictException((await this.requests.get(id)).open ? BUSY : CLOSED);
     let carryOn = false;
     try {
-      const remaining = req.pendingNeeds.filter((n) => n.need !== need);
-      if (req.state !== 'attention' || remaining.length === req.pendingNeeds.length) {
+      const pending = req.pendingNeeds.find((n) => n.need === need);
+      if (req.state !== 'attention' || !pending) {
         throw new ConflictException('This need is no longer waiting for a decision.');
       }
+      const remaining = req.pendingNeeds.filter((n) => n.need !== need);
+      const resolved: ResolvedNeed = { need, evidence: pending.evidence, confirmed: confirm, byName: actor.name, at: clinicNow() };
       const patch: Partial<BedRequest> = {
         pendingNeeds: plain(remaining),
         needs: confirm && !req.needs.includes(need) ? [...req.needs, need] : [...req.needs],
         dismissedNeeds: confirm ? [...req.dismissedNeeds] : [...req.dismissedNeeds, need],
+        resolvedNeeds: [...plainResolved(req.resolvedNeeds), resolved],
       };
       const decided = `${actor.name} ${confirm ? 'confirmed' : 'dismissed'} ${NEED_LABEL[need]}. ${SEARCHING}`;
       const updated = remaining.length
@@ -217,6 +230,8 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       appliedRules: [],
       addedNeeds: plain(req.addedNeeds),
       candidates: [],
+      resolvedNeeds: plainResolved(req.resolvedNeeds),
+      sample: false,
       ...(result.ruleOverride ? { ruleOverride: true } : {}),
     };
     const patch: Partial<BedRequest> = {
@@ -363,9 +378,10 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     const bedById = new Map(inventory.beds.map((b) => [b.id, b]));
     const bed = bedById.get(choice.bedId);
     const ward = inventory.wards.find((w) => w.id === bed.wardId);
+    const by = rank.aiAnswered && choice.bedId === rank.ordered[0]?.bedId ? 'ai' : 'rules';
     const decision: BedDecision = {
       suggestionId: rank.suggestionId,
-      by: rank.aiAnswered && choice.bedId === rank.ordered[0]?.bedId ? 'ai' : 'rules',
+      by,
       bedId: choice.bedId,
       bedLabel: bed.label,
       wardName: ward?.name ?? '',
@@ -378,6 +394,8 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
         score: r.score,
         reason: r.aiReason ?? r.reason,
       })),
+      resolvedNeeds: plainResolved(req.resolvedNeeds),
+      sample: by === 'ai' && rank.aiSample,
     };
     await this.to(req, 'assigned', `Assigned to ${bed.label}.`, {
       assignedBed: new Types.ObjectId(choice.bedId),

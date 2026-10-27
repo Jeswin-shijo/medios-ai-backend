@@ -159,6 +159,7 @@ describe('BedRequestsService', () => {
     assert.equal(rows[0].id, String(down._id));
     assert.equal(rows[0].stepDown, true);
     assert.equal('notes' in rows[0], false);
+    assert.deepEqual(rows[0].resolvedNeeds, []);
     assert.equal((await service.get(rows[0].id)).notes, 'Fever');
     assert.equal((await service.list({})).length, 2);
     assert.equal((await service.list({ type: 'admission' })).length, 1);

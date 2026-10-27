@@ -66,6 +66,8 @@ export interface AgentRanking {
   ordered: Array<RankedBed & { aiReason?: string }>;
   /** True when the AI answered; its first pick is then `ordered[0]`. */
   aiAnswered: boolean;
+  /** True when that answer came from sample mode. */
+  aiSample: boolean;
   conflict: boolean;
   appliedRules: string[];
   blockedBy: string[];
@@ -237,6 +239,7 @@ export class SuggestionsService {
       suggestionId: result.suggestionId,
       ordered: mergePicks(storedRanking(log), output, log.refs, Infinity),
       aiAnswered: !!output,
+      aiSample: !!output && !!log.ai.sample,
       conflict: result.conflict,
       appliedRules: result.appliedRules,
       blockedBy: result.blockedBy,

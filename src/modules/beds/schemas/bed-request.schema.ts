@@ -14,6 +14,9 @@ export const OPEN_STATES: RequestState[] = ['searching', 'waiting', 'attention']
 
 export type NeedEvidence = { need: Need; evidence: string };
 
+/** A doctor's or admin's answer to a need found in the notes: who, when, and the words found. */
+export type ResolvedNeed = NeedEvidence & { confirmed: boolean; byName: string; at: Date };
+
 /** Why the agent (or staff) chose a bed, kept on the request. */
 export type BedDecision = {
   suggestionId: string;
@@ -25,6 +28,10 @@ export type BedDecision = {
   appliedRules: string[];
   addedNeeds: NeedEvidence[];
   candidates: { bedId: string; label: string; score: number; reason: string }[];
+  /** Notes needs a doctor or admin confirmed or dismissed before the bed was chosen. */
+  resolvedNeeds: ResolvedNeed[];
+  /** True when `by` is 'ai' and the answer came from sample mode (canned, no AI service). */
+  sample: boolean;
   ruleOverride?: boolean;
 };
 
@@ -81,6 +88,10 @@ export class BedRequest {
 
   @Prop({ type: [String], default: [] })
   dismissedNeeds: Need[];
+
+  /** Each confirm or dismiss of a notes need, with who and when. */
+  @Prop({ type: [{ _id: false, need: String, evidence: String, confirmed: Boolean, byName: String, at: Date }], default: [] })
+  resolvedNeeds: ResolvedNeed[];
 
   @Prop({ default: '' })
   notes: string;

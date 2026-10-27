@@ -17,6 +17,7 @@ import {
   OPEN_STATES,
   RequestPriority,
   RequestState,
+  ResolvedNeed,
 } from './schemas/bed-request.schema';
 
 export interface CreateBedRequestInput {
@@ -50,6 +51,7 @@ export interface BedRequestView {
   addedNeeds: NeedEvidence[];
   pendingNeeds: NeedEvidence[];
   dismissedNeeds: Need[];
+  resolvedNeeds: Array<Omit<ResolvedNeed, 'at'> & { at: string }>;
   /** Only in `get`: lists leave the clinical notes out. */
   notes?: string;
   department: string;
@@ -109,6 +111,13 @@ function toView(r: BedRequestDocument, withNotes: boolean): BedRequestView {
     addedNeeds: r.addedNeeds.map((n) => ({ need: n.need, evidence: n.evidence })),
     pendingNeeds: r.pendingNeeds.map((n) => ({ need: n.need, evidence: n.evidence })),
     dismissedNeeds: [...r.dismissedNeeds],
+    resolvedNeeds: r.resolvedNeeds.map((n) => ({
+      need: n.need,
+      evidence: n.evidence,
+      confirmed: n.confirmed,
+      byName: n.byName,
+      at: n.at.toISOString(),
+    })),
     ...(withNotes ? { notes: r.notes } : {}),
     department: r.department,
     doctor: r.doctor,

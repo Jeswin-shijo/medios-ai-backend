@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { ConflictException, ConsoleLogger, ForbiddenException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { clinicNow } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AiProvider } from '../ai/ai-provider';
 import { AiService } from '../ai/ai.service';
@@ -21,6 +22,7 @@ import { SuggestionsService } from './suggestions.service';
 
 const DOCTOR: Actor = { id: 'user-doctor', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Asha', role: UserRole.NURSE };
+const ADMIN: Actor = { id: 'user-admin', name: 'Admin Priya', role: UserRole.ADMIN };
 
 /**
  * Stands in for AiService. With no `result` set it answers as sample mode does, from the
@@ -187,6 +189,8 @@ describe('BedAgentService', () => {
 
     const { decision } = req;
     assert.equal(decision.by, 'ai');
+    assert.equal(decision.sample, false);
+    assert.deepEqual(decision.resolvedNeeds, []);
     assert.equal(decision.bedId, aiPick);
     assert.equal(decision.bedLabel, req.assignedBedLabel);
     assert.equal(decision.wardName, 'General ward A (men)');
@@ -230,6 +234,7 @@ describe('BedAgentService', () => {
     assert.equal(req.attempts, 0);
     assert.equal(String(req.assignedBed), log.ruleRanking[0].bedId);
     assert.equal(req.decision.by, 'rules');
+    assert.equal(req.decision.sample, false);
     assert.equal(req.decision.reason, log.ruleRanking[0].reason);
   });
 
@@ -571,6 +576,7 @@ describe('BedAgentService', () => {
     assert.equal(req.assignedBedLabel, 'Twin 1 • Bed B');
     assert.equal(String(req.admission), String(admission._id));
     assert.equal(req.decision.by, 'staff');
+    assert.equal(req.decision.sample, false);
     assert.equal(req.decision.reason, 'Family agreed to the twin room');
     assert.equal((await alertFor(id)).status, 'Completed');
 
@@ -700,6 +706,68 @@ describe('BedAgentService', () => {
     assert.equal(req.stateReason, 'Notes mention “TB”. Confirm isolation for Suresh P?');
     assert.deepEqual(req.pendingNeeds, [{ need: 'isolation', evidence: 'TB' }]);
     assert.equal(await Admission.countDocuments({ patient: pid }), 0);
+  });
+
+  test('confirming a notes need records who confirmed it, the evidence and the time, and the decision carries it', async () => {
+    const id = await ask({ patientId: await patient('Male', 50, 'Suresh P'), notes: 'Cough for three weeks, suspected TB' });
+    await agent.process(id);
+    assert.equal((await load(id)).state, 'attention');
+
+    const before = clinicNow().getTime();
+    await agent.resolveNotesNeed(DOCTOR, id, 'isolation', true);
+    const afterResolve = clinicNow().getTime();
+    await agent.idle();
+
+    const req = await load(id);
+    assert.equal(req.state, 'assigned');
+    assert.equal(req.resolvedNeeds.length, 1);
+    const [resolved] = req.resolvedNeeds;
+    assert.deepEqual(
+      { need: resolved.need, evidence: resolved.evidence, confirmed: resolved.confirmed, byName: resolved.byName },
+      { need: 'isolation', evidence: 'TB', confirmed: true, byName: 'Dr. Shajin' },
+    );
+    assert.ok(resolved.at instanceof Date);
+    assert.ok(resolved.at.getTime() >= before && resolved.at.getTime() <= afterResolve);
+    // The confirmed need is still used as a ticked need.
+    assert.deepEqual(req.needs, ['isolation']);
+    assert.deepEqual(req.decision.resolvedNeeds, req.resolvedNeeds);
+    const view = await requests.get(id);
+    assert.deepEqual(view.resolvedNeeds, [
+      { need: 'isolation', evidence: 'TB', confirmed: true, byName: 'Dr. Shajin', at: resolved.at.toISOString() },
+    ]);
+  });
+
+  test('dismissing a notes need records who dismissed it', async () => {
+    const id = await ask({ patientId: await patient(), notes: 'No TB contact. Fever for three days' });
+    await agent.process(id);
+
+    await agent.resolveNotesNeed(ADMIN, id, 'isolation', false);
+    await agent.idle();
+
+    const req = await load(id);
+    assert.equal(req.state, 'assigned');
+    assert.deepEqual(req.dismissedNeeds, ['isolation']);
+    assert.deepEqual(req.needs, []);
+    assert.deepEqual(
+      req.resolvedNeeds.map(({ need, evidence, confirmed, byName }) => ({ need, evidence, confirmed, byName })),
+      [{ need: 'isolation', evidence: 'TB', confirmed: false, byName: 'Admin Priya' }],
+    );
+    assert.ok(req.resolvedNeeds[0].at instanceof Date);
+    assert.deepEqual(req.decision.resolvedNeeds, req.resolvedNeeds);
+  });
+
+  test('a sample-mode AI decision is marked sample', async () => {
+    // The fake AI answers as sample mode does: its first pick is the rules' first bed.
+    const id = await ask({ patientId: await patient() });
+
+    await agent.process(id);
+
+    const req = await load(id);
+    const log = await BedSuggestion.findById(req.decision.suggestionId).lean().exec();
+    assert.equal(log.ai.sample, true);
+    assert.equal(req.state, 'assigned');
+    assert.equal(req.decision.by, 'ai');
+    assert.equal(req.decision.sample, true);
   });
 
   test('a bed change wakes the agent for waiting requests, until the module stops', { timeout: 10_000 }, async () => {
