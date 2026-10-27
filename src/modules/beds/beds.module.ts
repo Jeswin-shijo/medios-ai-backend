@@ -5,6 +5,10 @@ import { Bed, BedSchema } from './schemas/bed.schema';
 import { Admission, AdmissionSchema } from './schemas/admission.schema';
 import { BedSuggestion, BedSuggestionSchema } from './schemas/bed-suggestion.schema';
 import { BedsController } from './beds.controller';
+import { BedRequestsController } from './bed-requests.controller';
+import { BedAgentService } from './bed-agent.service';
+import { BedAgentScheduler } from './bed-agent.scheduler';
+import { SettingsModule } from '../settings/settings.module';
 import { BedsService } from './beds.service';
 import { SuggestionsService } from './suggestions.service';
 import { BedEvents } from './bed-events';
@@ -27,9 +31,10 @@ import { PatientsModule } from '../patients/patients.module';
     AiModule,
     PatientsModule,
     TasksAlertsModule,
+    SettingsModule,
   ],
-  controllers: [BedsController],
-  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService],
+  controllers: [BedRequestsController, BedsController],
+  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService, BedAgentService, BedAgentScheduler],
   exports: [BedsService],
 })
 export class BedsModule {}

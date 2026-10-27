@@ -4,7 +4,8 @@ import { Request, Response } from 'express';
 import { debounceTime } from 'rxjs';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { ADMIT_ROLES, HOUSEKEEPING_ROLES, actorOf } from './actor';
+import { ADMIT_ROLES, Actor, HOUSEKEEPING_ROLES, REQUEST_ROLES, actorOf } from './actor';
+import { BedAgentService } from './bed-agent.service';
 import { BedEvents } from './bed-events';
 import { BedsService } from './beds.service';
 import { assertSuggestionFitsBed } from './transfer-check';
@@ -23,6 +24,7 @@ export class BedsController {
     private readonly beds: BedsService,
     private readonly suggestions: SuggestionsService,
     private readonly events: BedEvents,
+    private readonly agent: BedAgentService,
   ) {}
 
   @Get('board')
@@ -38,7 +40,7 @@ export class BedsController {
    */
   @Get('stream')
   @Roles(...ADMIT_ROLES)
-  @ApiOperation({ summary: 'Live bed changes (text/event-stream): "changed" and "ping" events' })
+  @ApiOperation({ summary: 'Live bed changes (text/event-stream): "changed", "request" and "ping" events' })
   stream(@Req() req: Request, @Res() res: Response) {
     res.status(200).set({
       'Content-Type': 'text/event-stream',
@@ -54,10 +56,13 @@ export class BedsController {
     };
 
     const changes = this.events.changes$.pipe(debounceTime(150)).subscribe(() => write('changed', {}));
+    // Request changes go out as they happen, not debounced.
+    const requests = this.events.requests$.subscribe((e) => write('request', e));
     const ping = setInterval(() => write('ping', {}), PING_MS);
     req.on('close', () => {
       closed = true;
       changes.unsubscribe();
+      requests.unsubscribe();
       clearInterval(ping);
     });
 
@@ -65,14 +70,14 @@ export class BedsController {
   }
 
   @Post('suggestions')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @ApiOperation({ summary: 'Rank the beds for a patient by the fixed rules' })
   suggest(@CurrentUser() user: any, @Body() dto: SuggestBedsDto) {
     return this.suggestions.suggest(actorOf(user), dto);
   }
 
   @Post('suggestions/:id/refine')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Ask the AI to reorder and explain the top beds' })
   refine(@CurrentUser() user: any, @Param('id') id: string) {
@@ -87,7 +92,7 @@ export class BedsController {
   }
 
   @Post(':bedId/hold')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Hold a free bed for 5 minutes while the choice is confirmed' })
   async hold(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: HoldBedDto) {
@@ -97,7 +102,7 @@ export class BedsController {
   }
 
   @Delete(':bedId/hold')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @ApiOperation({ summary: 'Give back a hold' })
   async release(@CurrentUser() user: any, @Param('bedId') bedId: string) {
     await this.beds.release(bedId, actorOf(user));
@@ -105,7 +110,7 @@ export class BedsController {
   }
 
   @Post(':bedId/admit')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @ApiOperation({ summary: 'Admit the suggestion\'s patient to a held bed' })
   async admit(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: AdmitBedDto) {
     const actor = actorOf(user);
@@ -121,11 +126,12 @@ export class BedsController {
       expectedStayDays: log.request.expectedStayDays,
     });
     await this.suggestions.recordChoice(dto.suggestionId, { bedId, admissionId: String(admission._id), ...pick(dto) });
+    await this.closeRequest(dto.requestId, bedId, admission, actor, dto);
     return admission;
   }
 
   @Post(':bedId/transfer')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...REQUEST_ROLES)
   @ApiOperation({ summary: 'Move an admitted patient to a held bed' })
   async transfer(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: TransferBedDto) {
     const actor = actorOf(user);
@@ -138,7 +144,32 @@ export class BedsController {
       reason: dto.reason,
     });
     await this.suggestions.recordChoice(dto.suggestionId, { bedId: dto.toBedId, admissionId: String(admission._id), ...pick(dto) });
+    await this.closeRequest(dto.requestId, dto.toBedId, admission, actor, dto);
     return admission;
+  }
+
+  /** The staff choice answers its bed request, if the screen named one. */
+  private async closeRequest(
+    requestId: string | undefined,
+    bedId: string,
+    admission: { _id: unknown },
+    actor: Actor,
+    dto: { suggestionId: string; reason?: string; ruleOverride?: boolean },
+  ) {
+    if (!requestId) return;
+    const { wards, beds } = await this.beds.inventory();
+    const bed = beds.find((b) => b.id === bedId);
+    const ward = wards.find((w) => w.id === bed?.wardId);
+    await this.agent.completeByHand(requestId, {
+      bedId,
+      bedLabel: bed?.label ?? '',
+      wardName: ward?.name ?? '',
+      admissionId: String(admission._id),
+      actor,
+      reason: dto.reason,
+      ruleOverride: dto.ruleOverride,
+      suggestionId: dto.suggestionId,
+    });
   }
 
   @Post(':bedId/discharge')

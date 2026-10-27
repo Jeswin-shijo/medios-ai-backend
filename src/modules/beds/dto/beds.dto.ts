@@ -1,9 +1,11 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, OmitType } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   ArrayUnique,
   IsArray,
   IsBoolean,
   IsIn,
+  IsISO8601,
   IsInt,
   IsMongoId,
   IsNotEmpty,
@@ -12,6 +14,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { NEEDS, Need, RoomClass } from '../bed-types';
 
@@ -83,6 +86,11 @@ export class AdmitBedDto {
   @IsOptional()
   @IsBoolean()
   ruleOverride?: boolean;
+
+  @ApiPropertyOptional({ description: 'The bed request this admission answers; it closes with this choice' })
+  @IsOptional()
+  @IsMongoId()
+  requestId?: string;
 }
 
 export class TransferBedDto extends AdmitBedDto {
@@ -104,4 +112,63 @@ export class BlockBedDto {
   @IsNotEmpty()
   @MaxLength(200)
   reason: string;
+}
+
+const REQUEST_TYPES = ['admission', 'transfer'] as const;
+const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+const REQUEST_STATES = ['searching', 'assigned', 'waiting', 'attention', 'cancelled'] as const;
+
+export class CreateBedRequestDto extends OmitType(SuggestBedsDto, ['currentBedId'] as const) {
+  @ApiProperty({ enum: REQUEST_TYPES })
+  @IsIn(REQUEST_TYPES)
+  type: 'admission' | 'transfer';
+
+  @ApiPropertyOptional({ description: 'For a transfer: the bed the patient is in now' })
+  @ValidateIf((o) => o.type === 'transfer')
+  @IsMongoId()
+  fromBedId?: string;
+
+  @ApiProperty({ enum: PRIORITIES })
+  @IsIn(PRIORITIES)
+  priority: 'critical' | 'high' | 'medium' | 'low';
+}
+
+export class BedRequestQueryDto {
+  @ApiPropertyOptional({ enum: REQUEST_STATES })
+  @IsOptional()
+  @IsIn(REQUEST_STATES)
+  state?: (typeof REQUEST_STATES)[number];
+
+  @ApiPropertyOptional({ enum: ['admission', 'transfer', 'step-down'] })
+  @IsOptional()
+  @IsIn(['admission', 'transfer', 'step-down'])
+  type?: 'admission' | 'transfer' | 'step-down';
+
+  @ApiPropertyOptional({ example: 50 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+
+  @ApiPropertyOptional({ description: 'Only requests made before this time (ISO date)' })
+  @IsOptional()
+  @IsISO8601()
+  before?: string;
+}
+
+export class RequestIdParam {
+  @IsMongoId()
+  id: string;
+}
+
+export class NotesNeedDto {
+  @ApiProperty({ enum: NEEDS })
+  @IsIn(NEEDS)
+  need: Need;
+
+  @ApiProperty({ description: 'true to add the need, false to dismiss it' })
+  @IsBoolean()
+  confirm: boolean;
 }
