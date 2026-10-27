@@ -150,4 +150,11 @@ describe('bed AI task', () => {
     assert.deepEqual(mergePicks(ranked, null, refs).map((m) => m.bedId), ranked.slice(0, 3).map((r) => r.bedId));
     assert.equal(mergePicks(ranked.slice(0, 2), null, refs).length, 2);
   });
+
+  test('mergePicks with a limit returns the AI picks first, then the rest of the rule order', () => {
+    const ranked = ['r0', 'r1', 'r2', 'r3', 'r4', 'r5'].map((bedId) => ({ bedId, score: 0, reasons: [], reason: '', stepUp: false }));
+    const lookup = { a: 'r4', b: 'r1' };
+    const merged = mergePicks(ranked, { extraNeeds: [], picks: [{ ref: 'a', reason: 'x' }, { ref: 'b', reason: 'y' }] }, lookup, ranked.length);
+    assert.deepEqual(merged.map((m) => m.bedId), ['r4', 'r1', 'r0', 'r2', 'r3', 'r5']);
+  });
 });

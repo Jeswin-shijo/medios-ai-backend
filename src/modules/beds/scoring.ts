@@ -134,10 +134,11 @@ export function rankBeds(
 
   const ranked = candidates.map((b) => score(b, false)).sort(byScore);
 
-  // At most one step-up bed: the best of the pool, placed by score but never below 3rd.
+  // At most one step-up bed: the best of the pool, placed before the first bed it strictly
+  // beats (it loses exact ties), but never below 3rd.
   const stepUp = stepUpPool.map((b) => score(b, true)).sort(byScore)[0];
   if (stepUp) {
-    const at = ranked.findIndex((r) => byScore(stepUp, r) < 0);
+    const at = ranked.findIndex((r) => stepUp.score > r.score);
     ranked.splice(Math.min(at === -1 ? ranked.length : at, MAX_STEP_UP_INDEX), 0, stepUp);
   }
   return { ranked, reserveBlocked };

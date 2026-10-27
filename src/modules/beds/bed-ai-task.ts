@@ -208,8 +208,9 @@ export function mergePicks(
   ranked: RankedBed[],
   output: BedAiOutput | null,
   refs: Record<string, string>,
+  limit: number = AI_PICK_LIMIT,
 ): Array<RankedBed & { aiReason?: string }> {
-  const limit = Math.min(AI_PICK_LIMIT, ranked.length);
+  limit = Math.min(limit, ranked.length);
   const byId = new Map(ranked.map((r) => [r.bedId, r]));
   const merged: Array<RankedBed & { aiReason?: string }> = [];
   const used = new Set<string>();

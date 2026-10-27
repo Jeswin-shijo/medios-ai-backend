@@ -30,6 +30,7 @@ const offer = (inv: typeof beds, ids: string[], classUsed: RuleOutcome['classUse
   blockedBy: [],
   classUsed,
   stepUpPool: [],
+  conflict: false,
 });
 
 describe('rankBeds', () => {
@@ -165,5 +166,18 @@ describe('rankBeds', () => {
   test('elderly prefers near the nurses', () => {
     const { ranked } = rank(req({ age: 72, gender: 'Female' }));
     assert.equal(ranked[0].bedId, 'GWB-3');
+  });
+
+  test('a step-up bed loses an exact tie to a bed in the asked class', () => {
+    // HDU-2 has been free longer, so only the strict comparison keeps it behind GWA-4.
+    const inv = beds.map((b) => (b.id === 'HDU-2' ? { ...b, freeSince: new Date('2026-09-26T06:00:00') } : b));
+    const r = req({ age: 42, needs: ['oxygen', 'highFallRisk'], department: 'Pulmonology' });
+    const rules = { ...offer(inv, ['GWA-4'], 'general'), stepUpPool: inv.filter((b) => b.id === 'HDU-2') };
+    const { ranked } = rankBeds(r, rules, wards, inv, NOW);
+    assert.equal(ranked.length, 2);
+    assert.equal(ranked[0].score, ranked[1].score);
+    assert.equal(ranked[0].stepUp, false);
+    assert.equal(ranked[0].bedId, 'GWA-4');
+    assert.ok(ranked.findIndex((x) => x.stepUp) > ranked.findIndex((x) => x.bedId === 'GWA-4'));
   });
 });

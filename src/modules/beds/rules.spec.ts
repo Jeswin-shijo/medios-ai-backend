@@ -366,4 +366,13 @@ describe("applyRules", () => {
     const out = applyRules(req({ currentBedId: "GWA-4" }), wards, beds, NOW);
     assert.ok(!ids(out).includes("GWA-4"));
   });
+
+  test("conflict is true only when no ward type meets every limit", () => {
+    assert.equal(applyRules(req({ needs: ["isolation", "ventilator"] }), wards, beds, NOW).conflict, true);
+    assert.equal(applyRules(req({ needs: ["oxygen"] }), wards, beds, NOW).conflict, false);
+    const full = beds.map((b) => (b.state === "free" ? { ...b, state: "occupied" as const } : b));
+    const out = applyRules(req(), wards, full, NOW);
+    assert.equal(out.candidates.length, 0);
+    assert.equal(out.conflict, false);
+  });
 });

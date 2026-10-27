@@ -65,6 +65,8 @@ export interface RuleOutcome {
   classUsed: RoomClass | "isolation";
   classNote?: string;
   stepUpPool: BedInfo[];
+  /** True when no ward type meets every limiting need (isolation with a ventilator, say). */
+  conflict: boolean;
 }
 
 const OTHER_GENDER_WARDS: WardType[] = [
@@ -245,6 +247,7 @@ export function applyRules(
     blockedBy,
     classUsed,
     stepUpPool,
+    conflict,
   };
   if (classNote) outcome.classNote = classNote;
   return outcome;
