@@ -30,8 +30,14 @@ describe('seedBeds', () => {
     assert.ok(beds.every((b) => isoDate(b.stateSince) === '2026-09-26'));
 
     const admissions = await Admission.find().lean().exec();
-    assert.equal(admissions.length, 2);
+    const named = admissions.filter((a) => !a.sample);
+    assert.equal(named.length, 2);
     // Admitted two days before the demo day.
-    assert.ok(admissions.every((a) => isoDate(a.admittedAt) === '2026-09-24'));
+    assert.ok(named.every((a) => isoDate(a.admittedAt) === '2026-09-24'));
+    // Sample inpatients: one per sample bed, never admitted after the demo day.
+    const sample = admissions.filter((a) => a.sample);
+    assert.equal(sample.length, beds.filter((b) => b.sample).length);
+    assert.ok(sample.every((a) => isoDate(a.admittedAt) <= '2026-09-26'));
+    assert.equal(beds.filter((b) => b.state === 'occupied' && !b.admission).length, 0);
   });
 });
