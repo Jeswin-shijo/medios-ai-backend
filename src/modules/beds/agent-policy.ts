@@ -58,7 +58,7 @@ export function autoAssignable(
   return classes.flatMap((type) => ordered.filter((r) => !r.stepUp && typeOf(r) === type));
 }
 
-/** One line for staff when only a nearest class (twin for general, say) has a free bed. */
+/** One line for staff when only a nearest class (twin for general, say) has a free bed. It names the class the agent searched, which is not always the one requested. */
 export function nearestOptionText(
   req: AdmissionRequestInput,
   ordered: RankedBed[],
@@ -72,8 +72,8 @@ export function nearestOptionText(
     if (r.stepUp) continue;
     const found = wardById.get(bedById.get(r.bedId)?.wardId ?? '');
     if (!found || classes.includes(found.type)) continue;
-    const asked = wards.find((w) => w.type === req.roomClass);
-    const head = `No ${CLASS_LABEL[req.roomClass]} beds free. ${CLASS_LABEL[found.type]} available`;
+    const asked = wards.find((w) => w.type === classes[0]);
+    const head = `No ${CLASS_LABEL[classes[0]]} beds free. ${CLASS_LABEL[found.type]} available`;
     if (!asked) return head;
     const diff = found.ratePerDay - asked.ratePerDay;
     if (diff === 0) return `${head}, same price`;

@@ -142,6 +142,19 @@ describe('agent policy', () => {
     );
   });
 
+  test('nearestOptionText names the class the agent searched, not the requested class', () => {
+    assert.equal(
+      nearestOptionText(req({ roomClass: 'hdu', needs: ['monitor'] }), [ranked('icu')], wards, beds),
+      'No HDU beds free. ICU available, ₹3,500 more a day',
+    );
+  });
+
+  test('nearestOptionText returns null when the only other ranked bed is of a searched class', () => {
+    const paedWards = [...wards, ward('paediatric', 1000)];
+    const paedBeds = [...beds, bed('paediatric')];
+    assert.equal(nearestOptionText(req({ age: 8 }), [ranked('paediatric')], paedWards, paedBeds), null);
+  });
+
   test('isStepDown is true for ICU or HDU to a ward and false otherwise', () => {
     assert.equal(isStepDown('icu', 'general'), true);
     assert.equal(isStepDown('hdu', 'twin'), true);
