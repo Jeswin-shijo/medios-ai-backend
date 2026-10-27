@@ -2,6 +2,7 @@ import mongoose, { Model, Schema } from 'mongoose';
 import { Admission, AdmissionDocument, AdmissionSchema } from '../modules/beds/schemas/admission.schema';
 import { Bed, BedDocument, BedSchema } from '../modules/beds/schemas/bed.schema';
 import { BedSuggestion, BedSuggestionDocument, BedSuggestionSchema } from '../modules/beds/schemas/bed-suggestion.schema';
+import { BedSnapshot, BedSnapshotDocument, BedSnapshotSchema } from '../modules/beds/schemas/bed-snapshot.schema';
 import { BedRequest, BedRequestDocument, BedRequestSchema } from '../modules/beds/schemas/bed-request.schema';
 import { TaskAlertItem, TaskAlertDocument, TaskAlertItemSchema } from '../modules/tasks-alerts/schemas/task-alert.schema';
 import { Ward, WardDocument, WardSchema } from '../modules/beds/schemas/ward.schema';
@@ -37,6 +38,7 @@ export function models() {
     BedSuggestion: model(BedSuggestion, BedSuggestionSchema) as Model<BedSuggestionDocument>,
     Patient: model(Patient, PatientSchema) as Model<PatientDocument>,
     BedRequest: model(BedRequest, BedRequestSchema) as Model<BedRequestDocument>,
+    BedSnapshot: model(BedSnapshot, BedSnapshotSchema) as Model<BedSnapshotDocument>,
     TaskAlertItem: model(TaskAlertItem, TaskAlertItemSchema) as Model<TaskAlertDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };

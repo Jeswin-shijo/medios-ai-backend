@@ -335,6 +335,16 @@ export class BedRequestsService {
     }
   }
 
+  /** Requests the agent is still placing or waiting for. */
+  countOpen(): Promise<number> {
+    return this.requests.countDocuments({ open: true }).exec();
+  }
+
+  /** Requests that wait for a bed or need staff to decide. */
+  countNeedingAttention(): Promise<number> {
+    return this.requests.countDocuments({ state: { $in: ['waiting', 'attention'] } }).exec();
+  }
+
   waiting(): Promise<BedRequestDocument[]> {
     return this.requests.find({ state: 'waiting' }).sort({ priorityRank: 1, requestedAt: 1, _id: 1 }).exec();
   }

@@ -4,8 +4,9 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ADMIT_ROLES, REQUEST_ROLES, actorOf } from './actor';
 import { BedAgentService } from './bed-agent.service';
+import { BedOverviewService } from './bed-overview.service';
 import { BedRequestsService } from './bed-requests.service';
-import { BedRequestQueryDto, CreateBedRequestDto, NotesNeedDto, RequestIdParam } from './dto/beds.dto';
+import { BedRequestQueryDto, CreateBedRequestDto, NotesNeedDto, RequestIdParam, SnapshotQueryDto } from './dto/beds.dto';
 
 /** Registered before `BedsController` so `/beds/requests` is not read as `/beds/:bedId/...`. */
 @ApiTags('Beds')
@@ -57,5 +58,27 @@ export class BedRequestsController {
   async notesNeed(@CurrentUser() user: any, @Param() p: RequestIdParam, @Body() dto: NotesNeedDto) {
     await this.agent.resolveNotesNeed(actorOf(user), p.id, dto.need, dto.confirm);
     return this.requests.get(p.id);
+  }
+}
+
+/** Also registered before `BedsController`, so `overview` and `snapshots` are not read as `/beds/:bedId`. */
+@ApiTags('Beds')
+@ApiBearerAuth()
+@Controller('beds')
+export class BedOverviewController {
+  constructor(private readonly overview: BedOverviewService) {}
+
+  @Get('overview')
+  @Roles(...ADMIT_ROLES)
+  @ApiOperation({ summary: 'Bed totals with trends, availability by ward type, discharge plan, movements and suggestions' })
+  get(@CurrentUser() user: any) {
+    return this.overview.overview(actorOf(user));
+  }
+
+  @Get('snapshots')
+  @Roles(...ADMIT_ROLES)
+  @ApiOperation({ summary: 'Hourly bed counts for the last 24 hours or 7 days' })
+  snapshots(@Query() q: SnapshotQueryDto) {
+    return this.overview.series(q.range ?? '24h');
   }
 }

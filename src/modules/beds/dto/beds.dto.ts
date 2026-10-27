@@ -172,3 +172,10 @@ export class NotesNeedDto {
   @IsBoolean()
   confirm: boolean;
 }
+
+export class SnapshotQueryDto {
+  @ApiPropertyOptional({ enum: ['24h', '7d'], default: '24h' })
+  @IsOptional()
+  @IsIn(['24h', '7d'])
+  range?: '24h' | '7d';
+}

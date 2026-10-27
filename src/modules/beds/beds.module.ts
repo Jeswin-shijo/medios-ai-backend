@@ -5,7 +5,7 @@ import { Bed, BedSchema } from './schemas/bed.schema';
 import { Admission, AdmissionSchema } from './schemas/admission.schema';
 import { BedSuggestion, BedSuggestionSchema } from './schemas/bed-suggestion.schema';
 import { BedsController } from './beds.controller';
-import { BedRequestsController } from './bed-requests.controller';
+import { BedOverviewController, BedRequestsController } from './bed-requests.controller';
 import { BedAgentService } from './bed-agent.service';
 import { BedAgentScheduler } from './bed-agent.scheduler';
 import { SettingsModule } from '../settings/settings.module';
@@ -14,6 +14,8 @@ import { SuggestionsService } from './suggestions.service';
 import { BedEvents } from './bed-events';
 import { BedAlerts } from './bed-alerts';
 import { BedRequestsService } from './bed-requests.service';
+import { BedOverviewService } from './bed-overview.service';
+import { BedSnapshot, BedSnapshotSchema } from './schemas/bed-snapshot.schema';
 import { BedRequest, BedRequestSchema } from './schemas/bed-request.schema';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { AiModule } from '../ai/ai.module';
@@ -27,14 +29,15 @@ import { PatientsModule } from '../patients/patients.module';
       { name: Admission.name, schema: AdmissionSchema },
       { name: BedSuggestion.name, schema: BedSuggestionSchema },
       { name: BedRequest.name, schema: BedRequestSchema },
+      { name: BedSnapshot.name, schema: BedSnapshotSchema },
     ]),
     AiModule,
     PatientsModule,
     TasksAlertsModule,
     SettingsModule,
   ],
-  controllers: [BedRequestsController, BedsController],
-  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService, BedAgentService, BedAgentScheduler],
+  controllers: [BedRequestsController, BedOverviewController, BedsController],
+  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService, BedAgentService, BedAgentScheduler, BedOverviewService],
   exports: [BedsService],
 })
 export class BedsModule {}
