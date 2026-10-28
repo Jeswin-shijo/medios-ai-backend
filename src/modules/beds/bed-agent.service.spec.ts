@@ -692,6 +692,69 @@ describe('BedAgentService', () => {
     assert.equal(await Admission.countDocuments({ patient: pid }), 1);
   });
 
+  test('an attention transfer request closes after the patient is discharged', async () => {
+    const pid = await patient();
+    const admission = await beds.admitToFreeBed(bed('HDU-2'), DOCTOR, {
+      patientId: pid, doctor: 'Dr. Shajin', department: 'Cardiology', roomClass: 'hdu', needs: ['monitor'], notes: 'Chest pain', expectedStayDays: 4,
+    });
+    const id = await ask({ type: 'transfer', patientId: pid, fromBedId: bed('HDU-2'), needs: ['isolation', 'ventilator'] });
+    await agent.process(id);
+    assert.equal((await load(id)).state, 'attention');
+
+    // Still in the bed: the backstop leaves it for staff.
+    await agent.recover();
+    await agent.idle();
+    const kept = await load(id);
+    assert.equal(kept.state, 'attention');
+    assert.equal(kept.lockedUntil, undefined);
+
+    await beds.discharge(bed('HDU-2'), NURSE, String(admission._id));
+    const logs = await BedSuggestion.countDocuments();
+    await agent.recover();
+    await agent.idle();
+
+    const req = await load(id);
+    assert.equal(req.state, 'cancelled');
+    assert.equal(req.open, false);
+    assert.equal(req.stateReason, 'Closed: the patient is no longer in HDU • Bed 2.');
+    assert.equal(req.closedByName, 'Bed Agent');
+    assert.equal(req.lockedUntil, undefined);
+    assert.equal((await alertFor(id)).status, 'Completed');
+    assert.equal(await BedSuggestion.countDocuments(), logs);
+  });
+
+  test('an attention admission request closes after the patient is admitted by hand', async () => {
+    await settings.updateSettings({ ai: { bedAutoAllocate: false } }, ADMIN);
+    const pid = await patient();
+    const id = await ask({ patientId: pid });
+    await agent.process(id);
+    assert.equal((await load(id)).state, 'attention');
+
+    // Allocation back on: the backstop still never places a request that needs attention.
+    await settings.updateSettings({ ai: { bedAutoAllocate: true } }, ADMIN);
+    await agent.recover();
+    await agent.idle();
+    assert.equal((await load(id)).state, 'attention');
+    assert.equal(await Admission.countDocuments(), 0);
+    assert.equal(await BedSuggestion.countDocuments(), 0);
+
+    // "Admit here" sends no request id, so only the backstop can close the request.
+    await beds.admitToFreeBed(bed('TWN-2'), DOCTOR, {
+      patientId: pid, doctor: 'Dr. Shajin', department: 'General Medicine', roomClass: 'twin', needs: [], notes: '', expectedStayDays: 3,
+    });
+    await agent.recover();
+    await agent.idle();
+
+    const req = await load(id);
+    assert.equal(req.state, 'cancelled');
+    assert.equal(req.stateReason, 'Closed: the patient was admitted to Twin 1 • Bed B by hand.');
+    assert.equal(req.closedByName, 'Bed Agent');
+    assert.equal(req.assignedBed, undefined);
+    assert.equal(req.lockedUntil, undefined);
+    assert.equal((await alertFor(id)).status, 'Completed');
+    assert.equal(await Admission.countDocuments({ patient: pid }), 1);
+  });
+
   test('with the AI timed out, a TB note still goes to attention for a doctor to confirm', { timeout: 10_000 }, async () => {
     const silent = provider(({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))));
     const slowAgent = newAgent({ ai: new AiService(silent, settings, { get: () => 50 } as unknown as ConfigService) });

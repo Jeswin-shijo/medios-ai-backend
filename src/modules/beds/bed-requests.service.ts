@@ -357,6 +357,14 @@ export class BedRequestsService {
       .exec();
   }
 
+  /** Requests that need attention and no agent pass holds, oldest first. */
+  unclaimedAttention(): Promise<BedRequestDocument[]> {
+    return this.requests
+      .find({ state: 'attention', open: true, ...unlocked(new Date()) })
+      .sort({ requestedAt: 1, _id: 1 })
+      .exec();
+  }
+
   private emit(r: BedRequestDocument) {
     this.events.requestChanged({
       id: String(r._id),

@@ -126,14 +126,23 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
 
   /** Queues a pass for the request, after any already queued. */
   submit(id: string): void {
-    if (this.queued.has(id)) return;
-    this.queued.add(id);
+    this.enqueue(id, () => this.process(id));
+  }
+
+  /** Queues a check that only closes the request if it no longer makes sense. */
+  private submitMootCheck(id: string): void {
+    this.enqueue(`moot:${id}`, () => this.closeIfMootOnly(id));
+  }
+
+  private enqueue(key: string, run: () => Promise<void>): void {
+    if (this.queued.has(key)) return;
+    this.queued.add(key);
     this.chain = this.chain
       .then(() => {
-        this.queued.delete(id);
-        return this.process(id);
+        this.queued.delete(key);
+        return run();
       })
-      .catch((err) => this.logger.error(`Bed request ${id}: ${errorText(err)}`));
+      .catch((err) => this.logger.error(`Bed request ${key}: ${errorText(err)}`));
   }
 
   /** Resolves once every queued pass has run, including passes queued meanwhile. */
@@ -150,10 +159,15 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     for (const req of await this.requests.waiting()) this.submit(String(req._id));
   }
 
-  /** At start-up: requests a stopped pass left searching, then everything waiting. */
+  /**
+   * At start-up and every minute: requests a stopped pass left searching, then everything
+   * waiting. Requests that need attention are only checked for being moot (the patient was
+   * discharged or admitted by hand): staff decide the rest.
+   */
   async recover(): Promise<void> {
     for (const req of await this.requests.unclaimedSearching()) this.submit(String(req._id));
     await this.retryWaiting();
+    for (const req of await this.requests.unclaimedAttention()) this.submitMootCheck(String(req._id));
   }
 
   /** One pass over a request. Never leaves it locked; errors end in waiting or attention. */
@@ -165,6 +179,19 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
       await this.pass(req);
     } catch (err) {
       await this.failed(req, err).catch((e) => this.logger.error(`Bed request ${id}: ${errorText(e)}`));
+    } finally {
+      await this.requests.release(id);
+    }
+  }
+
+  /** Closes a request that needs attention once it no longer makes sense. Never assigns a bed or changes it otherwise. */
+  private async closeIfMootOnly(id: string): Promise<void> {
+    const req = await this.requests.claim(id);
+    if (!req) return;
+    try {
+      if (req.state === 'attention') await this.closeIfMoot(req);
+    } catch (err) {
+      this.logger.warn(`Bed request ${id}: checking whether it is still needed failed: ${errorText(err)}`);
     } finally {
       await this.requests.release(id);
     }
