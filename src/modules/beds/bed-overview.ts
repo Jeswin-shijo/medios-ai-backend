@@ -230,7 +230,7 @@ export function agentSuggestions(input: SuggestionInput): AgentSuggestion[] {
     out.push({
       id: 'requests-attention',
       tone: 'warn',
-      title: `${n} bed ${plural(n, 'request needs', 'requests need')} attention`,
+      title: `${n} bed ${plural(n, 'request is waiting or needs', 'requests are waiting or need')} attention`,
       detail: 'No bed could be found by the Bed Agent, or staff must decide.',
       action: { label: 'Open requests', target: 'requests' },
     });

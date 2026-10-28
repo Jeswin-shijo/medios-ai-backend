@@ -376,6 +376,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
               bedId,
               AGENT_ACTOR,
               `${req.stepDown ? 'Step-down' : 'Transfer'} requested by ${req.requestedByName}`,
+              req.patientGender,
             )
           : await this.beds.admitToFreeBed(bedId, AGENT_ACTOR, {
               patientId: String(req.patient),
@@ -405,14 +406,17 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
     const bedById = new Map(inventory.beds.map((b) => [b.id, b]));
     const bed = bedById.get(choice.bedId);
     const ward = inventory.wards.find((w) => w.id === bed.wardId);
-    const by = rank.aiAnswered && choice.bedId === rank.ordered[0]?.bedId ? 'ai' : 'rules';
+    // Any bed the AI picked (its first, or a later one when the first was taken) is the AI's
+    // choice, with its reason. Otherwise the rules chose it, and staff see the rules' reason.
+    const byAi = rank.aiAnswered && !!choice.aiReason;
+    const by = byAi ? 'ai' : 'rules';
     const decision: BedDecision = {
       suggestionId: rank.suggestionId,
       by,
       bedId: choice.bedId,
       bedLabel: bed.label,
       wardName: ward?.name ?? '',
-      reason: choice.aiReason ?? choice.reason,
+      reason: byAi ? choice.aiReason : choice.reason,
       appliedRules: [...rank.appliedRules],
       addedNeeds: plain(req.addedNeeds),
       candidates: rank.ordered.slice(0, DECISION_CANDIDATES).map((r) => ({
@@ -422,7 +426,7 @@ export class BedAgentService implements OnModuleInit, OnModuleDestroy {
         reason: r.aiReason ?? r.reason,
       })),
       resolvedNeeds: plainResolved(req.resolvedNeeds),
-      sample: by === 'ai' && rank.aiSample,
+      sample: byAi && rank.aiSample,
     };
     await this.to(req, 'assigned', `Assigned to ${bed.label}.`, {
       assignedBed: new Types.ObjectId(choice.bedId),

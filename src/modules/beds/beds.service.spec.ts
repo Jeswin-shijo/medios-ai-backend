@@ -488,6 +488,23 @@ describe('BedsService', () => {
     assert.equal(String((await Admission.findById(admission._id).lean().exec()).bed), b2);
   });
 
+  test('transferToFreeBed refuses a twin bed when neither the old bed nor the caller knows the gender', async () => {
+    const [a] = await twinRoom();
+    const admission = await service.admitToFreeBed(b1, A, input());
+    await Bed.updateOne({ _id: b1 }, { $unset: { occupantGender: 1 } }).exec();
+
+    await assert.rejects(() => service.transferToFreeBed(b1, a, A), ConflictException);
+    assert.equal((await bed(a)).state, 'free');
+    assert.equal(String((await Admission.findById(admission._id).lean().exec()).bed), b1);
+    assert.equal((await bed(b1)).state, 'occupied');
+
+    // Given the gender (the Bed Agent passes the request's), the move goes ahead and the twin bed records it.
+    await service.transferToFreeBed(b1, a, A, undefined, 'Male');
+    const to = await bed(a);
+    assert.equal(to.state, 'occupied');
+    assert.equal(to.occupantGender, 'Male');
+  });
+
   test('discharging a sample admission ends it and never updates a patient', async () => {
     const sample = await sampleAdmission(b3);
     await Bed.updateOne({ _id: b3 }, { admission: sample._id });

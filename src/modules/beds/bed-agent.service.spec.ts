@@ -755,6 +755,52 @@ describe('BedAgentService', () => {
     assert.equal(await Admission.countDocuments({ patient: pid }), 1);
   });
 
+  test("the AI's second pick is labelled AI with its own reason; a rules pick after the AI's is labelled rules", async () => {
+    class TakenFirst extends BedsService {
+      tries: string[] = [];
+      async admitToFreeBed(...args: Parameters<BedsService['admitToFreeBed']>) {
+        this.tries.push(args[0]);
+        if (this.tries.length === 1) throw new ConflictException('That bed was just taken.');
+        return super.admitToFreeBed(...args);
+      }
+    }
+    const answer = (picks: { ref: string; reason: string }[]): AiResult<BedAiOutput> => ({
+      ok: true, value: { picks, extraNeeds: [] }, sample: false, provider: 'claude', model: 'claude-opus-5-5', latencyMs: 90,
+    });
+
+    // The AI's first pick is taken meanwhile; its second pick is assigned.
+    const taken = new TakenFirst(Ward, Bed, Admission, patients, events);
+    const id = await ask({ patientId: await patient() });
+    ai.result = answer([
+      { ref: 'b2', reason: 'Quiet end of the ward.' },
+      { ref: 'b3', reason: 'Close to the oxygen supply.' },
+    ]);
+    await newAgent({ beds: taken }).process(id);
+
+    const req = await load(id);
+    const log = await BedSuggestion.findById(req.decision.suggestionId).lean().exec();
+    assert.deepEqual(taken.tries, [log.ruleRanking[1].bedId, log.ruleRanking[2].bedId]);
+    assert.equal(req.state, 'assigned');
+    assert.equal(String(req.assignedBed), log.ruleRanking[2].bedId);
+    assert.equal(req.decision.by, 'ai');
+    assert.equal(req.decision.reason, 'Close to the oxygen supply.');
+    assert.equal(req.decision.sample, false);
+
+    // The AI's only pick is taken: the rules' best bed is assigned, under the rules' reason.
+    const takenAgain = new TakenFirst(Ward, Bed, Admission, patients, events);
+    const other = await ask({ patientId: await patient() });
+    ai.result = answer([{ ref: 'b2', reason: 'Quiet end of the ward.' }]);
+    await newAgent({ beds: takenAgain }).process(other);
+
+    const second = await load(other);
+    const secondLog = await BedSuggestion.findById(second.decision.suggestionId).lean().exec();
+    assert.deepEqual(takenAgain.tries, [secondLog.ruleRanking[1].bedId, secondLog.ruleRanking[0].bedId]);
+    assert.equal(second.state, 'assigned');
+    assert.equal(second.decision.by, 'rules');
+    assert.equal(second.decision.reason, secondLog.ruleRanking[0].reason);
+    assert.equal(second.decision.sample, false);
+  });
+
   test('with the AI timed out, a TB note still goes to attention for a doctor to confirm', { timeout: 10_000 }, async () => {
     const silent = provider(({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))));
     const slowAgent = newAgent({ ai: new AiService(silent, settings, { get: () => 50 } as unknown as ConfigService) });

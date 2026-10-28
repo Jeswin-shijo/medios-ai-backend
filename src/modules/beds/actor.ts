@@ -10,7 +10,7 @@ export interface Actor {
 /** The request's user (the User document) as an Actor. */
 export const actorOf = (user: any): Actor => ({ id: String(user._id ?? user.id), name: user.name, role: user.role });
 
-/** See the board and stream; suggest, hold, admit, transfer and discharge. */
+/** See the board, stream, overview, snapshots, request lists and a bed's admitted patient, and discharge. */
 export const ADMIT_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
 /** Mark beds cleaned, block and unblock them. */
 export const HOUSEKEEPING_ROLES = [UserRole.ADMIN, UserRole.NURSE, UserRole.STAFF];

@@ -82,6 +82,7 @@ type AdmissionRecord = Admission & { _id: Types.ObjectId };
 const HOLD_RAN_OUT = 'Your hold on this bed ran out. Choose a bed again.';
 const NOT_OCCUPIED = 'This bed is not occupied.';
 const OTHER_GENDER_ROOM = 'This room now has a patient of another gender. Choose another bed.';
+const UNKNOWN_GENDER_ROOM = "The patient's gender is not recorded, so a shared room can't be checked. Choose another bed.";
 const BED_CHANGED = 'This bed changed since you opened it. Check the board and try again.';
 const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1, holdGender: 1 };
 
@@ -293,12 +294,18 @@ export class BedsService {
     return { bedId, holdExpiresAt };
   }
 
+  /** The bed when it is in a twin room, where roommates keep to one gender; otherwise null. */
+  private async twinBed(bedId: string): Promise<BedRecord | null> {
+    const bed = await this.beds.findById(bedId).lean<BedRecord>().exec();
+    if (!bed?.room) return null;
+    const ward = await this.wards.findById(bed.ward).lean<WardRecord>().exec();
+    return ward?.type === 'twin' ? bed : null;
+  }
+
   /** Whether the bed's twin roommate is, or is held for, a patient of another gender. */
   private async roommateClash(bedId: string, gender: PatientGender, now: Date): Promise<boolean> {
-    const bed = await this.beds.findById(bedId).lean<BedRecord>().exec();
-    if (!bed?.room) return false;
-    const ward = await this.wards.findById(bed.ward).lean<WardRecord>().exec();
-    if (ward?.type !== 'twin') return false;
+    const bed = await this.twinBed(bedId);
+    if (!bed) return false;
     const roommate = await this.beds
       .exists({
         _id: { $ne: bed._id },
@@ -513,20 +520,31 @@ export class BedsService {
     });
   }
 
-  /** Like `transfer`, but into a free bed with no hold: for the bed agent. Twin rooms keep to one gender. */
-  transferToFreeBed(fromBedId: string, toBedId: string, actor: Actor, reason?: string): Promise<AdmissionDocument> {
+  /**
+   * Like `transfer`, but into a free bed with no hold: for the bed agent. Twin rooms keep to
+   * one gender: the old bed's record of it, else `gender` (the request's). A twin bed is
+   * refused when neither is known.
+   */
+  transferToFreeBed(
+    fromBedId: string,
+    toBedId: string,
+    actor: Actor,
+    reason?: string,
+    gender?: PatientGender,
+  ): Promise<AdmissionDocument> {
     return this.moveAdmission(fromBedId, toBedId, actor, reason, async (from, admission, at) => {
-      const gender = from.occupantGender;
-      if (gender && (await this.roommateClash(toBedId, gender, new Date()))) throw new ConflictException(OTHER_GENDER_ROOM);
+      const known = from.occupantGender ?? gender;
+      if (!known && (await this.twinBed(toBedId))) throw new ConflictException(UNKNOWN_GENDER_ROOM);
+      if (known && (await this.roommateClash(toBedId, known, new Date()))) throw new ConflictException(OTHER_GENDER_ROOM);
       const before = await this.transition(
         { _id: toBedId, ...freeOrExpiredHold(new Date()) },
         {
-          $set: { state: 'occupied', stateSince: at, admission: admission._id, occupantGender: from.occupantGender },
+          $set: { state: 'occupied', stateSince: at, admission: admission._id, occupantGender: known },
           $unset: HOLD_FIELDS,
         },
         'That bed was just taken.',
       );
-      if (gender && (await this.roommateClash(toBedId, gender, new Date()))) {
+      if (known && (await this.roommateClash(toBedId, known, new Date()))) {
         await this.freeBed(toBedId, admission._id, before);
         throw new ConflictException(OTHER_GENDER_ROOM);
       }

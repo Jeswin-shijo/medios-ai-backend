@@ -143,6 +143,7 @@ describe('bed overview maths', () => {
     assert.equal(full?.action.target, 'utilization');
     assert.equal(out.find((s) => s.title === "Prepare 4 beds for today's discharges")?.tone, 'info');
     assert.equal(out.find((s) => s.title === 'Last free ICU bed')?.action.target, 'bed-map');
+    assert.ok(titles.includes('1 bed request is waiting or needs attention'));
     assert.ok(out.some((s) => s.action.target === 'requests' && s.tone === 'warn'));
     assert.ok(!titles.includes('All units are within normal levels'));
   });
@@ -158,6 +159,7 @@ describe('bed overview maths', () => {
     const out = agentSuggestions(calm({ lateCleaning: 1, dischargesToday: 1, freeVentilatorBeds: 1 }));
     const titles = out.map((s) => s.title);
     assert.ok(titles.includes('1 bed waiting over 30 min for cleaning'));
+    assert.ok(agentSuggestions(calm({ requestsNeedingAttention: 3 })).some((s) => s.title === '3 bed requests are waiting or need attention'));
     assert.ok(titles.includes("Prepare 1 bed for today's discharges"));
     assert.ok(titles.includes('Last free ventilator bed'));
   });
