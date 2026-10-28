@@ -94,7 +94,7 @@ function needsFor(r: Rng, type: WardType): Need[] {
 export function sampleInpatients(beds: SampleBed[], demoNow: Date): SampleAdmission[] {
   const r = mulberry32(20261026);
   const used = new Set<string>();
-  return beds.map((bed) => {
+  return beds.map((bed, index) => {
     let uhid: string;
     do uhid = `MHK20269${String(int(r, 0, 9999)).padStart(4, '0')}`;
     while (used.has(uhid));
@@ -102,9 +102,23 @@ export function sampleInpatients(beds: SampleBed[], demoNow: Date): SampleAdmiss
 
     const first = pick(r, bed.occupantGender === 'Female' ? FEMALE_NAMES : MALE_NAMES);
     const [lo, hi] = AGE_BANDS[bed.wardType] ?? [18, 80];
-    const stay = int(r, 2, 12);
-    // Skewed to recent days, so only a realistic share of stays fall due within a day.
-    const admittedAt = new Date(demoNow.getTime() - Math.floor(r() ** 2 * 9 * DAY));
+    // Choose when the stay falls due first, then the stay length and admission day to fit.
+    // Every fifth bed is due within a day (one in five of those is up to 12 h overdue);
+    // all others are due later than 24 h. Nobody is more than 12 h overdue.
+    const dueSoon = index % 5 === 0;
+    const overdue = dueSoon && (index / 5) % 5 === 4;
+    let stay: number;
+    let ageMs: number;
+    if (dueSoon) {
+      const offset = overdue ? -Math.floor(r() * 12 * HOUR) - 1 : Math.floor(r() * DAY);
+      stay = int(r, 2, overdue ? 8 : 9);
+      ageMs = stay * DAY - offset;
+    } else {
+      stay = int(r, 3, 12);
+      const lowest = Math.max(DAY + HOUR, stay * DAY - 9 * DAY);
+      ageMs = stay * DAY - (lowest + Math.floor(r() * (stay * DAY - lowest)));
+    }
+    const admittedAt = new Date(demoNow.getTime() - ageMs);
     return {
       label: bed.label,
       wardName: bed.wardName ?? '',

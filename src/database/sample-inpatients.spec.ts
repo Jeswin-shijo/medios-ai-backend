@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 import { pastRequests, sampleInpatients, snapshotHistory, SampleBed } from './sample-inpatients';
 import { WardType } from '../modules/beds/bed-types';
+import { buildBedSeed } from '../modules/beds/bed-layout';
 
 const WARDS: { type: WardType; near: string[]; n: number; gender: (i: number) => 'Male' | 'Female' }[] = [
   { type: 'icu', near: ['Emergency & Critical Care'], n: 6, gender: (i) => (i % 2 ? 'Male' : 'Female') },
@@ -48,10 +49,42 @@ describe('sample inpatients', () => {
     }
   });
 
-  test('sample inpatients include 10 to 25 discharges due within 24 hours of the demo time', () => {
-    const list = sampleInpatients(BEDS, DEMO_NOW);
-    const due = list.filter((a) => a.admittedAt.getTime() + a.expectedStayDays * DAY < DEMO_NOW.getTime() + DAY).length;
-    assert.ok(due >= 10 && due <= 25, `due ${due}`);
+  const HOUR = 60 * 60_000;
+  const dueOf = (a: { admittedAt: Date; expectedStayDays: number }) => a.admittedAt.getTime() + a.expectedStayDays * DAY;
+  function layoutInpatients() {
+    const layout = buildBedSeed();
+    const ward = new Map(layout.wards.map((w) => [w.code, w]));
+    const beds: SampleBed[] = layout.beds
+      .filter((b) => b.sample)
+      .map((b) => ({
+        label: b.label,
+        wardName: ward.get(b.wardCode)!.name,
+        wardType: ward.get(b.wardCode)!.type,
+        occupantGender: b.occupantGender!,
+        nearDepartments: ward.get(b.wardCode)!.nearDepartments,
+        features: b.features,
+      }));
+    return sampleInpatients(beds, DEMO_NOW);
+  }
+
+  test('no sample stay is more than 12 hours overdue at the demo time', () => {
+    for (const list of [sampleInpatients(BEDS, DEMO_NOW), layoutInpatients()]) {
+      for (const a of list) {
+        assert.ok(dueOf(a) >= DEMO_NOW.getTime() - 12 * HOUR, `${a.label} due ${new Date(dueOf(a)).toISOString()}`);
+        assert.ok(a.expectedStayDays >= 2 && a.expectedStayDays <= 12);
+        const ago = DEMO_NOW.getTime() - a.admittedAt.getTime();
+        assert.ok(ago >= 0 && ago <= 9 * DAY);
+      }
+    }
+  });
+
+  test('10 to 25 stays fall due within 24 hours, most of them still ahead', () => {
+    for (const list of [sampleInpatients(BEDS, DEMO_NOW), layoutInpatients()]) {
+      const soon = list.filter((a) => dueOf(a) < DEMO_NOW.getTime() + DAY);
+      assert.ok(soon.length >= 10 && soon.length <= 25, `due ${soon.length}`);
+      const ahead = soon.filter((a) => dueOf(a) >= DEMO_NOW.getTime()).length;
+      assert.ok(ahead * 3 >= soon.length * 2, `ahead ${ahead} of ${soon.length}`);
+    }
   });
 
   test('the same input gives the same inpatients', () => {
