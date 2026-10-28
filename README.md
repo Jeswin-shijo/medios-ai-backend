@@ -59,7 +59,7 @@ hospital-backend/
 │       ├── dashboard/          # Aggregated KPIs, patient flow, live schedule (/api/dashboard/*)
 │       ├── calls/              # AI call agent: confirmation & booking calls (/api/calls/*)
 │       ├── queue/              # Check-in tokens, room calls, waiting-room displays (/api/queue/*)
-│       ├── beds/               # Bed board, AI-assisted admit, transfer, discharge, housekeeping (/api/beds/*)
+│       ├── beds/               # Bed board, Bed Agent requests, hand assign, transfer, discharge, housekeeping (/api/beds/*)
 │       ├── ai/                 # Shared AI module: none / sample / claude providers (/api/ai/*)
 │       └── settings/           # Hospital metadata, staff & AI configs (/api/settings/*)
 ```
@@ -214,7 +214,7 @@ The `beds` module is the live bed board and the admit flow (admit, transfer, dis
 - **Routes** (all under `/api/beds`): `GET board`, `GET stream` (server-sent events: `changed` and `ping`), `POST suggestions`, `POST suggestions/:id/refine`, `GET :bedId/admission` (the admitted patient and their needs, for a transfer), `POST :bedId/hold`, `DELETE :bedId/hold`, `POST :bedId/admit`, `POST :bedId/transfer`, `POST :bedId/discharge` (body `{ admissionId }`, null for a sample occupant), `POST :bedId/clean`, `POST :bedId/block`, `POST :bedId/unblock`.
 - **Privacy.** The AI never gets the patient's name, UHID, phone, address, email or any database id. Doctor's notes (at most 4,000 characters) are stripped of those details first, and beds go out as per-request tokens. Every suggestion, its AI output or failure, and the bed finally chosen is saved for later review.
 - **The Bed Agent.** A doctor or admin files a bed request (`POST /api/beds/requests`). The agent works through open requests by priority, asks the same rules and AI as above, and assigns the best free bed. It tries up to 5 beds per pass, retries waiting requests every 60 seconds, and after 3 unexpected errors hands the request to staff with an alert in Tasks & Alerts. Notes that hint at a need (for example oxygen) are shown for a doctor to confirm or dismiss.
-- **Request routes** (under `/api/beds`): `POST requests`, `GET requests`, `GET requests/:id`, `POST requests/:id/cancel`, `POST requests/:id/notes-need`, `GET overview` (cards with trends, discharge plan, movements) and `GET snapshots` (hourly counts).
+- **Request routes** (under `/api/beds`): `POST requests`, `GET requests`, `GET requests/:id`, `POST requests/:id/cancel`, `POST requests/:id/notes-need`, `GET overview` (cards with trends, discharge plan, movements) and `GET snapshots` (hourly counts). Doctors and admins file, cancel and assign by hand (`POST :bedId/admit` with a `requestId`); nurses and front desk can read requests and discharge, clean and block, but not admit.
 - **Settings switch.** Admins can turn the agent's automatic assigning off with "Allocate beds automatically" (`ai.bedAutoAllocate`, on by default). Requests then wait for staff to assign a bed by hand.
 - **Data.** `npm run seed` loads a demo layout of 11 wards and 138 beds. About 98 occupied beds hold made-up sample inpatients (admission records marked `sample`, with no Patient behind them), 168 hourly bed snapshots for the past 7 days, and 10 past requests, so the overview, discharge plan and trends are not empty. For the hospital's real layout, see the CSV import below.
 
