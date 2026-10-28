@@ -70,26 +70,38 @@ describe('parseBedCsv', () => {
 });
 
 describe('importRefusal', () => {
-  const none = { inUse: 0, admissions: 0, suggestions: 0 };
+  const none = { inUse: 0, admissions: 0, suggestions: 0, requests: 0, snapshots: 0 };
 
   test('no beds in use and no history proceeds', () => {
     assert.equal(importRefusal(none, false), null);
   });
 
-  test('history without --force is refused with the counts', () => {
+  test('history without --force is refused with the counts, bed requests and snapshots included', () => {
     assert.equal(
-      importRefusal({ ...none, admissions: 4, suggestions: 2 }, false),
-      'Admission history exists (4 admissions, 2 bed suggestions). Importing replaces all beds and deletes these records. Re-run with --force to replace them anyway.',
+      importRefusal({ ...none, admissions: 4, suggestions: 2, requests: 10, snapshots: 168 }, false),
+      'Admission history exists. Importing replaces all beds and would delete 4 admissions, 2 bed suggestions, 10 bed requests and 168 hourly snapshots. Re-run with --force to replace them anyway.',
     );
   });
 
+  test('bed requests alone are history; one of each reads in the singular', () => {
+    assert.equal(
+      importRefusal({ ...none, requests: 1, snapshots: 1 }, false),
+      'Admission history exists. Importing replaces all beds and would delete 1 bed request and 1 hourly snapshot. Re-run with --force to replace them anyway.',
+    );
+  });
+
+  test('hourly snapshots alone do not stop an import', () => {
+    // The API takes one at every start, so a fresh database has some.
+    assert.equal(importRefusal({ ...none, snapshots: 3 }, false), null);
+  });
+
   test('--force proceeds', () => {
-    assert.equal(importRefusal({ inUse: 3, admissions: 4, suggestions: 2 }, true), null);
+    assert.equal(importRefusal({ inUse: 3, admissions: 4, suggestions: 2, requests: 10, snapshots: 168 }, true), null);
   });
 
   test('beds in use are reported first', () => {
     assert.equal(
-      importRefusal({ inUse: 3, admissions: 4, suggestions: 2 }, false),
+      importRefusal({ ...none, inUse: 3, admissions: 4, suggestions: 2 }, false),
       'Beds are in use (3 occupied or held). Re-run with --force to replace them anyway.',
     );
   });

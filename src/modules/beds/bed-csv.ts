@@ -106,12 +106,33 @@ export function parseBedCsv(text: string): { wards: WardSeed[]; beds: BedSeed[];
   return { wards, beds, errors };
 }
 
-/** Why an import must not replace the beds yet (null = go ahead). Beds in use are checked first. */
-export function importRefusal(counts: { inUse: number; admissions: number; suggestions: number }, force: boolean): string | null {
+export interface ImportCounts {
+  inUse: number;
+  admissions: number;
+  suggestions: number;
+  requests: number;
+  snapshots: number;
+}
+
+const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * Why an import must not replace the beds yet (null = go ahead). Beds in use are checked
+ * first. Hourly snapshots alone never stop it (the API takes one at every start), but the
+ * message counts them, since the import deletes them too.
+ */
+export function importRefusal(counts: ImportCounts, force: boolean): string | null {
   if (force) return null;
   if (counts.inUse > 0) return `Beds are in use (${counts.inUse} occupied or held). Re-run with --force to replace them anyway.`;
-  if (counts.admissions > 0 || counts.suggestions > 0) {
-    return `Admission history exists (${counts.admissions} admissions, ${counts.suggestions} bed suggestions). Importing replaces all beds and deletes these records. Re-run with --force to replace them anyway.`;
+  if (counts.admissions > 0 || counts.suggestions > 0 || counts.requests > 0) {
+    const lost = [
+      counts.admissions && counted(counts.admissions, 'admission', 'admissions'),
+      counts.suggestions && counted(counts.suggestions, 'bed suggestion', 'bed suggestions'),
+      counts.requests && counted(counts.requests, 'bed request', 'bed requests'),
+      counts.snapshots && counted(counts.snapshots, 'hourly snapshot', 'hourly snapshots'),
+    ].filter((part): part is string => !!part);
+    const list = lost.length > 1 ? `${lost.slice(0, -1).join(', ')} and ${lost.at(-1)}` : lost[0];
+    return `Admission history exists. Importing replaces all beds and would delete ${list}. Re-run with --force to replace them anyway.`;
   }
   return null;
 }
