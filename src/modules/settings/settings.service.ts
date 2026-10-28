@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 import { DEFAULT_CALL_AGENT_SETTINGS } from '../calls/call-agent-settings';
 import { DEFAULT_QUEUE_SETTINGS } from '../queue/queue-settings';
+import { UserRole } from '../users/schemas/user.schema';
 
 // Used only until settings are first saved (the seed stores the demo hospital's).
 // Identity fields start blank; toggles start at conservative values, and nothing
@@ -92,9 +93,18 @@ export class SettingsService {
     return settings;
   }
 
-  /** Merges each supplied section over the stored one; unknown sections are ignored. */
-  async updateSettings(updates: Partial<HospitalSettings>): Promise<HospitalSettings> {
+  /**
+   * Merges each supplied section over the stored one, key by key; unknown sections are ignored.
+   * Only an admin may change "Allocate beds automatically": a save from anyone else that
+   * carries the stored value (or leaves it out) goes through.
+   */
+  async updateSettings(updates: Partial<HospitalSettings>, by: { role: string }): Promise<HospitalSettings> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    const autoAllocate = (updates as any)?.ai?.bedAutoAllocate;
+    const storedAutoAllocate = settings.get('ai')?.bedAutoAllocate ?? DEFAULT_SETTINGS.ai.bedAutoAllocate;
+    if (by?.role !== UserRole.ADMIN && autoAllocate !== undefined && autoAllocate !== storedAutoAllocate) {
+      throw new ForbiddenException('Only an admin can change automatic bed allocation.');
+    }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];
       if (patch && typeof patch === 'object') {

@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../users/schemas/user.schema';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Settings & Hospital Configuration')
 @ApiBearerAuth()
@@ -19,7 +20,7 @@ export class SettingsController {
   @Put()
   @Roles(UserRole.ADMIN, UserRole.DOCTOR)
   @ApiOperation({ summary: 'Update hospital settings, AI parameters, or clinical preferences' })
-  async updateSettings(@Body() body: any) {
-    return this.settingsService.updateSettings(body);
+  async updateSettings(@Body() body: any, @CurrentUser() user: { role: string }) {
+    return this.settingsService.updateSettings(body, user);
   }
 }

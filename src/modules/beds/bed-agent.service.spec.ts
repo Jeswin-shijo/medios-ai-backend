@@ -370,7 +370,7 @@ describe('BedAgentService', () => {
 
   test('goes to attention when automatic allocation is off', async () => {
     assert.equal((await settings.getSettings()).ai.bedAutoAllocate, true);
-    await settings.updateSettings({ ai: { bedAutoAllocate: false } });
+    await settings.updateSettings({ ai: { bedAutoAllocate: false } }, ADMIN);
     const id = await ask({ patientId: await patient() });
 
     await agent.process(id);
