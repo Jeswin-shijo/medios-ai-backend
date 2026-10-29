@@ -11,6 +11,7 @@ export const DELIVERY_TRIES = 3;
 export const HOP_LIMIT = 10;
 export const DUPLICATE_WINDOW_MS = 60_000;
 export const LOCK_MS = 60_000;
+export const REDELIVER_AFTER_MS = 10_000;
 
 export type MessageProblem = { kind: 'failed' | 'loop'; type: string; case: string | null; reason: string };
 type StoredListener = (m: MessageDocument) => Promise<void>;
@@ -110,18 +111,25 @@ export class MessagesService {
     if (errors.length) throw new BadRequestException(errors.join('; '));
 
     const caseId = input.case ?? null;
+    for (const [name, value] of [['case', caseId], ['causedBy', input.causedBy], ['resolves', input.resolves]] as const) {
+      if (value && !Types.ObjectId.isValid(value)) throw new BadRequestException(`"${name}" is not a valid id`);
+    }
     let hop = 0;
     if (input.causedBy) {
       const parent = await this.model.findById(input.causedBy).select('hop').lean().exec();
-      hop = (parent?.hop ?? 0) + 1;
+      if (!parent) throw new BadRequestException('"causedBy" matches no message');
+      hop = (parent.hop ?? 0) + 1;
+    }
+    if (input.resolves && !(await this.model.exists({ _id: input.resolves }).exec())) {
+      throw new BadRequestException('"resolves" matches no message');
     }
     if (hop > HOP_LIMIT) {
       await this.report({ kind: 'loop', type: input.type, case: caseId, reason: `Chain went past ${HOP_LIMIT} hops` });
       return null;
     }
 
-    const base = input.dedupeKey ?? createHash('sha1').update(JSON.stringify(input.payload ?? {})).digest('hex');
-    const dedupeKey = `${input.type}:${caseId}:${base}`;
+    const dedupeKey =
+      input.dedupeKey ?? `${input.type}:${caseId}:${createHash('sha1').update(JSON.stringify(input.payload ?? {})).digest('hex')}`;
     const recent = await this.model
       .exists({ dedupeKey, createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) } })
       .exec();
@@ -147,7 +155,7 @@ export class MessagesService {
     });
 
     if (input.resolves) {
-      await this.model.updateOne({ _id: input.resolves }, { $set: { resolvedAt: new Date(), resolvedBy: message._id } }).exec();
+      await this.model.updateOne({ _id: input.resolves, resolvedAt: { $exists: false } }, { $set: { resolvedAt: new Date(), resolvedBy: message._id } }).exec();
     }
     for (const l of this.storedListeners) {
       try {
@@ -180,42 +188,48 @@ export class MessagesService {
       .exec();
     if (!claimed) return false;
 
-    const done = new Set<number>();
-    const subscribers = this.registry.subscribers(claimed.type);
-    let attempts = claimed.attempts;
-    let lastError = '';
-    while (attempts < DELIVERY_TRIES) {
-      for (let i = 0; i < subscribers.length; i++) {
-        if (done.has(i)) continue;
-        try {
-          await subscribers[i].handler(id);
-          done.add(i);
-        } catch (e) {
-          lastError = `${subscribers[i].agent}: ${(e as Error).message}`;
+    try {
+      const done = new Set<number>();
+      const subscribers = this.registry.subscribers(claimed.type);
+      let attempts = claimed.attempts;
+      let lastError = '';
+      while (attempts < DELIVERY_TRIES) {
+        for (let i = 0; i < subscribers.length; i++) {
+          if (done.has(i)) continue;
+          try {
+            await subscribers[i].handler(id);
+            done.add(i);
+          } catch (e) {
+            lastError = `${subscribers[i].agent}: ${(e as Error).message}`;
+          }
         }
+        if (done.size === subscribers.length) {
+          await this.model.updateOne({ _id: id }, { $set: { state: 'delivered', attempts }, $unset: { lockedUntil: 1 } }).exec();
+          return true;
+        }
+        attempts += 1;
+        await this.model.updateOne({ _id: id }, { $set: { attempts } }).exec();
       }
-      if (done.size === subscribers.length) {
-        await this.model.updateOne({ _id: id }, { $set: { state: 'delivered', attempts }, $unset: { lockedUntil: 1 } }).exec();
-        return true;
-      }
-      attempts += 1;
-      await this.model.updateOne({ _id: id }, { $set: { attempts } }).exec();
+      await this.model.updateOne({ _id: id }, { $set: { state: 'failed' }, $unset: { lockedUntil: 1 } }).exec();
+      await this.report({
+        kind: 'failed',
+        type: claimed.type,
+        case: idOrNull(claimed.case),
+        reason: `Not delivered after ${DELIVERY_TRIES} tries (${lastError})`,
+      });
+      return false;
+    } finally {
+      // A DB error mid-delivery must not leave the lock set; the message stays pending for redelivery.
+      await this.model.updateOne({ _id: id }, { $unset: { lockedUntil: 1 } }).exec().catch(() => undefined);
     }
-    await this.model.updateOne({ _id: id }, { $set: { state: 'failed' }, $unset: { lockedUntil: 1 } }).exec();
-    await this.report({
-      kind: 'failed',
-      type: claimed.type,
-      case: idOrNull(claimed.case),
-      reason: `Not delivered after ${DELIVERY_TRIES} tries (${lastError})`,
-    });
-    return false;
   }
 
   /** Delivers pending messages that are unlocked or whose lock ran out. Returns how many were delivered. */
   async redeliverPending(): Promise<number> {
     const now = new Date();
+    // Skip messages stored a moment ago: send() may still be running its listeners for them.
     const pending = await this.model
-      .find({ state: 'pending', $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] })
+      .find({ state: 'pending', createdAt: { $lt: new Date(now.getTime() - REDELIVER_AFTER_MS) }, $or: [{ lockedUntil: { $exists: false } }, { lockedUntil: null }, { lockedUntil: { $lt: now } }] })
       .select('_id')
       .sort({ createdAt: 1 })
       .lean()
@@ -229,6 +243,7 @@ export class MessagesService {
 
   async list(q: MessageQuery = {}): Promise<MessageView[]> {
     const match: Record<string, unknown> = {};
+    if (q.case && !Types.ObjectId.isValid(q.case)) throw new BadRequestException('"case" is not a valid id');
     if (q.case) match.case = new Types.ObjectId(q.case);
     if (q.type) match.type = q.type;
     if (q.agent) match.$or = [{ from: q.agent }, { to: q.agent }];
