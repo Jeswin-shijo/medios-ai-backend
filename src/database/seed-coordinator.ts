@@ -27,6 +27,8 @@ const HOUR = 60 * MIN;
 const CLOSE_REASON = 'Admission discharged or request cancelled';
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 } as const;
 type Priority = keyof typeof PRIORITY_RANK;
+/** The bed requests this seed adds on top of seedBeds' own. */
+const OWN_REQUESTS = { requestedBy: 'Seed', state: { $in: ['attention', 'waiting', 'cancelled'] } };
 
 /** A small repeatable number generator, so the history is the same on every seed. */
 function rng(seed: number): () => number {
@@ -75,6 +77,18 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
   const approvals = model(Approval, ApprovalSchema);
   const snapshots = model(CoordinatorSnapshot, CoordinatorSnapshotSchema);
 
+  // Everything that can throw is checked before anything is wiped.
+  const admin =
+    (await model(User, UserSchema).findOne({ email: 'admin@medios.ai' }).lean<any>()) ??
+    (await model(User, UserSchema).findOne({ role: UserRole.ADMIN }).lean<any>());
+  if (!admin) throw new Error('Coordinator seed: no admin user found. Seed the users first.');
+
+  const admitted = new Set((await model(Admission, AdmissionSchema).find({ status: 'active' }).select('patient').lean<any[]>()).map((a) => String(a.patient)));
+  // Patients with a request of their own making do not count as taken: a rerun replaces those requests.
+  const seenBefore = new Set((await requests.find({ $nor: [OWN_REQUESTS] }).select('patient').lean<any[]>()).map((r) => String(r.patient)));
+  const free = (await model(Patient, PatientSchema).find().sort({ uhid: 1 }).lean<any[]>()).filter((p) => !admitted.has(String(p._id)) && !seenBefore.has(String(p._id)));
+  if (free.length < 2) throw new Error('Coordinator seed: needs at least two patients who are not admitted. Seed the patients first.');
+
   await Promise.all([
     cases.deleteMany({}),
     model(CoordinatorCounter, CoordinatorCounterSchema).deleteMany({}),
@@ -91,11 +105,6 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
     timeline.deleteMany({ title: /^Case CASE-\d{4} (opened|closed)$/ }),
   ]);
 
-  const admin =
-    (await model(User, UserSchema).findOne({ email: 'admin@medios.ai' }).lean<any>()) ??
-    (await model(User, UserSchema).findOne({ role: UserRole.ADMIN }).lean<any>());
-  if (!admin) throw new Error('Coordinator seed: no admin user found. Seed the users first.');
-
   // Duty titles and ladders, as EscalationsService.ensureDefaults makes them; the admin holds two titles.
   const held = new Set(['duty-administrator', 'medical-superintendent']);
   await model(DutyTitle, DutyTitleSchema).insertMany(DEFAULT_TITLES.map((t) => ({ ...t, holders: held.has(t.key) ? [admin._id] : [] })));
@@ -108,13 +117,7 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
   const clinicAgo = (minutes: number): Date => new Date(clinicMs - minutes * MIN);
 
   // A rerun replaces the requests made below (seedBeds' own past requests are all assigned and stay).
-  await requests.deleteMany({ requestedBy: 'Seed', state: { $in: ['attention', 'waiting', 'cancelled'] } });
-
-  // New open and cancelled requests, for patients who are not in a bed (the sample inpatients cover the rest).
-  const admitted = new Set((await model(Admission, AdmissionSchema).find({ status: 'active' }).select('patient').lean<any[]>()).map((a) => String(a.patient)));
-  const seenBefore = new Set((await requests.find().select('patient').lean<any[]>()).map((r) => String(r.patient)));
-  const free = (await model(Patient, PatientSchema).find().sort({ uhid: 1 }).lean<any[]>()).filter((p) => !admitted.has(String(p._id)) && !seenBefore.has(String(p._id)));
-  if (free.length < 2) throw new Error('Coordinator seed: needs at least two patients who are not admitted. Seed the patients first.');
+  await requests.deleteMany(OWN_REQUESTS);
 
   const fresh = (p: any, f: Record<string, unknown>) => {
     const priority = (f.priority as Priority) ?? 'medium';
@@ -242,7 +245,7 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
       attempts: 0,
       state: 'delivered',
       dedupeKey: key,
-      createdAt: at,
+      createdAt: new Date(Math.min(at.getTime(), now)),
       ...m,
     });
     return _id;
@@ -396,6 +399,8 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
   midnight.setHours(0, 0, 0, 0);
   const todayCount = docs.filter((d) => (d.createdAt as Date).getTime() >= midnight.getTime()).length;
   const openCases = plans.filter((p) => !p.closed).length;
+  // What the live overview counts for its escalations card: open approvals plus open escalations.
+  const openApprovalsAndEscalations = (await approvals.countDocuments({ state: 'open' })) + (await escalations.countDocuments({ state: 'open' }));
   const last = hourOf(new Date(now)).getTime();
   const points = Array.from({ length: 168 }, (_, k) => {
     const i = 167 - k;
@@ -407,7 +412,7 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
     const activeWorkflows = current ? openCases : Math.max(1, Math.round(openCases * (0.6 + 0.4 * (1 - i / 168)) + 2 * curve + (r() - 0.5) * 3));
     // Messages so far that day: climbs from midnight, resets at the next one.
     const tasksToday = current ? todayCount : Math.max(1, Math.round((6 + 38 * Math.min(1, (h + 1) / 18)) * (0.8 + r() * 0.4)));
-    const escalationsOpen = current ? 2 : Math.max(0, Math.round(1 + curve + (r() - 0.3) * 2));
+    const escalationsOpen = current ? openApprovalsAndEscalations : Math.max(1, Math.round(1 + curve + (r() - 0.3) * 2));
     return { hour, at: new Date(Math.min(now, hour.getTime() + 59 * MIN)), activeWorkflows, agentsOnline: 2, tasksToday, escalations: escalationsOpen };
   });
   await snapshots.insertMany(points);

@@ -101,7 +101,7 @@ describe('seedCoordinator', () => {
       assert.ok(opened.resolvedAt);
     }
     // Times use the real clock: the newest message is no later than now, none is in the future.
-    assert.ok(msgs.every((x) => x.createdAt.getTime() <= Date.now() + 1000));
+    assert.ok(msgs.every((x) => x.createdAt.getTime() <= Date.now()));
   });
 
   test('one open approval, one expired clock with an open escalation and its alert', async () => {
@@ -162,7 +162,9 @@ describe('seedCoordinator', () => {
     assert.equal(snaps.length, 168);
     const last = hourOf(new Date()).getTime();
     snaps.forEach((s, i) => assert.equal(s.hour.getTime(), last - (167 - i) * HOUR));
-    assert.ok(snaps.every((s) => s.activeWorkflows >= 0 && s.agentsOnline === 2 && s.tasksToday >= 0 && s.escalations >= 0));
+    assert.ok(snaps.every((s) => s.activeWorkflows >= 0 && s.agentsOnline === 2 && s.tasksToday >= 1 && s.escalations >= 1), 'no hour is empty, so any hour has a day-ago trend');
+    const open = (await m.Approval.countDocuments({ state: 'open' }).exec()) + (await m.Escalation.countDocuments({ state: 'open' }).exec());
+    assert.equal(snaps[snaps.length - 1].escalations, open);
     assert.ok(new Set(snaps.map((s) => s.activeWorkflows)).size > 3, 'open cases rise and fall');
     // The day-ago point exists and is non-zero, so the cards have a trend.
     const dayAgo = snaps.find((s) => s.hour.getTime() === last - 24 * HOUR)!;
@@ -199,5 +201,19 @@ describe('seedCoordinator', () => {
     assert.equal(await m.AgentMessage.countDocuments().exec(), before.messages);
     assert.equal(await m.TaskAlertItem.countDocuments().exec(), before.alerts);
     assert.equal(await m.TimelineEvent.countDocuments().exec(), before.timeline);
+  });
+
+  test('a seed that cannot run leaves the coordinator data as it was', async () => {
+    const before = await m.Case.countDocuments().exec();
+    await m.Patient.deleteMany({ uhid: { $nin: ['MHK202500325', 'MHK202500327'] } }).exec();
+    const real = console.log;
+    console.log = () => undefined;
+    try {
+      await assert.rejects(seedCoordinator(DAY), /at least two patients/);
+    } finally {
+      console.log = real;
+    }
+    assert.equal(await m.Case.countDocuments().exec(), before);
+    assert.equal(await m.Approval.countDocuments().exec(), 1);
   });
 });
