@@ -233,6 +233,15 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
 
   // The titles and ladders this seed's escalation uses, if the Coordinator seed has not made them.
   for (const t of DEFAULT_TITLES) await titles.updateOne({ key: t.key }, { $setOnInsert: { key: t.key, label: t.label, holders: [] } }, { upsert: true });
+  // The demo nurse and doctor hold the ER duty titles, so the Staff on duty card and the ladder have people.
+  for (const [email, titleKey] of [['nurse@medios.ai', 'er-nurse-in-charge'], ['doctor@medios.ai', 'er-consultant']] as const) {
+    const u = await users.findOne({ email }).select('_id').lean<any>();
+    if (!u) {
+      console.log(`ER seed: no user ${email}; the ${titleKey} title keeps its holders.`);
+      continue;
+    }
+    await titles.updateOne({ key: titleKey }, { $set: { holders: [u._id] } });
+  }
   for (const l of DEFAULT_LADDERS) await ladders.updateOne({ key: l.key }, { $setOnInsert: { key: l.key, label: l.label, steps: l.steps } }, { upsert: true });
 
   // ---- Time -------------------------------------------------------------------------------

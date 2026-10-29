@@ -33,6 +33,9 @@ describe('seedEr', () => {
     return lines;
   };
 
+  let nurseId = '';
+  let doctorId = '';
+
   before(async () => {
     await connectTestDb();
     await resetTestDb();
@@ -46,6 +49,10 @@ describe('seedEr', () => {
       { uhid: 'MHK202500404', name: 'Anwar Hussain', age: 71, gender: 'Male', phone: '9000000404' },
     ]);
     await m.User.create({ email: 'admin@medios.ai', passwordHash: 'x', name: 'Hospital Admin', role: 'admin' });
+    const nurseUser = await m.User.create({ email: 'nurse@medios.ai', passwordHash: 'x', name: 'Demo Nurse', role: 'nurse' });
+    const doctorUser = await m.User.create({ email: 'doctor@medios.ai', passwordHash: 'x', name: 'Dr. Shajin', role: 'doctor' });
+    nurseId = String(nurseUser._id);
+    doctorId = String(doctorUser._id);
     await quiet(async () => {
       await seedBeds(DAY);
       await seedCoordinator(DAY);
@@ -56,6 +63,13 @@ describe('seedEr', () => {
 
   after(async () => {
     await closeTestDb();
+  });
+
+  test('the demo nurse and doctor hold the ER duty titles', async () => {
+    const t = await m.DutyTitle.find({ key: { $in: ['er-nurse-in-charge', 'er-consultant'] } }).lean().exec();
+    const holders = (k: string) => t.find((x) => x.key === k)!.holders.map(String);
+    assert.deepEqual(holders('er-nurse-in-charge'), [nurseId]);
+    assert.deepEqual(holders('er-consultant'), [doctorId]);
   });
 
   test('seeded visits cover all four colours and every open status', async () => {
