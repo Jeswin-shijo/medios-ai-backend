@@ -11,7 +11,7 @@ export type OtpChallengeDocument = OtpChallenge & Document;
  */
 @Schema({ timestamps: true })
 export class OtpChallenge {
-  @Prop({ required: true, index: true })
+  @Prop({ required: true })
   phone10: string;
 
   @Prop({ required: true, index: true })
@@ -44,3 +44,6 @@ export class OtpChallenge {
 
 export const OtpChallengeSchema = SchemaFactory.createForClass(OtpChallenge);
 OtpChallengeSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+// One open code per number: concurrent sends race on this index and the losers wait.
+OtpChallengeSchema.index({ phone10: 1 }, { unique: true, partialFilterExpression: { found: true, closed: false } });
+OtpChallengeSchema.index({ phone10: 1, sentAt: -1 });

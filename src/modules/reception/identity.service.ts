@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import { Model } from 'mongoose';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
@@ -92,50 +93,81 @@ export class ReceptionIdentityService {
     if (!phone10) throw new BadRequestException('Enter a 10-digit mobile number.');
 
     const now = this.now();
+    const waitError = (seconds: number) => coded(TooMany, `Please wait ${seconds} seconds before asking for another code.`, 'OTP_WAIT', { resendAfterSeconds: seconds });
+    const limitError = () => coded(TooMany, 'Too many codes have been requested. Please ask at the counter.', 'OTP_LIMIT');
+
     const lastSend = await this.challenges.findOne({ phone10, found: true }).sort({ sentAt: -1 }).exec();
     if (lastSend) {
       const wait = Math.ceil((lastSend.sentAt.getTime() + OTP_RESEND_SECONDS * 1000 - now.getTime()) / 1000);
-      if (wait > 0) throw coded(TooMany, `Please wait ${wait} seconds before asking for another code.`, 'OTP_WAIT', { resendAfterSeconds: wait });
-    }
-    const [forNumber, forKiosk] = await Promise.all([
-      this.challenges.countDocuments({ phone10, found: true, sentAt: { $gt: new Date(now.getTime() - OTP_PER_NUMBER_WINDOW_MS) } }),
-      this.challenges.countDocuments({ kioskId: kiosk.id, sentAt: { $gt: new Date(now.getTime() - HOUR_MS) } }),
-    ]);
-    if (forNumber >= OTP_PER_NUMBER || forKiosk >= OTP_PER_KIOSK) {
-      throw coded(TooMany, 'Too many codes have been requested. Please ask at the counter.', 'OTP_LIMIT');
+      if (wait > 0) throw waitError(wait);
     }
 
     const row = { phone10, kioskId: kiosk.id, sentAt: now, expiresAt: new Date(now.getTime() + HOUR_MS) };
     if (!(await this.patients.exists({ phone: phoneRegex(phone10) }))) {
-      await this.challenges.create({ ...row, found: false, validUntil: now, closed: true });
+      const unknown = await this.challenges.create({ ...row, found: false, validUntil: now, closed: true });
+      if ((await this.kioskSends(kiosk.id, now)) > OTP_PER_KIOSK) {
+        await this.challenges.deleteOne({ _id: unknown._id });
+        throw limitError();
+      }
       return { found: false, resendAfterSeconds: OTP_RESEND_SECONDS };
     }
 
+    // The unique index on open codes lets one send per number through; the rest get OTP_WAIT.
+    // Only codes already past the resend gap are closed, so a racing send cannot close ours.
+    await this.challenges.updateMany(
+      { phone10, found: true, closed: false, sentAt: { $lte: new Date(now.getTime() - OTP_RESEND_SECONDS * 1000) } },
+      { $set: { closed: true } },
+    );
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
-    await this.challenges.updateMany({ phone10, closed: false }, { $set: { closed: true } });
-    await this.challenges.create({ ...row, found: true, codeHash: this.codeHash(phone10, code), validUntil: new Date(now.getTime() + OTP_VALID_SECONDS * 1000) });
+    let mine: OtpChallengeDocument;
+    try {
+      mine = await this.challenges.create({ ...row, found: true, codeHash: this.codeHash(phone10, code), validUntil: new Date(now.getTime() + OTP_VALID_SECONDS * 1000) });
+    } catch (err) {
+      if ((err as { code?: number })?.code === 11000) throw waitError(OTP_RESEND_SECONDS);
+      throw err;
+    }
+
+    // Counted after our own row is in, so concurrent sends cannot all slip under the limit.
+    const [forNumber, forKiosk] = await Promise.all([
+      this.challenges.countDocuments({ phone10, found: true, sentAt: { $gt: new Date(now.getTime() - OTP_PER_NUMBER_WINDOW_MS) } }),
+      this.kioskSends(kiosk.id, now),
+    ]);
+    if (forNumber > OTP_PER_NUMBER || forKiosk > OTP_PER_KIOSK) {
+      await this.challenges.deleteOne({ _id: mine._id });
+      throw limitError();
+    }
+
     await this.sms.sendOtp(phone10, code);
     return { found: true, resendAfterSeconds: OTP_RESEND_SECONDS, sampleCode: this.sms.name === 'sample' ? code : undefined };
+  }
+
+  private kioskSends(kioskId: string, now: Date) {
+    return this.challenges.countDocuments({ kioskId, sentAt: { $gt: new Date(now.getTime() - HOUR_MS) } });
   }
 
   async verifyOtp(kiosk: KioskRef, phone: string, code: string): Promise<{ patients: IdentifyResult[] }> {
     const phone10 = last10(phone);
     const now = this.now();
-    const challenge = phone10 ? await this.challenges.findOne({ phone10, kioskId: kiosk.id, found: true, closed: false }).sort({ sentAt: -1 }).exec() : null;
-    if (!challenge || challenge.validUntil <= now) throw OTP_EXPIRED();
+    // Only the newest code for the number counts; older ones were replaced.
+    const latest = phone10 ? await this.challenges.findOne({ phone10, found: true }).sort({ sentAt: -1 }).exec() : null;
+    if (!latest || latest.kioskId !== kiosk.id) throw OTP_EXPIRED();
 
-    if (!this.sameHash(challenge.codeHash, this.codeHash(phone10, String(code ?? '').trim()))) {
-      const updated = await this.challenges.findOneAndUpdate({ _id: challenge._id, closed: false }, { $inc: { attempts: 1 } }, { new: true }).exec();
-      if (!updated) throw OTP_EXPIRED();
-      if (updated.attempts >= OTP_MAX_WRONG) {
-        await this.challenges.updateOne({ _id: challenge._id }, { $set: { closed: true } });
+    // Take an attempt before comparing, so parallel guesses cannot exceed the limit.
+    const attempt = await this.challenges
+      .findOneAndUpdate({ _id: latest._id, closed: false, attempts: { $lt: OTP_MAX_WRONG }, validUntil: { $gt: now } }, { $inc: { attempts: 1 } }, { new: true })
+      .exec();
+    if (!attempt) throw OTP_EXPIRED();
+
+    if (!this.sameHash(attempt.codeHash, this.codeHash(phone10, String(code ?? '').trim()))) {
+      if (attempt.attempts >= OTP_MAX_WRONG) {
+        await this.challenges.updateOne({ _id: attempt._id }, { $set: { closed: true } });
         throw OTP_EXPIRED();
       }
-      throw coded(BadRequestException, 'That code is not right. Please try again.', 'OTP_WRONG', { attemptsLeft: OTP_MAX_WRONG - updated.attempts });
+      throw coded(BadRequestException, 'That code is not right. Please try again.', 'OTP_WRONG', { attemptsLeft: OTP_MAX_WRONG - attempt.attempts });
     }
 
     // Single use: only the request that closes the row gets in.
-    const used = await this.challenges.findOneAndUpdate({ _id: challenge._id, closed: false }, { $set: { closed: true } }).exec();
+    const used = await this.challenges.findOneAndUpdate({ _id: attempt._id, closed: false }, { $set: { closed: true } }).exec();
     if (!used) throw OTP_EXPIRED();
 
     const found = await this.patients.find({ phone: phoneRegex(phone10) }).sort({ createdAt: 1 }).exec();
@@ -222,7 +254,8 @@ export class ReceptionIdentityService {
       const [y, mo, d] = match ? match.slice(1).map(Number) : [0, 0, 0];
       const born = new Date(Date.UTC(y, mo - 1, d));
       const valid = match && born.getUTCFullYear() === y && born.getUTCMonth() === mo - 1 && born.getUTCDate() === d;
-      const today = this.now();
+      const [ty, tm, td] = isoDate(clinicNow()).split('-').map(Number);
+      const today = new Date(Date.UTC(ty, tm - 1, td));
       if (!valid || born > today) throw new BadRequestException('Enter a valid date of birth.');
       let age = today.getUTCFullYear() - y;
       if (today.getUTCMonth() < mo - 1 || (today.getUTCMonth() === mo - 1 && today.getUTCDate() < d)) age -= 1;

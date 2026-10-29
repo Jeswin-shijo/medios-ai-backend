@@ -176,6 +176,34 @@ describe('ReceptionIdentityService', () => {
     await service.sendOtp(otherKiosk, '9111111111');
   });
 
+  test('concurrent wrong guesses cannot exceed five tries, so the right code is then refused', async () => {
+    await patient('U1');
+    await service.sendOtp(kiosk, '9876543210');
+    const wrong = sent[0].code === '000000' ? '111111' : '000000';
+    const guesses = await Promise.allSettled(Array(20).fill(wrong).map((c) => service.verifyOtp(kiosk, '9876543210', c)));
+    assert.equal(guesses.filter((r) => r.status === 'fulfilled').length, 0);
+    assert.equal((await m().OtpChallenge.findOne({ phone10: '9876543210' }).lean())!.attempts, 5);
+    await rejectsWith(service.verifyOtp(kiosk, '9876543210', sent[0].code), 'OTP_EXPIRED');
+  });
+
+  test('the right code racing wrong guesses is accepted at most once and attempts stay within five', async () => {
+    await patient('U1');
+    await service.sendOtp(kiosk, '9876543210');
+    const wrong = sent[0].code === '000000' ? '111111' : '000000';
+    const results = await Promise.allSettled([...Array(20).fill(wrong), sent[0].code].map((c) => service.verifyOtp(kiosk, '9876543210', c)));
+    assert.ok(results.filter((r) => r.status === 'fulfilled').length <= 1);
+    assert.ok((await m().OtpChallenge.findOne({ phone10: '9876543210' }).lean())!.attempts <= 5);
+  });
+
+  test('concurrent sends for one number send one SMS; the rest wait', async () => {
+    await patient('U1');
+    const results = await Promise.allSettled(Array(10).fill(0).map(() => service.sendOtp(kiosk, '9876543210')));
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    for (const r of results) if (r.status === 'rejected') assert.equal(codeOf(r.reason), 'OTP_WAIT');
+    assert.equal(sent.length, 1);
+    assert.equal(await m().OtpChallenge.countDocuments({ phone10: '9876543210', closed: false }), 1);
+  });
+
   test('verify returns every patient on a shared number with full details', async () => {
     await patient('U1');
     await patient('U2', { name: 'Child Two', phone: '9876543210', age: 6 });
@@ -208,9 +236,11 @@ describe('ReceptionIdentityService', () => {
     await assert.rejects(service.register(kiosk, { ...base, age: 121 }));
     await assert.rejects(service.register(kiosk, { ...base }));
     await assert.rejects(service.register(kiosk, { ...base, dob: '2030-01-01' }));
-    const r = await service.register(kiosk, { ...base, dob: '1990-09-27' });
-    assert.equal(r.patient.age, 35); // clock is 26 Sep 2026
-    assert.equal((await m().Patient.findOne({ uhid: r.patient.uhid }))?.dob, '27 Sep 1990');
+    // Age comes from the clinic day (CLINIC_DATE-aware), not the injected clock or UTC.
+    const [y, mo, d] = isoDate(clinicNow()).split('-').map(Number);
+    const dayBefore = `${y - 30}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const r = await service.register(kiosk, { ...base, dob: dayBefore === `${y - 30}-02-29` ? `${y - 30}-02-28` : dayBefore });
+    assert.equal(r.patient.age, 30);
   });
 
   test('session from another kiosk is refused', async () => {
