@@ -72,7 +72,7 @@ export class ClocksService {
   }
 
   private async start(defKey: string, minutes: number, m: MessageDocument): Promise<void> {
-    const startedAt = new Date();
+    const startedAt = m.createdAt ? new Date(m.createdAt) : new Date();
     try {
       await this.model.create({
         def: defKey,
@@ -106,7 +106,10 @@ export class ClocksService {
     }
   }
 
-  /** Expires running clocks past their time, sends clock.expired and raises each ladder. Returns how many expired. */
+  /**
+   * Expires running clocks past their time, sends clock.expired and raises each ladder. Also finishes
+   * clocks a crashed pass left expired with no escalation. Returns how many expired.
+   */
   async checkDue(now: Date): Promise<number> {
     const due = await this.model.find({ state: 'running', dueAt: { $lte: now } }).sort({ dueAt: 1 }).exec();
     let expired = 0;
@@ -114,41 +117,61 @@ export class ClocksService {
       try {
         const def = this.registry.clock(c.def);
         if (!def) {
-          if (!this.unknownLogged.has(c.def)) {
-            this.unknownLogged.add(c.def);
-            this.logger.warn(`Clock "${c.def}" is overdue but its definition is not registered; leaving it running`);
-          }
+          this.warnUnknown(c.def);
           continue;
         }
         // The state in the filter stops two overlapping passes from expiring the same clock twice.
         const claimed = await this.model.findOneAndUpdate({ _id: c._id, state: 'running' }, { $set: { state: 'expired' } }, { new: true }).exec();
         if (!claimed) continue;
         expired += 1;
-        const caseId = claimed.case ? String(claimed.case) : null;
         // The escalation matters more than the notice: a failed send must not stop it.
-        await this.messages.send({
-          case: caseId,
-          from: 'coordinator',
-          to: ['coordinator'],
-          type: 'clock.expired',
-          priority: 'high',
-          summary: `${def.label} overdue`.slice(0, 140),
-          payload: { clockKey: def.key },
-          causedBy: String(claimed.startedBy),
-          dedupeKey: `clock.expired:${claimed._id}`,
-        }).catch((e) => this.logger.error(`Sending clock.expired for ${String(claimed._id)} failed: ${(e as Error).message}`));
-        const esc = await this.escalations.raise({
-          ladder: def.ladder,
-          case: caseId,
-          reason: `${def.label} overdue`,
-          source: { kind: 'clock', id: String(claimed._id) },
-        });
-        await this.model.updateOne({ _id: claimed._id }, { $set: { escalation: esc._id } }).exec();
+        await this.messages
+          .send({
+            case: claimed.case ? String(claimed.case) : null,
+            from: 'coordinator',
+            to: ['coordinator'],
+            type: 'clock.expired',
+            priority: 'high',
+            summary: `${def.label} overdue`.slice(0, 140),
+            payload: { clockKey: def.key },
+            causedBy: String(claimed.startedBy),
+            dedupeKey: `clock.expired:${claimed._id}`,
+          })
+          .catch((e) => this.logger.error(`Sending clock.expired for ${String(claimed._id)} failed: ${(e as Error).message}`));
+        await this.escalate(claimed);
       } catch (e) {
         this.logger.error(`Expiring clock ${String(c._id)} failed: ${(e as Error).message}`);
       }
     }
+    // Expired but never escalated: the API stopped, or the raise failed, after the clock was claimed.
+    const orphans = await this.model.find({ state: 'expired', escalation: { $exists: false } }).exec();
+    for (const c of orphans) {
+      try {
+        await this.escalate(c);
+      } catch (e) {
+        this.logger.error(`Escalating clock ${String(c._id)} failed: ${(e as Error).message}`);
+      }
+    }
     return expired;
+  }
+
+  private warnUnknown(defKey: string): void {
+    if (this.unknownLogged.has(defKey)) return;
+    this.unknownLogged.add(defKey);
+    this.logger.warn(`Clock "${defKey}" is overdue but its definition is not registered; leaving it as it is`);
+  }
+
+  /** Raises the definition's ladder for an expired clock (once per clock) and stores the escalation id. */
+  private async escalate(c: ClockDocument): Promise<void> {
+    const def = this.registry.clock(c.def);
+    if (!def) return this.warnUnknown(c.def);
+    const esc = await this.escalations.raise({
+      ladder: def.ladder,
+      case: c.case ? String(c.case) : null,
+      reason: `${def.label} overdue`,
+      source: { kind: 'clock', id: String(c._id) },
+    });
+    await this.model.updateOne({ _id: c._id }, { $set: { escalation: esc._id } }).exec();
   }
 
   async list(q: { state?: string; case?: string; limit?: number } = {}): Promise<ClockView[]> {

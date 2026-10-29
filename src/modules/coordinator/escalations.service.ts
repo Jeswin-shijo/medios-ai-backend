@@ -128,17 +128,30 @@ export class EscalationsService {
   async raise(input: { ladder: string; case?: string | null; reason: string; source: Escalation['source'] }): Promise<EscalationDocument> {
     const ladder = await this.ladderModel.findOne({ key: input.ladder }).lean().exec();
     if (!ladder || !ladder.steps.length) throw new BadRequestException(`Unknown ladder "${input.ladder}"`);
+    const bySource = () => this.model.findOne({ 'source.kind': input.source.kind, 'source.id': input.source.id }).exec();
+    if (input.source.id) {
+      const existing = await bySource();
+      if (existing) return existing;
+    }
     const now = new Date();
-    const e = await this.model.create({
-      case: input.case ? new Types.ObjectId(input.case) : null,
-      ladder: input.ladder,
-      step: 0,
-      reason: input.reason,
-      source: input.source,
-      state: 'open',
-      raisedAt: now,
-      stepAt: now,
-    });
+    let e: EscalationDocument;
+    try {
+      e = await this.model.create({
+        case: input.case ? new Types.ObjectId(input.case) : null,
+        ladder: input.ladder,
+        step: 0,
+        reason: input.reason,
+        source: input.source,
+        state: 'open',
+        raisedAt: now,
+        stepAt: now,
+      });
+    } catch (err) {
+      // 11000: another pass raised it for the same source a moment ago.
+      const existing = (err as { code?: number }).code === 11000 && input.source.id ? await bySource() : null;
+      if (!existing) throw err;
+      return existing;
+    }
     const { alert, label } = await this.writeAlert(e, ladder.steps[0].title, true);
     e.alert = alert!._id as Types.ObjectId;
     await e.save();

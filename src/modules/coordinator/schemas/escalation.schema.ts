@@ -25,3 +25,5 @@ export class Escalation {
 
 export const EscalationSchema = SchemaFactory.createForClass(Escalation);
 EscalationSchema.index({ state: 1, stepAt: 1 });
+// One escalation per source (a clock, say), so raising twice for it cannot double up.
+EscalationSchema.index({ 'source.kind': 1, 'source.id': 1 }, { unique: true, partialFilterExpression: { 'source.id': { $exists: true } } });

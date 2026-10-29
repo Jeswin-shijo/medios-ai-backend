@@ -76,6 +76,16 @@ describe('EscalationsService', () => {
     assert.equal(sent[0].priority, 'high');
   });
 
+  test('raise twice for the same clock source gives one escalation and one alert', async () => {
+    const source = { kind: 'clock' as const, id: 'clock-1' };
+    const a = await service.raise({ ladder: 'default', reason: 'Late', source });
+    const b = await service.raise({ ladder: 'default', reason: 'Late', source });
+    assert.equal(String(a._id), String(b._id));
+    assert.equal(await Escalation.countDocuments(), 1);
+    assert.equal(await TaskAlertItem.countDocuments(), 1);
+    assert.equal((await messages.list({ type: 'escalation.raised' })).length, 1);
+  });
+
   test('advanceDue moves to the next step after its wait and stays at the last step', async () => {
     await hold('medical-superintendent', superintendent.id);
     const e = await raise();

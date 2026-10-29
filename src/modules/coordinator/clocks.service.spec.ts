@@ -127,10 +127,29 @@ describe('ClocksService', () => {
       state: 'running',
     });
     // The new process starts with nothing in memory.
-    const fresh = new ClocksService(Clock, registry, messages, escalations);
+    const freshMessages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
+    const fresh = new ClocksService(Clock, registry, freshMessages, new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, freshMessages));
     assert.equal(await fresh.checkDue(new Date()), 1);
     assert.equal(await fresh.checkDue(new Date()), 0);
     assert.equal((await messages.list({ type: 'clock.expired' })).length, 1);
+    assert.equal(await Escalation.countDocuments(), 1);
+  });
+
+  test('a clock left expired with no escalation is escalated once by the next checkDue', async () => {
+    const caseId = new Types.ObjectId();
+    const startMsg = await send('test.wait', String(caseId));
+    await Clock.deleteMany({});
+    const started = new Date(Date.now() - 30 * MIN);
+    const { insertedId } = await Clock.collection.insertOne({
+      def: 'test-wait', case: caseId, startedBy: startMsg!._id, startedAt: started,
+      dueAt: new Date(started.getTime() + 10 * MIN), state: 'expired',
+    });
+    assert.equal(await service.checkDue(new Date()), 0);
+    assert.equal(await Escalation.countDocuments(), 1);
+    const clock: any = await Clock.findById(insertedId).lean();
+    assert.equal(String(clock.escalation), String(((await Escalation.findOne().lean()) as any)._id));
+    assert.equal((await messages.list({ type: 'clock.expired' })).length, 0);
+    await service.checkDue(new Date());
     assert.equal(await Escalation.countDocuments(), 1);
   });
 });
