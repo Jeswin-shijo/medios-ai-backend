@@ -376,18 +376,80 @@ export class ErVisitsService {
       return toVisitView(updated);
     }
 
+    const updated = await this.leave(
+      { _id: visit._id },
+      kind,
+      { disposition },
+      (v) => this.sendDisposition(v, kind),
+    );
+    if (!updated) {
+      // A repeat whose er.left was lost finishes the announcement; the person's intent is already done.
+      const now = await this.visits.findById(visit._id).exec();
+      if (now?.status === 'left' && !now.leftAnnouncedAt) {
+        await this.announceLeft(now);
+        return toVisitView(now);
+      }
+      throw new ConflictException('This patient has left the ER.');
+    }
+    return toVisitView(updated);
+  }
+
+  /**
+   * The one place a visit leaves: a guarded update to `left` (null when it already had), its bays freed,
+   * then `before` and er.left. `leftAnnouncedAt` is set once er.left was sent; `reannounce` repeats a lost one.
+   */
+  private async leave(
+    filter: Record<string, unknown>,
+    reason: string,
+    extraSet: Record<string, unknown> = {},
+    before?: (visit: ErVisitDocument) => Promise<void>,
+  ): Promise<ErVisitDocument | null> {
     const updated = await this.visits
       .findOneAndUpdate(
-        { _id: visit._id, status: { $ne: 'left' } },
-        { $set: { status: 'left', leftAt: at, leftReason: kind, disposition }, $unset: { bay: 1, bayName: 1 } },
+        { ...filter, status: { $ne: 'left' } },
+        { $set: { status: 'left', leftAt: clinicNow(), leftReason: reason, ...extraSet }, $unset: { bay: 1, bayName: 1 } },
         { new: true },
       )
       .exec();
-    if (!updated) throw new ConflictException('This patient has left the ER.');
-    await this.bays.freeVisit(visitId);
-    await this.sendDisposition(updated, kind);
-    await this.sendLeft(updated, kind);
-    return toVisitView(updated);
+    if (!updated) return null;
+    await this.bays.freeVisit(String(updated._id));
+    if (before) await before(updated);
+    await this.announceLeft(updated);
+    return updated;
+  }
+
+  private async announceLeft(visit: ErVisitDocument): Promise<void> {
+    await this.sendLeft(visit, visit.leftReason ?? 'left');
+    visit.leftAnnouncedAt = new Date();
+    await this.visits.updateOne({ _id: visit._id }, { leftAnnouncedAt: visit.leftAnnouncedAt }).exec();
+  }
+
+  /**
+   * Sends the arrivals and departures the Coordinator has not heard about (a send that failed).
+   * The scheduler calls it every minute; the message dedupe makes it safe against a send still in flight.
+   */
+  async reannounce(): Promise<{ arrived: number; left: number }> {
+    let arrived = 0;
+    let left = 0;
+    const unheard = await this.visits.find({ status: { $in: [...OPEN_ER_STATUSES] }, announcedAt: { $exists: false } }).exec();
+    for (const v of unheard) {
+      try {
+        await this.announce(v);
+        arrived += 1;
+      } catch (e) {
+        this.logger.error(`Could not announce ${v.number}: ${(e as Error).message}`);
+      }
+    }
+    const gone = await this.visits.find({ status: 'left', leftAnnouncedAt: { $exists: false } }).exec();
+    for (const v of gone) {
+      try {
+        await this.announceLeft(v);
+        left += 1;
+      } catch (e) {
+        this.logger.error(`Could not announce that ${v.number} left: ${(e as Error).message}`);
+      }
+    }
+    return { arrived, left };
   }
 
   /**
@@ -396,16 +458,11 @@ export class ErVisitsService {
    */
   async onBedAssigned(caseId: string): Promise<void> {
     if (!isValidObjectId(caseId)) return;
-    const updated = await this.visits
-      .findOneAndUpdate(
-        { case: caseId, status: 'waiting-bed' },
-        { $set: { status: 'left', leftAt: clinicNow(), leftReason: 'admitted' }, $unset: { bay: 1, bayName: 1 } },
-        { new: true },
-      )
-      .exec();
-    if (!updated) return;
-    await this.bays.freeVisit(String(updated._id));
-    await this.sendLeft(updated, 'admitted');
+    const updated = await this.leave({ case: caseId, status: 'waiting-bed' }, 'admitted');
+    if (updated) return;
+    // A redelivery after a lost er.left sends it now.
+    const unannounced = await this.visits.findOne({ case: caseId, status: 'left', leftReason: 'admitted', leftAnnouncedAt: { $exists: false } }).exec();
+    if (unannounced) await this.announceLeft(unannounced);
   }
 
   private async sendDisposition(visit: ErVisitDocument, kind: ErDispositionKind): Promise<void> {

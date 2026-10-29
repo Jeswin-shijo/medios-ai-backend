@@ -118,6 +118,8 @@ describe('ErBaysService', () => {
     await assert.rejects(() => service.save(ADMIN, [{ name: 'A', kind: 'cot' as any, outOfUse: false }]), { status: 400 });
     await assert.rejects(() => service.save(ADMIN, [{ name: 'A', kind: 'bay', outOfUse: false }, { name: ' A ', kind: 'bay', outOfUse: false }]), { status: 400 });
 
+    await assert.rejects(() => service.save(ADMIN, [full[0], { ...full[0], name: 'Other' }]), { status: 400 });
+
     const a = await visit(1);
     await service.assign(ADMIN, a, await bayId('Bay 3'));
     // Removed while occupied.

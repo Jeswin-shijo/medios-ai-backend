@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { ER_MODES, ErMode } from './er-visit.schema';
 
 export type ErExpectedDocument = ErExpected & Document;
@@ -14,7 +14,7 @@ export class ErExpected {
   /** Clinic clock. */
   @Prop({ required: true }) expectedAt: Date;
   @Prop() phone?: string;
-  @Prop({ type: Types.ObjectId, ref: 'Patient' }) patient?: Types.ObjectId;
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Patient' }) patient?: Types.ObjectId;
   @Prop({ required: true, type: String, enum: ['waiting', 'arrived', 'expired'], default: 'waiting' }) state: 'waiting' | 'arrived' | 'expired';
   @Prop() byName?: string;
 }

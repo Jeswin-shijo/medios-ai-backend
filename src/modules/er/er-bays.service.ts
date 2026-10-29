@@ -136,12 +136,17 @@ export class ErBaysService {
     if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only an admin can change the ER bays.');
     if (!Array.isArray(input)) throw new BadRequestException('Send the list of bays');
     const seen = new Set<string>();
+    const ids = new Set<string>();
     const wanted = input.map((b) => {
       const name = typeof b?.name === 'string' ? b.name.trim() : '';
       if (!name) throw new BadRequestException('Every bay needs a name');
       if (name.length > NAME_MAX) throw new BadRequestException(`A bay name can have at most ${NAME_MAX} characters`);
       if (!ER_BAY_KINDS.includes(b.kind)) throw new BadRequestException('A bay is a bay, resus or stretcher');
       if (b.id !== undefined && b.id !== null && !isValidObjectId(b.id)) throw new BadRequestException('A bay id is not valid');
+      if (b.id) {
+        if (ids.has(String(b.id))) throw new BadRequestException('The same bay is in the list twice');
+        ids.add(String(b.id));
+      }
       const key = name.toLowerCase();
       if (seen.has(key)) throw new BadRequestException(`There are two bays called "${name}"`);
       seen.add(key);

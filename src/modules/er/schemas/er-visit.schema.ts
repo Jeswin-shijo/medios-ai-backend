@@ -93,6 +93,8 @@ export class ErVisit {
   @Prop({ type: ErDisposition }) disposition?: ErDisposition;
   @Prop() leftAt?: Date;
   @Prop() leftReason?: string;
+  /** Set once er.left reached the Coordinator; a left visit without it is announced again. */
+  @Prop() leftAnnouncedAt?: Date;
   @Prop() handoverNote?: string;
   /** Set once er.arrived reached the Coordinator; a visit without it is announced again on the next arrival. */
   @Prop() announcedAt?: Date;

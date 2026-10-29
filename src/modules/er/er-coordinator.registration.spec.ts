@@ -264,6 +264,72 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal((await sent('er.left')).length, 1);
   });
 
+  /** Makes the next `er.left` send fail once, as a lost message would. */
+  const failNextLeft = (times = 1) => {
+    const real = messages.send.bind(messages);
+    let failed = 0;
+    (messages as any).send = async (input: any) => {
+      if (input.type === 'er.left' && failed < times) {
+        failed += 1;
+        throw new Error('bus down');
+      }
+      return real(input);
+    };
+  };
+
+  test('a lost er.left is sent again by reannounce, and the case closes', async () => {
+    const { v } = await arrive();
+    await triaged(v.id);
+    failNextLeft();
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'home', ''), /bus down/);
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'left');
+    assert.equal((await sent('er.left')).length, 0);
+    assert.equal(await clocks.countRunning(), 1);
+    assert.deepEqual(await visits.reannounce(), { arrived: 0, left: 1 });
+    assert.equal((await sent('er.left')).length, 1);
+    assert.equal(await clocks.countRunning(), 0);
+    assert.equal(await caseState(v.caseId), 'closed');
+    assert.deepEqual(await visits.reannounce(), { arrived: 0, left: 0 });
+    // Announced: a repeat is a 409 again.
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'home', ''), { status: 409 });
+  });
+
+  test('a repeated dispose after a lost er.left sends it and returns the visit', async () => {
+    const { v } = await arrive();
+    failNextLeft();
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'home', ''), /bus down/);
+    const again = await visits.dispose(DOCTOR, v.id, 'home', '');
+    assert.equal(again.status, 'left');
+    assert.equal((await sent('er.left')).length, 1);
+    assert.equal(await caseState(v.caseId), 'closed');
+  });
+
+  test('a lost er.left after bed.assigned is sent by a redelivered bed.assigned', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    failNextLeft(3); // the bus's own three delivery tries all fail
+    await agent.process(requestId);
+    await bridge.idle();
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'left');
+    assert.equal((await sent('er.left')).length, 0);
+    const [assigned] = await sent('bed.assigned');
+    await registry.get('er')!.handles![0].handler(String(assigned._id));
+    assert.equal((await sent('er.left')).length, 1);
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).leftAnnouncedAt instanceof Date, true);
+    await registry.get('er')!.handles![0].handler(String(assigned._id));
+    assert.equal((await sent('er.left')).length, 1);
+  });
+
+  test('reannounce sends er.arrived for an open visit that was never announced', async () => {
+    const { v } = await arrive();
+    await m.AgentMessage.deleteMany({ type: 'er.arrived' });
+    await m.ErVisit.updateOne({ _id: v.id }, { $unset: { announcedAt: 1 } });
+    assert.deepEqual(await visits.reannounce(), { arrived: 1, left: 0 });
+    assert.equal((await sent('er.arrived')).length, 1);
+  });
+
   test('a ward admission with no ER visit is left alone', async () => {
     const p = await patient();
     const requestId = await ask(p.id);
