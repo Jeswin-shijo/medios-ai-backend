@@ -40,7 +40,12 @@ const STEP_CLOCKS: ClockDef[] = (Object.keys(PATHWAYS) as PathwayKey[]).flatMap(
         minutes: s.defaultMin,
         ladder: 'er',
         match: (t, payload) => {
-          if (t === 'er.pathway-started' || t === 'er.pathway-cancelled') return payload.pathway === pathway;
+          // A step done before a restart is left out of stepDue, so it gets no fresh clock.
+          if (t === 'er.pathway-started') {
+            const due = payload.stepDue as Record<string, unknown> | undefined;
+            return payload.pathway === pathway && due != null && due[step] != null;
+          }
+          if (t === 'er.pathway-cancelled') return payload.pathway === pathway;
           if (t === 'er.step-done') return payload.step === step;
           return true;
         },

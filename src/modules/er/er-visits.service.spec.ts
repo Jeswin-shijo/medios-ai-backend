@@ -63,8 +63,9 @@ describe('ErVisitsService', () => {
     assert.ok(registry.rules().some((r) => r.key === 'er-auto-pathways'));
     // Step clocks only react to their own pathway and step.
     const ct = registry.clock('er-step-ct')!;
-    assert.equal(ct.match!('er.pathway-started', { pathway: 'stroke' }), true);
-    assert.equal(ct.match!('er.pathway-started', { pathway: 'sepsis' }), false);
+    assert.equal(ct.match!('er.pathway-started', { pathway: 'stroke', stepDue: { ct: 'x' } }), true);
+    assert.equal(ct.match!('er.pathway-started', { pathway: 'stroke', stepDue: {} }), false, 'a done step gets no clock');
+    assert.equal(ct.match!('er.pathway-started', { pathway: 'sepsis', stepDue: { ct: 'x' } }), false);
     assert.equal(ct.match!('er.step-done', { step: 'ecg' }), false);
     assert.equal(ct.label, PATHWAYS.stroke.steps.find((s) => s.key === 'ct')!.label);
     const due = new Date(Date.now() + HOUR);

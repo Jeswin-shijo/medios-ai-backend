@@ -71,6 +71,7 @@ const DEFAULT_SETTINGS = {
   callAgent: DEFAULT_CALL_AGENT_SETTINGS,
   queue: DEFAULT_QUEUE_SETTINGS,
   coordinator: { rules: {} as Record<string, boolean> },
+  er: { targets: {} as Record<string, number> },
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];

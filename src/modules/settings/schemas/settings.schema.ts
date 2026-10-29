@@ -36,6 +36,10 @@ export class HospitalSettings {
   /** Coordinator: on/off switches for coordination rules, by rule key (see coordinator/rules.service.ts). */
   @Prop({ type: Object, default: {} })
   coordinator: { rules?: Record<string, boolean> };
+
+  /** ER: minutes from arrival per pathway step, by `<pathway>.<step>` key (see er/er-rules.ts); missing keys use the defaults. */
+  @Prop({ type: Object, default: {} })
+  er: { targets?: Record<string, number> };
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);
