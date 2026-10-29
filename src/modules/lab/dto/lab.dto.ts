@@ -20,7 +20,7 @@ import {
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
-import { LAB_TESTS } from '../lab-catalogue';
+import { LAB_TESTS, LabParameterDef, optionsMessage, textOption } from '../lab-catalogue';
 import { REJECT_REASONS } from '../lab-bench.service';
 import { LAB_PRIORITIES } from '../schemas/lab-request.schema';
 
@@ -35,20 +35,28 @@ const PARAM_IS_TEXT = (() => {
   for (const t of LAB_TESTS) for (const p of t.params) m.set(p.name, (m.get(p.name) ?? true) && !!p.text);
   return m;
 })();
+/** A text parameter's definition by name (its options), for the names that are text in every test. */
+const TEXT_PARAM = (() => {
+  const m = new Map<string, LabParameterDef>();
+  for (const t of LAB_TESTS) for (const p of t.params) if (p.text && PARAM_IS_TEXT.get(p.name)) m.set(p.name, p);
+  return m;
+})();
 const MAX_VALUE = 1_000_000;
 const MAX_TEXT = 200;
+const isPlain = (v: unknown) => !!v && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 
-/** A plain object of known parameter names. Numbers must be finite and within ±10⁶; text must be 1 to 200 characters. */
+/** A plain object of known parameter names. Numbers must be finite and within ±10⁶; text must be one of the parameter's options. */
 @ValidatorConstraint({ name: 'labValues', async: false })
 export class LabValuesConstraint implements ValidatorConstraintInterface {
   private problem(v: unknown): string | null {
-    if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return 'values must be an object';
+    if (!isPlain(v)) return 'values must be an object';
     const entries = Object.entries(v as Record<string, unknown>);
     if (entries.length < 1 || entries.length > 20) return 'values must have 1 to 20 entries';
     for (const [name, value] of entries) {
       if (!PARAM_IS_TEXT.has(name)) return `unknown parameter "${name.slice(0, 40)}"`;
       if (PARAM_IS_TEXT.get(name)) {
-        if (typeof value !== 'string' || value.trim().length < 1 || value.length > MAX_TEXT) return `${name} must be text of 1 to ${MAX_TEXT} characters`;
+        const p = TEXT_PARAM.get(name)!;
+        if (typeof value !== 'string' || value.length > MAX_TEXT || !textOption(p, value)) return optionsMessage(p);
       } else if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > MAX_VALUE) {
         return `${name} must be a number between -${MAX_VALUE} and ${MAX_VALUE}`;
       }
@@ -60,6 +68,28 @@ export class LabValuesConstraint implements ValidatorConstraintInterface {
   }
   defaultMessage(args?: { value?: unknown }) {
     return this.problem(args?.value) ?? 'values are not valid';
+  }
+}
+
+/** Optional notes on text results (parameter name -> up to 200 characters), e.g. the organism grown. */
+@ValidatorConstraint({ name: 'labComments', async: false })
+export class LabCommentsConstraint implements ValidatorConstraintInterface {
+  private problem(v: unknown): string | null {
+    if (v === undefined) return null;
+    if (!isPlain(v)) return 'comments must be an object';
+    const entries = Object.entries(v as Record<string, unknown>);
+    if (entries.length > 20) return 'comments must have at most 20 entries';
+    for (const [name, value] of entries) {
+      if (!TEXT_PARAM.has(name)) return `"${name.slice(0, 40)}" takes no comment`;
+      if (typeof value !== 'string' || value.length > MAX_TEXT) return `the comment on ${name} must be text of at most ${MAX_TEXT} characters`;
+    }
+    return null;
+  }
+  validate(v: unknown) {
+    return this.problem(v) === null;
+  }
+  defaultMessage(args?: { value?: unknown }) {
+    return this.problem(args?.value) ?? 'comments are not valid';
   }
 }
 
@@ -120,9 +150,13 @@ export class RejectDto {
 }
 
 export class ResultsDto {
-  @ApiProperty({ description: 'Parameter name -> number (numeric parameters) or text' })
+  @ApiProperty({ description: 'Parameter name -> number (numeric parameters) or one of the parameter\'s options (text parameters)' })
   @Validate(LabValuesConstraint)
   values: Record<string, number | string>;
+  @ApiPropertyOptional({ description: 'Text parameter name -> a note of up to 200 characters, e.g. the organism grown' })
+  @IsOptional()
+  @Validate(LabCommentsConstraint)
+  comments?: Record<string, string>;
 }
 
 export class AmendDto extends ResultsDto {

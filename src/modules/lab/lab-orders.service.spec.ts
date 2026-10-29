@@ -138,6 +138,10 @@ describe('LabOrdersService', () => {
     const after = await service.cancelLine(ADMIN, v.lines[0].id, ' duplicate ');
     assert.equal(after.lines[0].status, 'cancelled');
     assert.equal(after.lines[0].cancelled!.reason, 'duplicate');
+    // The free-text reason stays on the line; lab.cancelled never carries it.
+    const [cancelled] = await m.AgentMessage.find({ type: 'lab.cancelled' }).lean<any[]>().exec();
+    assert.equal(cancelled.payload.reason, undefined);
+    assert.ok(!JSON.stringify(cancelled).includes('duplicate'));
     const own = await service.cancelLine(DOC, v.lines[1].id, 'changed plan');
     assert.equal(own.lines[1].status, 'cancelled');
     await assert.rejects(service.cancelLine(DOC, v.lines[1].id, 'again'), { status: 409 });

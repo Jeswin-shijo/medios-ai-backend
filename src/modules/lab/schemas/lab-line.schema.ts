@@ -11,6 +11,8 @@ export interface LabResultRow {
   unit: string;
   flag: 'normal' | 'low' | 'high' | 'abnormal';
   critical: boolean;
+  /** A text result's note, e.g. the organism grown. Shown on the report; never flagged, never sent to the AI or put in a message. */
+  comment?: string;
 }
 
 

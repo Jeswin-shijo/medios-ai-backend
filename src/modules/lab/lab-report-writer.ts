@@ -28,6 +28,8 @@ export async function writeLabReport(
     unit: r.unit,
     status: STATUS_LABEL[r.flag],
     critical: r.critical,
+    // A text result's note (the organism, say), shown next to the value.
+    ...(r.comment ? { comment: r.comment } : {}),
   }));
   const fields = {
     uhid: request.patientUhid,

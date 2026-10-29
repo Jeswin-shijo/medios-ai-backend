@@ -104,6 +104,23 @@ describe('LabAiService', () => {
     assert.ok(res.findings[0].includes('E. coli'), 'the template for staff still shows the typed text');
   });
 
+  test('a culture growth reaches the AI as abnormal only: its organism comment is never sent', async () => {
+    const request = await m.LabRequest.findOne().lean();
+    const line = await m.LabLine.create({
+      request: request!._id,
+      test: 'blood-culture',
+      status: 'released',
+      tatDueAt: new Date(),
+      results: [{ param: 'Result', value: 'Growth', unit: '', flag: 'abnormal', critical: true, comment: 'E. coli' }],
+    });
+    const ai = fakeAi('echo');
+    await svc(ai).summarise(String(line._id));
+    const sent = JSON.stringify({ input: ai.tasks[0].input, instructions: ai.tasks[0].instructions });
+    assert.ok(!sent.includes('E. coli'));
+    assert.ok(!sent.includes('comment'));
+    assert.equal(ai.tasks[0].input.parameters[0].value, 'abnormal');
+  });
+
   test('a valid AI answer is used, and a sample answer is marked sample', async () => {
     const answer = { findings: ['Potassium is high.'], interpretation: 'Raised potassium.', recommendations: ['Repeat the test.'] };
     const res = await svc(fakeAi('answer', answer)).summarise(lineId);

@@ -587,7 +587,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
       if (s.stage === 'cancelled') {
         defer(l.closedMs!, () =>
           msg('lab.cancelled', l.closedMs!, `${number}: ${def.label} cancelled`, {
-            requestId: String(requestId), lineId: String(l._id), test: s.test, reason: s.reason ?? '', tatDueAt: openAt(l.closedMs!).length ? earliestTat(openAt(l.closedMs!)) : l.tatDueAt,
+            requestId: String(requestId), lineId: String(l._id), test: s.test, tatDueAt: openAt(l.closedMs!).length ? earliestTat(openAt(l.closedMs!)) : l.tatDueAt,
           }),
         );
         return;

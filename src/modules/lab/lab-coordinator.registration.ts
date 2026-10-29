@@ -18,7 +18,8 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
 
 const MESSAGE_TYPES: MessageTypeDef[] = [
   type('lab.ordered', 'Lab tests were ordered', { requestId: 'string', requestNumber: 'string', priority: 'string', tests: 'string[]', collectBy: 'date', tatDueAt: 'date' }),
-  type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', reason: 'string', tatDueAt: 'date' }),
+  // The free-text reason stays on the line, never in a message.
+  type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', tatDueAt: 'date' }),
   type('lab.collected', 'A sample was collected', { requestId: 'string', sampleId: 'string', sampleNumber: 'string', tube: 'string', tests: 'string[]' }),
   type('lab.collection-done', 'Every sample for a request was collected', { requestId: 'string' }),
   // `tests` here: the request's open tests, which its turnaround clock covers.

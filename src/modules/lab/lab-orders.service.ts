@@ -455,7 +455,6 @@ export class LabOrdersService {
         requestId: String(request._id),
         lineId: String(line._id),
         test: line.test,
-        reason,
         tatDueAt: stillOpen.length ? earliest(stillOpen.map((l) => l.tatDueAt)) : line.tatDueAt,
       },
     });

@@ -55,7 +55,16 @@ export class LabController {
         tube: t.tube,
         tubeLabel: TUBE_LABEL[t.tube],
         category: t.category,
-        parameters: t.params.map((p) => ({ name: p.name, unit: p.unit, low: p.low ?? null, high: p.high ?? null, text: !!p.text, range: rangeText(t.key, p) })),
+        parameters: t.params.map((p) => ({
+          name: p.name,
+          unit: p.unit,
+          low: p.low ?? null,
+          high: p.high ?? null,
+          text: !!p.text,
+          // A text result is picked from these; the first is the normal one.
+          options: p.text ? (p.options ?? []) : null,
+          range: rangeText(t.key, p),
+        })),
         targets: targets[t.key],
       })),
       priorities: (Object.keys(COLLECT_MINUTES) as (keyof typeof COLLECT_MINUTES)[]).map((key) => ({ key, collectWithinMinutes: COLLECT_MINUTES[key] })),
@@ -178,9 +187,9 @@ export class LabController {
 
   @Put('lines/:id/results')
   @Roles(...LAB_BENCH)
-  @ApiOperation({ summary: 'Enter results for a received test (parameter name -> value)' })
+  @ApiOperation({ summary: 'Enter results for a received test (parameter name -> value; text parameters take one of their options, with an optional comment)' })
   async enter(@CurrentUser() user: any, @Param() p: IdParam, @Body() dto: ResultsDto) {
-    await this.results.enterResults(actorOf(user), p.id, dto.values);
+    await this.results.enterResults(actorOf(user), p.id, dto.values, dto.comments);
     return { ok: true };
   }
 
@@ -207,7 +216,7 @@ export class LabController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Amend a released result: new values and a reason; a second person validates' })
   async amend(@CurrentUser() user: any, @Param() p: IdParam, @Body() dto: AmendDto) {
-    await this.results.amend(actorOf(user), p.id, dto.values, dto.reason);
+    await this.results.amend(actorOf(user), p.id, dto.values, dto.reason, dto.comments);
     return { ok: true };
   }
 

@@ -286,6 +286,53 @@ describe('LabResultsService', () => {
     assert.equal((await sent('lab.resulted')).length, 0, 'the report and lab.resulted come after');
   });
 
+  test('blood culture: "No growth" is normal, "Growth" is critical, and free text is refused with the options', async () => {
+    const { lineId } = await received(['blood-culture']);
+    const id = lineId('blood-culture');
+    await assert.rejects(() => results.enterResults(LAB, id, { Result: 'No growth after 48 hours' }), {
+      status: 400,
+      message: 'Result must be one of: No growth, Growth',
+    });
+    await assert.rejects(() => results.enterResults(LAB, id, { Result: 'Growth' }, { Result: 'x'.repeat(201) }), { status: 400 });
+    await results.enterResults(LAB, id, { Result: 'growth' }, { Result: '  E. coli ' });
+    const row = (await line(id)).results[0];
+    assert.deepEqual(row, { param: 'Result', value: 'Growth', unit: '', flag: 'abnormal', critical: true, comment: 'E. coli' });
+    await results.release(PATH, id);
+    const [crit] = await sent('lab.critical');
+    assert.equal(crit.payload.value, 'Growth');
+    // The organism is on the report next to the value, and in no message.
+    const report: any = await m.LabTestReport.findOne({ labLine: id }).lean();
+    assert.equal(report.groups[0].parameters[0].result, 'Growth');
+    assert.equal(report.groups[0].parameters[0].comment, 'E. coli');
+    assert.equal(report.groups[0].parameters[0].referenceRange, 'No growth');
+    const all = JSON.stringify(await m.AgentMessage.find().lean());
+    assert.ok(!all.includes('E. coli'));
+
+    const other = await received(['blood-culture']);
+    await results.enterResults(LAB, other.lineId('blood-culture'), { Result: 'No growth' });
+    assert.deepEqual((await line(other.lineId('blood-culture'))).results[0], { param: 'Result', value: 'No growth', unit: '', flag: 'normal', critical: false });
+  });
+
+  test('urine "Absent" is stored as Nil and is normal; a comment goes only on a text parameter', async () => {
+    const { lineId } = await received(['urine']);
+    const id = lineId('urine');
+    const values = { Protein: 'Absent', Sugar: 'negative', 'Pus cells': 2, RBC: 1 };
+    await assert.rejects(() => results.enterResults(LAB, id, values, { 'Pus cells': 'clumps' }), { status: 400 });
+    await assert.rejects(() => results.enterResults(LAB, id, values, { Result: 'x' }), { status: 400 });
+    await results.enterResults(LAB, id, values, { Protein: '' });
+    const rows = (await line(id)).results;
+    assert.deepEqual(rows.slice(0, 2), [
+      { param: 'Protein', value: 'Nil', unit: '', flag: 'normal', critical: false },
+      { param: 'Sugar', value: 'Nil', unit: '', flag: 'normal', critical: false },
+    ]);
+    await results.release(PATH, id);
+    // An amendment takes options and comments too.
+    await assert.rejects(() => results.amend(LAB, id, { ...values, Protein: 'some' }, 'recheck'), { status: 400, message: 'Protein must be one of: Nil, Trace, 1+, 2+, 3+, 4+' });
+    await results.amend(LAB, id, { ...values, Protein: '2+' }, 'recheck', { Protein: 'Repeat on a fresh sample' });
+    const amended = (await line(id)).results[0];
+    assert.deepEqual(amended, { param: 'Protein', value: '2+', unit: '', flag: 'abnormal', critical: false, comment: 'Repeat on a fresh sample' });
+  });
+
   test('acknowledging a non-critical line is refused', async () => {
     const { lineId } = await received(['crp']);
     await results.enterResults(LAB, lineId('crp'), { CRP: 2 });

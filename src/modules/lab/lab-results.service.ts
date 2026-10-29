@@ -10,7 +10,7 @@ import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { LabAiService } from './lab-ai';
-import { LabTestDef, effectiveLimits, flagValue, testByKey } from './lab-catalogue';
+import { LabTestDef, effectiveLimits, flagValue, optionsMessage, testByKey, textOption } from './lab-catalogue';
 import { LabOrdersService, RECONCILE_BATCH, RECONCILE_GRACE_MS } from './lab-orders.service';
 import { writeLabReport } from './lab-report-writer';
 import { LabSettingsService } from './lab-settings.service';
@@ -19,6 +19,7 @@ import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
 
 const SUMMARY_MAX = 140;
 const ACK_MINUTES = 15;
+const COMMENT_MAX = 200;
 const CLOSED_LINE = ['released', 'cancelled'];
 const CASE_PRIORITY: Record<string, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
 
@@ -58,11 +59,11 @@ export class LabResultsService {
 
   // ---------- entering ----------
 
-  async enterResults(actor: Actor, lineId: string, values: Record<string, number | string>): Promise<void> {
+  async enterResults(actor: Actor, lineId: string, values: Record<string, number | string>, comments?: Record<string, string>): Promise<void> {
     const line = await this.lineById(lineId);
     const wait = () => new ConflictException("This test isn't waiting for results.");
     if (line.status !== 'received') throw wait();
-    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits);
+    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits, comments);
     const done = await this.lines
       .findOneAndUpdate(
         { _id: line._id, status: 'received' },
@@ -296,13 +297,13 @@ export class LabResultsService {
 
   // ---------- amending ----------
 
-  async amend(actor: Actor, lineId: string, values: Record<string, number | string>, reason: string): Promise<void> {
+  async amend(actor: Actor, lineId: string, values: Record<string, number | string>, reason: string, comments?: Record<string, string>): Promise<void> {
     const why = text(reason);
     if (!why) throw new BadRequestException('A reason is required');
     const line = await this.lineById(lineId);
     const cannot = () => new ConflictException('Only a released result can be amended.');
     if (line.status !== 'released') throw cannot();
-    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits);
+    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits, comments);
     const done = await this.lines
       .findOneAndUpdate(
         { _id: line._id, status: 'released', version: line.version },
@@ -320,8 +321,17 @@ export class LabResultsService {
     return l;
   }
 
-  /** Every catalogue parameter, nothing else; flagged with the fixed rules. */
-  private flag(test: string, values: Record<string, number | string>, criticalLimits?: Parameters<typeof effectiveLimits>[0]): LabResultRow[] {
+  /**
+   * Every catalogue parameter, nothing else; flagged with the fixed rules. A text result is stored as the
+   * option it stands for ("absent" → "Nil"); anything else is a 400 naming the parameter and its options.
+   * A comment (up to 200 characters) is kept on a text result only, and is never flagged.
+   */
+  private flag(
+    test: string,
+    values: Record<string, number | string>,
+    criticalLimits?: Parameters<typeof effectiveLimits>[0],
+    comments?: Record<string, string>,
+  ): LabResultRow[] {
     const def = testByKey(test);
     if (!def) throw new BadRequestException(`Unknown test "${test}"`);
     if (!values || typeof values !== 'object' || Array.isArray(values)) throw new BadRequestException('Results are required');
@@ -330,16 +340,38 @@ export class LabResultsService {
     if (unknown.length) throw new BadRequestException(`Unknown parameter: ${unknown.join(', ')}`);
     const missing = names.filter((n) => values[n] === undefined || values[n] === null || values[n] === '');
     if (missing.length) throw new BadRequestException(`Missing result: ${missing.join(', ')}`);
+    const notes = this.comments(def, comments);
     const limits = effectiveLimits(criticalLimits);
     return def.params.map((p) => {
       const raw = values[p.name];
-      const value = p.text && typeof raw === 'string' ? raw.trim() : raw;
+      let value = raw;
+      if (p.text) {
+        const option = typeof raw === 'string' ? textOption(p, raw) : null;
+        if (!option) throw new BadRequestException(optionsMessage(p));
+        value = option;
+      }
       try {
-        return { param: p.name, value, unit: p.unit, ...flagValue(test, p.name, value, limits) };
+        return { param: p.name, value, unit: p.unit, ...flagValue(test, p.name, value, limits), ...(notes[p.name] ? { comment: notes[p.name] } : {}) };
       } catch (e) {
         throw new BadRequestException(e instanceof Error ? e.message : 'Invalid result');
       }
     });
+  }
+
+  /** The non-empty comments, trimmed; only text parameters of this test take one. */
+  private comments(def: LabTestDef, comments?: Record<string, string>): Record<string, string> {
+    if (comments === undefined || comments === null) return {};
+    if (typeof comments !== 'object' || Array.isArray(comments)) throw new BadRequestException('Comments must be an object');
+    const out: Record<string, string> = {};
+    for (const [name, raw] of Object.entries(comments)) {
+      const p = def.params.find((x) => x.name === name);
+      if (!p?.text) throw new BadRequestException(`"${name.slice(0, 40)}" takes no comment`);
+      if (typeof raw !== 'string') throw new BadRequestException(`The comment on ${name} must be text`);
+      const note = raw.trim();
+      if (note.length > COMMENT_MAX) throw new BadRequestException(`The comment on ${name} must be at most ${COMMENT_MAX} characters`);
+      if (note) out[name] = note;
+    }
+    return out;
   }
 
   private writeReport(line: LabLineDocument, request: LabRequestDocument, def: LabTestDef, version: number): Promise<Types.ObjectId> {

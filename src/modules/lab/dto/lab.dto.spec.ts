@@ -94,14 +94,25 @@ describe('ResultsDto and AmendDto', () => {
     await bad(ResultsDto, { values: { Glucose: -1_000_001 } });
     await ok(ResultsDto, { values: { Glucose: 1_000_000 } });
   });
-  test('text is 1 to 200 characters; values is a plain, non-empty object', async () => {
+  test('text must be one of its options (any case; Negative and Absent mean Nil); values is a plain, non-empty object', async () => {
     await bad(ResultsDto, { values: { Result: '' } });
-    await bad(ResultsDto, { values: { Result: 'x'.repeat(201) } });
-    await ok(ResultsDto, { values: { Result: 'x'.repeat(200) } });
+    await bad(ResultsDto, { values: { Result: 'x'.repeat(200) } });
+    await ok(ResultsDto, { values: { Result: 'growth' } });
+    await ok(ResultsDto, { values: { Protein: 'Absent', Sugar: '2+' } });
+    const { errors } = await run(ResultsDto, { values: { Result: 'No growth after 48 hours' } });
+    assert.match(JSON.stringify(errors), /Result must be one of: No growth, Growth/);
     await bad(ResultsDto, { values: {} });
     await bad(ResultsDto, { values: [1] });
     await bad(ResultsDto, { values: 'x' });
     await bad(ResultsDto, {});
+  });
+  test('a comment is optional, only for a text parameter, and up to 200 characters', async () => {
+    await ok(ResultsDto, { values: { Result: 'Growth' }, comments: { Result: 'E. coli' } });
+    await ok(AmendDto, { values: { Result: 'Growth' }, comments: { Result: 'x'.repeat(200) }, reason: 'Organism identified' });
+    await bad(ResultsDto, { values: { Result: 'Growth' }, comments: { Result: 'x'.repeat(201) } });
+    await bad(ResultsDto, { values: { Glucose: 99 }, comments: { Glucose: 'fasting' } });
+    await bad(ResultsDto, { values: { Result: 'Growth' }, comments: { Result: 5 } });
+    await bad(ResultsDto, { values: { Result: 'Growth' }, comments: ['E. coli'] });
   });
   test('an amendment needs a reason', async () => {
     await bad(AmendDto, { values: { Glucose: 99 } });

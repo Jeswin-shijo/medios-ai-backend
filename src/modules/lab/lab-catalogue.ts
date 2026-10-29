@@ -20,7 +20,14 @@ export interface LabParameterDef {
   low?: number;
   high?: number;
   text?: true;
+  /** A text result is one of these words, never free text; the first is the normal one. */
+  options?: string[];
+  /** Other words accepted as input (any case), stored as the option they stand for. */
+  aliases?: Record<string, string>;
 }
+
+const URINE_OPTIONS = ['Nil', 'Trace', '1+', '2+', '3+', '4+'];
+const URINE_ALIASES = { Negative: 'Nil', Absent: 'Nil' };
 
 export interface LabTestDef {
   key: string;
@@ -125,14 +132,14 @@ export const LAB_TESTS: LabTestDef[] = [
   },
   {
     key: 'blood-culture', label: 'Blood culture', tube: 'culture', category: 'Others',
-    params: [{ name: 'Result', unit: '', text: true }],
+    params: [{ name: 'Result', unit: '', text: true, options: ['No growth', 'Growth'] }],
     tat: { stat: 1440, routine: 2880 },
   },
   {
     key: 'urine', label: 'Urine routine', tube: 'urine', category: 'Urine',
     params: [
-      { name: 'Protein', unit: '', text: true },
-      { name: 'Sugar', unit: '', text: true },
+      { name: 'Protein', unit: '', text: true, options: URINE_OPTIONS, aliases: URINE_ALIASES },
+      { name: 'Sugar', unit: '', text: true, options: URINE_OPTIONS, aliases: URINE_ALIASES },
       { name: 'Pus cells', unit: '/hpf', low: 0, high: 5 },
       { name: 'RBC', unit: '/hpf', low: 0, high: 2 },
     ],
@@ -140,9 +147,9 @@ export const LAB_TESTS: LabTestDef[] = [
   },
 ];
 
-/** The reference range as text, e.g. "3.5–5.1" or "≥ 40". */
-export function rangeText(test: string, p: LabParameterDef): string {
-  if (p.text) return test === 'blood-culture' ? 'No growth' : 'Negative';
+/** The reference range as text, e.g. "3.5–5.1" or "≥ 40"; for a text result, its normal option ("No growth", "Nil"). */
+export function rangeText(_test: string, p: LabParameterDef): string {
+  if (p.text) return p.options?.[0] ?? '';
   if (p.low !== undefined && p.high !== undefined) return `${p.low}–${p.high}`;
   return p.low !== undefined ? `≥ ${p.low}` : p.high !== undefined ? `≤ ${p.high}` : '';
 }
@@ -206,7 +213,17 @@ export function targetMinutes(
   return routine;
 }
 
-const NORMAL_TEXT = ['nil', 'negative', 'no growth'];
+/** The option a typed text result stands for (any case, aliases included), or null when it is none of them. */
+export function textOption(p: LabParameterDef, value: string): string | null {
+  const v = value.trim().toLowerCase();
+  const option = (p.options ?? []).find((o) => o.toLowerCase() === v);
+  if (option) return option;
+  const alias = Object.entries(p.aliases ?? {}).find(([word]) => word.toLowerCase() === v);
+  return alias ? alias[1] : null;
+}
+
+/** "Result must be one of: No growth, Growth" */
+export const optionsMessage = (p: LabParameterDef) => `${p.name} must be one of: ${(p.options ?? []).join(', ')}`;
 
 export function flagValue(
   test: string,
@@ -221,7 +238,10 @@ export function flagValue(
   const limit = limits[`${test}.${param}`];
   if (p.text) {
     if (typeof value !== 'string') throw new Error(`${test} ${param} needs a text value`);
-    const flag = NORMAL_TEXT.includes(value.trim().toLowerCase()) ? 'normal' : 'abnormal';
+    // Only a listed option is flagged; anything else is refused, so typed text never passes as normal.
+    const option = textOption(p, value);
+    if (!option) throw new Error(optionsMessage(p));
+    const flag = option === p.options![0] ? 'normal' : 'abnormal';
     return { flag, critical: flag === 'abnormal' && limit?.anyAbnormalText === true };
   }
   if (!isNum(value)) throw new Error(`${test} ${param} needs a number value`);

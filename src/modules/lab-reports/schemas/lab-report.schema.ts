@@ -29,6 +29,10 @@ export class LabParameter {
   /** Set by the Lab Agent: a critical value. */
   @Prop()
   critical?: boolean;
+
+  /** Set by the Lab Agent: a text result's note, e.g. the organism grown. */
+  @Prop()
+  comment?: string;
 }
 
 @Schema({ _id: false })

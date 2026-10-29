@@ -7,8 +7,10 @@ import {
   effectiveLimits,
   flagValue,
   groupIntoTubes,
+  rangeText,
   targetMinutes,
   testByKey,
+  textOption,
 } from './lab-catalogue';
 
 describe('lab-catalogue', () => {
@@ -28,17 +30,36 @@ describe('lab-catalogue', () => {
     assert.equal(flagValue('troponin', 'Troponin I', 0.04).critical, false);
   });
 
-  test('blood culture "Growth: gram-positive cocci" is abnormal and critical; "No growth" is normal', () => {
-    assert.deepEqual(flagValue('blood-culture', 'Result', 'Growth: gram-positive cocci'), { flag: 'abnormal', critical: true });
+  test('blood culture "No growth" is normal and "Growth" is critical; anything else is refused', () => {
+    assert.deepEqual(flagValue('blood-culture', 'Result', 'Growth'), { flag: 'abnormal', critical: true });
     assert.deepEqual(flagValue('blood-culture', 'Result', 'No growth'), { flag: 'normal', critical: false });
     assert.deepEqual(flagValue('blood-culture', 'Result', '  no GROWTH '), { flag: 'normal', critical: false });
+    // Free text is never flag-matched: an unlisted value throws, so it can't pass as normal or raise a false critical.
+    assert.throws(() => flagValue('blood-culture', 'Result', 'No growth after 48 hours'), /Result must be one of: No growth, Growth/);
+    assert.throws(() => flagValue('blood-culture', 'Result', 'Growth: gram-positive cocci'), /must be one of/);
   });
 
-  test('urine protein "Trace" is abnormal, "Nil" normal', () => {
+  test('urine protein and sugar: Nil is normal, Trace to 4+ abnormal; Negative and Absent mean Nil', () => {
     assert.deepEqual(flagValue('urine', 'Protein', 'Trace'), { flag: 'abnormal', critical: false });
+    assert.deepEqual(flagValue('urine', 'Protein', '3+'), { flag: 'abnormal', critical: false });
     assert.deepEqual(flagValue('urine', 'Protein', 'Nil'), { flag: 'normal', critical: false });
     assert.deepEqual(flagValue('urine', 'Sugar', 'negative'), { flag: 'normal', critical: false });
-    assert.equal(flagValue('urine', 'Protein', '').flag, 'abnormal');
+    assert.deepEqual(flagValue('urine', 'Sugar', 'Absent'), { flag: 'normal', critical: false });
+    assert.equal(textOption(testByKey('urine')!.params[0], ' absent '), 'Nil');
+    assert.equal(textOption(testByKey('urine')!.params[0], '2+'), '2+');
+    assert.equal(textOption(testByKey('urine')!.params[0], 'present'), null);
+    assert.throws(() => flagValue('urine', 'Protein', ''), /Protein must be one of: Nil, Trace, 1\+, 2\+, 3\+, 4\+/);
+  });
+
+  test('every text parameter has options, and its reference range is the normal option', () => {
+    for (const t of LAB_TESTS) {
+      for (const p of t.params.filter((x) => x.text)) {
+        assert.ok(p.options && p.options.length >= 2, `${t.key}.${p.name}`);
+        assert.equal(rangeText(t.key, p), p.options![0]);
+      }
+    }
+    assert.deepEqual(testByKey('blood-culture')!.params[0].options, ['No growth', 'Growth']);
+    assert.deepEqual(testByKey('urine')!.params[1].options, ['Nil', 'Trace', '1+', '2+', '3+', '4+']);
   });
 
   test('wrong value type throws', () => {
@@ -100,5 +121,18 @@ describe('lab-catalogue', () => {
       const [t, p] = key.split('.');
       assert.ok(testByKey(t)?.params.some((x) => x.name === p), key);
     }
+  });
+});
+
+describe('GET catalogue', () => {
+  test('text parameters carry their options (normal first); numeric ones carry null', async () => {
+    const { LabController } = await import('./lab.controller');
+    const settings = { getTargets: async () => ({}) } as any;
+    const out = await new LabController(null as any, null as any, null as any, settings, null as any).catalogue();
+    const param = (test: string, name: string) => out.tests.find((t) => t.key === test)!.parameters.find((p) => p.name === name)!;
+    assert.deepEqual(param('blood-culture', 'Result').options, ['No growth', 'Growth']);
+    assert.deepEqual(param('urine', 'Sugar').options, ['Nil', 'Trace', '1+', '2+', '3+', '4+']);
+    assert.equal(param('urine', 'Sugar').range, 'Nil');
+    assert.equal(param('cbc', 'Haemoglobin').options, null);
   });
 });
