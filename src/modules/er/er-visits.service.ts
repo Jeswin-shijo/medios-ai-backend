@@ -478,6 +478,11 @@ export class ErVisitsService {
         throw new ConflictException('Triage this patient first.');
       }
       await this.sendDisposition(updated, kind);
+      // The Bed Agent may have placed the patient before this admit landed: leave at once.
+      if (await this.bedAlreadyAssigned(updated)) {
+        const left = await this.leave({ _id: updated._id, status: 'waiting-bed' }, 'admitted');
+        if (left) return this.toView(left);
+      }
       return this.toView(updated);
     }
 
@@ -499,6 +504,11 @@ export class ErVisitsService {
     return this.toView(updated);
   }
 
+  /** True when the Bed Agent already placed this visit's patient (a bed.assigned on its case since it began). */
+  private bedAlreadyAssigned(visit: ErVisitDocument): Promise<boolean> {
+    return this.messages.existsForCaseSince(String(visit.case), 'bed.assigned', (visit as ErVisitDocument & { createdAt: Date }).createdAt);
+  }
+
   /**
    * The one place a visit leaves: a guarded update to `left` (null when it already had), its bays freed,
    * then `before` and er.left. `leftAnnouncedAt` is set once er.left was sent; `reannounce` repeats a lost one.
@@ -511,7 +521,7 @@ export class ErVisitsService {
   ): Promise<ErVisitDocument | null> {
     const updated = await this.visits
       .findOneAndUpdate(
-        { ...filter, status: { $ne: 'left' } },
+        { status: { $ne: 'left' }, ...filter },
         { $set: { status: 'left', leftAt: clinicNow(), leftReason: reason, ...extraSet }, $unset: { bay: 1, bayName: 1 } },
         { new: true },
       )

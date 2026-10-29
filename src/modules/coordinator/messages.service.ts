@@ -335,6 +335,11 @@ export class MessagesService {
     return m ? toView(m) : null;
   }
 
+  /** True when the case has a message of this type created at or after `since`. */
+  async existsForCaseSince(caseId: string, type: string, since: Date): Promise<boolean> {
+    return (await this.model.exists({ case: caseId, type, createdAt: { $gte: since } }).exec()) !== null;
+  }
+
   countSince(since: Date): Promise<number> {
     return this.model.countDocuments({ createdAt: { $gte: since } }).exec();
   }

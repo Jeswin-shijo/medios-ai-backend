@@ -247,6 +247,47 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal(await caseState(v.caseId), 'closed');
   });
 
+  test('a bed assigned before the admit lands: the admit leaves at once and the case stays open until discharge', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'assigned');
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'waiting-doctor', 'nothing to leave yet');
+
+    const out = await visits.dispose(DOCTOR, v.id, 'admit', '');
+    assert.equal(out.status, 'left');
+    assert.equal(out.leftReason, 'admitted');
+    assert.equal(out.bayId, null);
+    assert.equal(await m.ErBay.countDocuments({ visit: { $exists: true } }), 0);
+    const left = await sent('er.left');
+    assert.equal(left.length, 1);
+    assert.deepEqual(left[0].payload, { visitId: v.id, reason: 'admitted' });
+    assert.equal(await caseState(v.caseId), 'open');
+
+    const request: any = await m.BedRequest.findById(requestId).lean();
+    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission));
+    await bridge.idle();
+    assert.equal(await caseState(v.caseId), 'closed');
+  });
+
+  test('a bed.assigned from before this visit does not make an admit leave', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    const [assigned] = await sent('bed.assigned');
+    assert.ok(assigned);
+    // Make that message older than the visit.
+    await m.AgentMessage.collection.updateOne({ _id: assigned._id }, { $set: { createdAt: new Date(Date.now() - 24 * 60 * MIN) } });
+    const out = await visits.dispose(DOCTOR, v.id, 'admit', '');
+    assert.equal(out.status, 'waiting-bed');
+    assert.equal((await sent('er.left')).length, 0);
+  });
+
   test('a redelivered bed.assigned does nothing the second time', async () => {
     const { p, v } = await arrive();
     await triaged(v.id);
