@@ -1,6 +1,6 @@
 import mongoose, { Model, Schema } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
 import { User, UserSchema } from '../modules/users/schemas/user.schema';
@@ -39,7 +39,14 @@ import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 // patient whose chart is filled in). Records go through the real Mongoose schemas,
 // so enums, required fields and timestamps are enforced exactly as in the API.
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital';
+// Use the same database the API would: read .env (an explicit MONGODB_URI wins), never guess one.
+const envFile = join(__dirname, '..', '..', '.env');
+if (!process.env.MONGODB_URI && existsSync(envFile)) process.loadEnvFile(envFile);
+if (!process.env.MONGODB_URI) {
+  console.error('Refusing to seed: MONGODB_URI is not set (put it in .env or pass it explicitly).');
+  process.exit(1);
+}
+const MONGODB_URI = process.env.MONGODB_URI as string;
 // Demo accounts for local development only; never seed these into a real deployment.
 const DEMO_EMAIL = 'doctor@medios.ai';
 const ADMIN_EMAIL = 'admin@medios.ai';
@@ -181,7 +188,8 @@ async function seedQueue(shajin: { _id: any; name: string; room: string; tokenPr
 }
 
 async function seed() {
-  console.log('🌱 Connecting to MongoDB at', MONGODB_URI);
+  // Name only: the URI may hold credentials.
+  console.log('🌱 Seeding database', new URL(MONGODB_URI.replace(/^mongodb(\+srv)?:/, 'http:')).pathname.slice(1) || '(default)');
   await mongoose.connect(MONGODB_URI);
 
   const [doctor] = fixture('users');
