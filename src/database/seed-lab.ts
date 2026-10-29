@@ -825,7 +825,8 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
     messages.deleteMany({ $or: [{ from: 'lab' }, { case: { $in: oldCaseIds } }] }),
     clocks.deleteMany({ $or: [{ def: /^lab-/ }, { case: { $in: oldCaseIds } }] }),
     escalations.deleteMany({ ladder: { $in: ['lab', 'lab-critical'] } }),
-    alerts.deleteMany({ $or: [{ link: { $in: oldEscalations.map((e) => `escalation:${e._id}`) } }, { type: 'Lab Alert', link: /^lab-line:/ }] }),
+    // Every lab-line alert, whatever its type: an escalation that found none makes its own.
+    alerts.deleteMany({ $or: [{ link: { $in: oldEscalations.map((e) => `escalation:${e._id}`) } }, { link: /^lab-line:/ }] }),
     reports.deleteMany({ labLine: { $exists: true } }),
     cases.deleteMany({ openedBy: 'lab' }),
     timeline.deleteMany({ title: { $in: oldCases.map((c) => `Case ${c.number} opened`) } }),

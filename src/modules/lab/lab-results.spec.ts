@@ -253,6 +253,13 @@ describe('LabResultsService', () => {
     const clock = (await clockOf('lab-critical', caseId))[0];
     assert.equal(clock.state, 'expired');
     assert.ok(clock.stoppedAt);
+    // A later amendment to a new critical value raises a fresh alert, not the old escalation's.
+    await results.amend(LAB, id, { 'Troponin I': 0.9 }, 'Re-run');
+    await results.release(PATH, id);
+    const fresh = (await m.TaskAlertItem.findById(e.alert).lean()) as any;
+    assert.equal(fresh.title, 'Critical: Troponin I Troponin I 0.9 ng/mL');
+    assert.equal(fresh.status, 'Pending');
+    assert.equal(fresh.escalation, undefined);
   });
 
   test('lab clocks carry a short detail: the request number and tests (and the critical parameter), never a name', async () => {

@@ -399,13 +399,14 @@ export class LabResultsService {
       .exec();
   }
 
-  /** One alert per line: an amendment to a new critical value reopens it. */
+  /** One alert per line: an amendment to a new critical value reopens it, without an earlier escalation's details. */
   private async raiseAlert(request: LabRequestDocument, line: LabLineDocument, def: LabTestDef, c: LabResultRow): Promise<void> {
     const link = `lab-line:${line._id}`;
     await this.alerts
       .findOneAndUpdate(
         { link },
         {
+          $unset: { escalation: '' },
           $set: {
             title: `Critical: ${def.label} ${c.param} ${c.value} ${c.unit}`.trim(),
             subtitle: `For ${request.orderedBy.name} · acknowledge within ${ACK_MINUTES} min`,
