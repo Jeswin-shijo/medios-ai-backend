@@ -56,9 +56,9 @@ describe('ErTriageService', () => {
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
     visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
-    new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
     const settings = new SettingsService(m.HospitalSettings);
     service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings), visits);
+    new ErCoordinatorRegistration(registry, visits, bays, messages, service, m.ErVisit, m.Clock).onModuleInit();
   });
 
   const arrive = async (complaint: any = 'chest-pain') => {

@@ -1,12 +1,15 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { HttpException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import type { Actor } from '../beds/actor';
+import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { MessagesService } from '../coordinator/messages.service';
 import { ErBaysService } from './er-bays.service';
 import { PATHWAYS, PathwayKey, StepKey } from './er-rules';
+import { ErTriageService } from './er-triage.service';
 import { ErVisitsService } from './er-visits.service';
 import { ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
 
@@ -106,11 +109,14 @@ export async function erOnTimePct(clocks: Model<ClockDocument>, visits: Model<Er
 /** Tells the Coordinator what the ER agent sends, and the clocks and rule it brings. */
 @Injectable()
 export class ErCoordinatorRegistration implements OnModuleInit {
+  private readonly logger = new Logger(ErCoordinatorRegistration.name);
+
   constructor(
     private readonly registry: AgentRegistry,
     private readonly visitsService: ErVisitsService,
     private readonly bays: ErBaysService,
     private readonly messages: MessagesService,
+    private readonly triage: ErTriageService,
     @InjectModel(ErVisit.name) private readonly visits: Model<ErVisitDocument>,
     @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
   ) {}
@@ -149,6 +155,7 @@ export class ErCoordinatorRegistration implements OnModuleInit {
       handles: [
         { type: 'bed.assigned', handler: (messageId) => this.onBedAssigned(messageId) },
         { type: 'bed.cancelled', handler: (messageId) => this.onBedCancelled(messageId) },
+        { type: 'lab.collected', handler: (messageId) => this.onLabCollected(messageId) },
       ],
       closeChecks: [{ agent: 'er', label: 'ER visit finished', check: (caseId) => this.closeCheck(caseId) }],
       rules: [
@@ -174,6 +181,34 @@ export class ErCoordinatorRegistration implements OnModuleInit {
   private async onBedCancelled(messageId: string): Promise<void> {
     const message = await this.messages.get(messageId);
     if (message?.case) await this.visitsService.onBedCancelled(message.case);
+  }
+
+  /** A blood culture was collected on this message's case: tick "Blood cultures taken" on a running sepsis pathway. */
+  private async onLabCollected(messageId: string): Promise<void> {
+    const message = await this.messages.get(messageId);
+    const tests = (message?.payload as { tests?: unknown } | undefined)?.tests;
+    if (!message?.case || !Array.isArray(tests) || !tests.includes('blood-culture')) return;
+    const visit = await this.visits
+      .findOne({ case: message.case, status: { $in: [...OPEN_ER_STATUSES] } })
+      .lean<{ _id: unknown; pathways?: { key: string; cancelled?: unknown }[]; steps?: { key: string; doneAt?: Date }[] }>()
+      .exec();
+    if (!visit) return;
+    const latest = new Map<string, { cancelled?: unknown }>();
+    for (const p of visit.pathways ?? []) latest.set(p.key, p);
+    const sepsis = latest.get('sepsis');
+    if (!sepsis || sepsis.cancelled) return;
+    if ((visit.steps ?? []).find((s) => s.key === 'cultures')?.doneAt) return;
+    const system = { id: 'lab-agent', name: 'Lab Agent', role: UserRole.NURSE } as Actor;
+    try {
+      await this.triage.tickStep(system, String(visit._id), 'cultures');
+    } catch (e) {
+      // Not triaged yet, or the pathway is not running: the nurse can tick it. Anything else is retried.
+      if (e instanceof HttpException && e.getStatus() >= 400 && e.getStatus() < 500) {
+        this.logger.debug(`Blood culture not ticked on the ER visit: ${e.message}`);
+        return;
+      }
+      throw e;
+    }
   }
 
   /** 'n/a' with no ER visit on the case; 'pass' when every one has left. */

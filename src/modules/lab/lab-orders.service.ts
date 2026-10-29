@@ -442,7 +442,7 @@ export class LabOrdersService {
     return `LR-${pad(c.last, 4)}`;
   }
 
-  private async nextSampleNumber(): Promise<string> {
+  async nextSampleNumber(): Promise<string> {
     const d = clinicNow();
     const day = `${pad(d.getFullYear() % 100, 2)}${pad(d.getMonth() + 1, 2)}${pad(d.getDate(), 2)}`;
     const c = await this.counters.findOneAndUpdate({ key: `lab-sample-${day}` }, { $inc: { last: 1 } }, { upsert: true, new: true }).exec();

@@ -29,6 +29,12 @@ import { UserRole } from '../users/schemas/user.schema';
 import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration, erOnTimePct } from './er-coordinator.registration';
 import { ErTargetsService } from './er-targets.service';
+import { ErTriageService } from './er-triage.service';
+import { RulesService } from '../coordinator/rules.service';
+import { VitalsService } from '../vitals/vitals.service';
+import { LabBenchService } from '../lab/lab-bench.service';
+import { LabCoordinatorRegistration } from '../lab/lab-coordinator.registration';
+import { LabOrdersService } from '../lab/lab-orders.service';
 import { ErVisitsService } from './er-visits.service';
 
 const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
@@ -58,6 +64,9 @@ describe('ErCoordinatorRegistration', () => {
   let clocks: ClocksService;
   let bays: ErBaysService;
   let visits: ErVisitsService;
+  let triage: ErTriageService;
+  let labOrders: LabOrdersService;
+  let bench: LabBenchService;
   let beds: BedsService;
   let requests: BedRequestsService;
   let agent: BedAgentService;
@@ -108,7 +117,12 @@ describe('ErCoordinatorRegistration', () => {
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
-    new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
+    const settings = new SettingsService(m.HospitalSettings);
+    triage = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings), visits);
+    new ErCoordinatorRegistration(registry, visits, bays, messages, triage, m.ErVisit, m.Clock).onModuleInit();
+    labOrders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, patients, cases, messages);
+    new LabCoordinatorRegistration(registry, labOrders, messages, m.LabRequest, m.LabLine).onModuleInit();
+    bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, labOrders, messages);
 
     const bedEvents = new BedEvents();
     beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, bedEvents);
@@ -141,7 +155,7 @@ describe('ErCoordinatorRegistration', () => {
     assert.ok(def.messageTypes.some((t) => t.type === 'er.left'));
     assert.ok(registry.clock('er-triage') && registry.clock('er-doctor'));
     assert.ok(registry.rules().some((r) => r.key === 'er-auto-pathways'));
-    assert.deepEqual(def.handles?.map((h) => h.type), ['bed.assigned', 'bed.cancelled']);
+    assert.deepEqual(def.handles?.map((h) => h.type), ['bed.assigned', 'bed.cancelled', 'lab.collected']);
     assert.deepEqual(registry.get('bed')!.handles?.map((h) => h.type), ['er.left']);
     const check = registry.closeChecks().find((c) => c.agent === 'er')!;
     assert.equal(check.label, 'ER visit finished');
@@ -673,5 +687,41 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal((await status()).onTimePct, 50);
     assert.equal(await erOnTimePct(m.Clock, m.ErVisit, new Date(now - 26 * 60 * MIN)), 67);
     assert.equal(await erOnTimePct(m.Clock, m.ErVisit, new Date(now + MIN)), null);
+  });
+
+  const culture = async (v: { id: string; caseId: string }, extra: string[] = []) => {
+    const o = await labOrders.order(DOCTOR, { patientId: String(((await m.ErVisit.findById(v.id).lean()) as any).patient), tests: ['blood-culture', ...extra], priority: 'stat' });
+    return o[0];
+  };
+  const stepDone = async (id: string) => (((await m.ErVisit.findById(id).lean()) as any).steps ?? []).find((s: any) => s.key === 'cultures')?.doneAt;
+
+  test('collecting a blood culture ticks the sepsis "Blood cultures taken" step of the ER visit', async () => {
+    const { v } = await arrive();
+    await triaged(v.id);
+    await triage.startPathway(NURSE, v.id, 'sepsis');
+    assert.equal(await stepDone(v.id), undefined);
+    const req = await culture(v);
+    assert.equal(req.caseId, v.caseId, 'the order joined the ER case');
+    await bench.collect(NURSE, req.samples[0].number);
+    assert.ok(await stepDone(v.id));
+    const done = (await sent('er.step-done')).filter((x) => x.payload.step === 'cultures');
+    assert.equal(done.length, 1);
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).steps.find((s: any) => s.key === 'cultures').byName, 'Lab Agent');
+  });
+
+  test('collecting a blood culture for a patient with no sepsis pathway does nothing in ER', async () => {
+    const { v } = await arrive();
+    await triaged(v.id);
+    const req = await culture(v);
+    await bench.collect(NURSE, req.samples[0].number);
+    assert.equal((await sent('er.step-done')).length, 0);
+    assert.equal(await stepDone(v.id), undefined);
+    // Sepsis running but the visit is not triaged yet (a 409 from tickStep): swallowed, not retried.
+    const b = await arrive('Asha Devi');
+    await m.ErVisit.updateOne({ _id: b.v.id }, { $push: { pathways: { key: 'sepsis', startedBy: 'staff' } } });
+    const r2 = await culture(b.v);
+    await bench.collect(NURSE, r2.samples[0].number);
+    assert.equal(await stepDone(b.v.id), undefined);
+    assert.equal((await sent('lab.collected')).length, 2);
   });
 });

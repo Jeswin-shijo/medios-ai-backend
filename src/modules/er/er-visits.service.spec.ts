@@ -16,6 +16,7 @@ import { UserRole } from '../users/schemas/user.schema';
 import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration } from './er-coordinator.registration';
 import { ErTargetsService } from './er-targets.service';
+import { ErTriageService } from './er-triage.service';
 import { ErVisitsService } from './er-visits.service';
 import { PATHWAYS } from './er-rules';
 
@@ -55,7 +56,7 @@ describe('ErVisitsService', () => {
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
     service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
-    new ErCoordinatorRegistration(registry, service, bays, messages, m.ErVisit, m.Clock).onModuleInit();
+    new ErCoordinatorRegistration(registry, service, bays, messages, null as unknown as ErTriageService, m.ErVisit, m.Clock).onModuleInit();
   });
 
   test('the ER agent registers its message types, clocks and rule', () => {
