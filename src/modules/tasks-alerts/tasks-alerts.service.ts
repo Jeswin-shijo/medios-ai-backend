@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { TaskAlertItem, TaskAlertDocument } from './schemas/task-alert.schema';
@@ -36,14 +36,20 @@ export class TasksAlertsService {
     return created.save();
   }
 
+  private refuseEscalation(task: TaskAlertDocument): void {
+    if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
+  }
+
   async toggleStatus(id: string): Promise<TaskAlertDocument> {
     const task = await this.findOne(id);
+    this.refuseEscalation(task);
     task.status = task.status === 'Completed' ? 'Pending' : 'Completed';
     return task.save();
   }
 
   async updateStatus(id: string, status: string): Promise<TaskAlertDocument> {
     const task = await this.findOne(id);
+    this.refuseEscalation(task);
     task.status = status;
     return task.save();
   }

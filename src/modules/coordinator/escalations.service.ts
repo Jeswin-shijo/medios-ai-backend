@@ -1,0 +1,246 @@
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import type { Actor } from '../beds/actor';
+import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
+import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
+import { MessagesService } from './messages.service';
+import { DutyTitle, DutyTitleDocument } from './schemas/duty-title.schema';
+import { Escalation, EscalationDocument } from './schemas/escalation.schema';
+import { Ladder, LadderDocument, LadderStep } from './schemas/ladder.schema';
+
+const MINUTE_MS = 60_000;
+
+export const DEFAULT_TITLES: { key: string; label: string }[] = [
+  { key: 'er-nurse-in-charge', label: 'ER nurse in charge' },
+  { key: 'er-consultant', label: 'ER consultant' },
+  { key: 'medical-superintendent', label: 'Medical superintendent' },
+  { key: 'duty-administrator', label: 'Duty administrator' },
+  { key: 'cardiology-on-call', label: 'Cardiology on-call' },
+  { key: 'pharmacist-on-duty', label: 'Pharmacist on duty' },
+];
+
+export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] }[] = [
+  {
+    key: 'default',
+    label: 'Default',
+    steps: [{ title: 'duty-administrator', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
+  },
+  {
+    key: 'bed-wait',
+    label: 'Bed wait',
+    steps: [{ title: 'duty-administrator', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
+  },
+];
+
+export interface DutyTitleView {
+  key: string;
+  label: string;
+  holders: string[];
+}
+export interface LadderView {
+  key: string;
+  label: string;
+  steps: LadderStep[];
+}
+
+const NO_HOLDERS = 'Admins (no one holds this title yet)';
+
+/** Duty titles, ladders and the escalations that walk them. Uses real time, not the clinic clock. */
+@Injectable()
+export class EscalationsService {
+  constructor(
+    @InjectModel(Escalation.name) private readonly model: Model<EscalationDocument>,
+    @InjectModel(DutyTitle.name) private readonly titleModel: Model<DutyTitleDocument>,
+    @InjectModel(Ladder.name) private readonly ladderModel: Model<LadderDocument>,
+    @InjectModel(TaskAlertItem.name) private readonly alertModel: Model<TaskAlertDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly messages: MessagesService,
+  ) {
+    this.messages.onProblem(async (p) => {
+      await this.raise({
+        ladder: 'default',
+        case: p.case,
+        reason: `${p.kind === 'failed' ? 'Agent error' : 'Agent loop'}: ${p.reason}`,
+        source: { kind: p.kind },
+      });
+    });
+  }
+
+  /** Adds the default titles and ladders that are missing; never overwrites an admin's edits. */
+  async ensureDefaults(): Promise<void> {
+    for (const t of DEFAULT_TITLES) {
+      await this.titleModel.updateOne({ key: t.key }, { $setOnInsert: { key: t.key, label: t.label, holders: [] } }, { upsert: true }).exec();
+    }
+    for (const l of DEFAULT_LADDERS) {
+      await this.ladderModel.updateOne({ key: l.key }, { $setOnInsert: { key: l.key, label: l.label, steps: l.steps } }, { upsert: true }).exec();
+    }
+  }
+
+  private async activeUsers(ids: unknown[]): Promise<{ id: string; name: string }[]> {
+    if (!ids.length) return [];
+    const users = await this.userModel
+      .find({ _id: { $in: ids }, isActive: { $ne: false } })
+      .select('name')
+      .sort({ name: 1 })
+      .lean()
+      .exec();
+    return users.map((u) => ({ id: String(u._id), name: u.name }));
+  }
+
+  /** The people holding a title; every admin when it has none. */
+  async holders(titleKey: string): Promise<{ ids: string[]; names: string[] }> {
+    const title = await this.titleModel.findOne({ key: titleKey }).lean().exec();
+    let people = await this.activeUsers(title?.holders ?? []);
+    if (!people.length) {
+      const admins = await this.userModel.find({ role: UserRole.ADMIN, isActive: { $ne: false } }).select('name').sort({ name: 1 }).lean().exec();
+      people = admins.map((u) => ({ id: String(u._id), name: u.name }));
+    }
+    return { ids: people.map((p) => p.id), names: people.map((p) => p.name) };
+  }
+
+  private async stepView(titleKey: string) {
+    const [title, who] = await Promise.all([this.titleModel.findOne({ key: titleKey }).lean().exec(), this.holders(titleKey)]);
+    const label = title?.label ?? titleKey;
+    const hasHolders = (await this.activeUsers(title?.holders ?? [])).length > 0;
+    return { label, names: who.names, subtitle: hasHolders ? `On duty: ${who.names.join(', ')}` : NO_HOLDERS };
+  }
+
+  private async writeAlert(e: EscalationDocument, titleKey: string, create: boolean) {
+    const v = await this.stepView(titleKey);
+    const fields = {
+      title: `Escalated to ${v.label}: ${e.reason}`,
+      subtitle: v.subtitle,
+      escalation: { id: String(e._id), ladder: e.ladder, step: e.step, titleKey, titleLabel: v.label, holderNames: v.names },
+    };
+    const alert = await this.alertModel
+      .findOneAndUpdate(
+        { link: `escalation:${e._id}` },
+        create
+          ? { $set: fields, $setOnInsert: { type: 'System', category: 'Critical', priority: 'High', status: 'Pending', link: `escalation:${e._id}` } }
+          : { $set: fields },
+        { upsert: create, new: true },
+      )
+      .exec();
+    return { alert, label: v.label };
+  }
+
+  async raise(input: { ladder: string; case?: string | null; reason: string; source: Escalation['source'] }): Promise<EscalationDocument> {
+    const ladder = await this.ladderModel.findOne({ key: input.ladder }).lean().exec();
+    if (!ladder || !ladder.steps.length) throw new BadRequestException(`Unknown ladder "${input.ladder}"`);
+    const now = new Date();
+    const e = await this.model.create({
+      case: input.case ? new Types.ObjectId(input.case) : null,
+      ladder: input.ladder,
+      step: 0,
+      reason: input.reason,
+      source: input.source,
+      state: 'open',
+      raisedAt: now,
+      stepAt: now,
+    });
+    const { alert, label } = await this.writeAlert(e, ladder.steps[0].title, true);
+    e.alert = alert!._id as Types.ObjectId;
+    await e.save();
+    await this.messages.send({
+      case: input.case ?? null,
+      from: 'coordinator',
+      to: ['coordinator'],
+      type: 'escalation.raised',
+      priority: 'high',
+      summary: `Escalated to ${label}: ${input.reason}`.slice(0, 140),
+      payload: { reason: input.reason },
+      dedupeKey: `escalation.raised:${e._id}`,
+    });
+    return e;
+  }
+
+  /** Moves open escalations whose wait has passed to the next step. Returns how many moved. */
+  async advanceDue(now: Date): Promise<number> {
+    const open = await this.model.find({ state: 'open' }).exec();
+    let moved = 0;
+    for (const e of open) {
+      const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
+      if (!ladder || e.step >= ladder.steps.length - 1) continue;
+      const wait = Math.max(0, ladder.steps[e.step].waitMinutes) * MINUTE_MS;
+      if (new Date(e.stepAt).getTime() + wait > now.getTime()) continue;
+      const next = e.step + 1;
+      // The step in the filter stops two passes from moving the same escalation twice.
+      const updated = await this.model.findOneAndUpdate({ _id: e._id, state: 'open', step: e.step }, { $set: { step: next, stepAt: now } }, { new: true }).exec();
+      if (!updated) continue;
+      await this.writeAlert(updated, ladder.steps[next].title, false);
+      moved += 1;
+    }
+    return moved;
+  }
+
+  async acknowledge(actor: Actor, id: string): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Escalation not found');
+    const e = await this.model.findById(id).exec();
+    if (!e) throw new NotFoundException('Escalation not found');
+    if (e.state === 'acknowledged') throw new ConflictException('Already acknowledged.');
+    if (actor.role !== UserRole.ADMIN) {
+      const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
+      const keys = (ladder?.steps ?? []).slice(e.step).map((s) => s.title);
+      const titles = await this.titleModel.find({ key: { $in: keys } }).lean().exec();
+      const allowed = titles.some((t) => t.holders.some((h) => String(h) === actor.id));
+      if (!allowed) throw new ForbiddenException('Only the person on duty for this step, someone further up, or an admin can acknowledge.');
+    }
+    const done = await this.model
+      .findOneAndUpdate(
+        { _id: e._id, state: 'open' },
+        { $set: { state: 'acknowledged', ackBy: actor.id, ackByName: actor.name, ackAt: new Date() } },
+        { new: true },
+      )
+      .exec();
+    if (!done) throw new ConflictException('Already acknowledged.');
+    await this.alertModel.updateOne({ _id: e.alert }, { $set: { status: 'Completed' } }).exec();
+  }
+
+  async titles(): Promise<DutyTitleView[]> {
+    const list = await this.titleModel.find().lean().exec();
+    const order = new Map(DEFAULT_TITLES.map((t, i) => [t.key, i]));
+    return list
+      .sort((a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99) || a.label.localeCompare(b.label))
+      .map((t) => ({ key: t.key, label: t.label, holders: t.holders.map(String) }));
+  }
+
+  private requireAdmin(actor: Actor): void {
+    if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only an admin can change duty titles and ladders.');
+  }
+
+  async saveTitle(actor: Actor, title: { key: string; label: string; holders: string[] }): Promise<DutyTitleView> {
+    this.requireAdmin(actor);
+    const key = (title.key ?? '').trim();
+    const label = (title.label ?? '').trim();
+    if (!key || !label) throw new BadRequestException('A duty title needs a key and a label.');
+    const holders = [...new Set(title.holders ?? [])];
+    if (holders.some((h) => !Types.ObjectId.isValid(h)) || (await this.userModel.countDocuments({ _id: { $in: holders } }).exec()) !== holders.length) {
+      throw new BadRequestException('Every holder must be an existing user.');
+    }
+    await this.titleModel.updateOne({ key }, { $set: { label, holders: holders.map((h) => new Types.ObjectId(h)) } }, { upsert: true }).exec();
+    return { key, label, holders };
+  }
+
+  async ladders(): Promise<LadderView[]> {
+    const list = await this.ladderModel.find().sort({ key: 1 }).lean().exec();
+    return list.map((l) => ({ key: l.key, label: l.label, steps: l.steps.map((s) => ({ title: s.title, waitMinutes: s.waitMinutes })) }));
+  }
+
+  async saveLadder(actor: Actor, ladder: { key: string; label: string; steps: LadderStep[] }): Promise<LadderView> {
+    this.requireAdmin(actor);
+    const key = (ladder.key ?? '').trim();
+    const label = (ladder.label ?? '').trim();
+    const steps = ladder.steps ?? [];
+    if (!key || !label) throw new BadRequestException('A ladder needs a key and a label.');
+    if (!steps.length) throw new BadRequestException('A ladder needs at least one step.');
+    const known = new Set((await this.titleModel.find().select('key').lean().exec()).map((t) => t.key));
+    steps.forEach((s, i) => {
+      if (!known.has(s.title)) throw new BadRequestException(`Step ${i + 1} names an unknown duty title "${s.title}".`);
+      if (i < steps.length - 1 && !(Number(s.waitMinutes) >= 1)) throw new BadRequestException(`Step ${i + 1} must wait at least 1 minute.`);
+    });
+    const clean = steps.map((s, i) => ({ title: s.title, waitMinutes: i < steps.length - 1 ? Number(s.waitMinutes) : Math.max(0, Number(s.waitMinutes) || 0) }));
+    await this.ladderModel.updateOne({ key }, { $set: { label, steps: clean } }, { upsert: true }).exec();
+    return { key, label, steps: clean };
+  }
+}

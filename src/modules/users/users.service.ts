@@ -1,7 +1,7 @@
 import { Injectable, ConflictException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { User, UserDocument } from './schemas/user.schema';
+import { User, UserDocument, UserRole } from './schemas/user.schema';
 
 @Injectable()
 export class UsersService {
@@ -51,6 +51,12 @@ export class UsersService {
   /** Invalidates every access token issued to the user so far. */
   async bumpTokenVersion(id: string): Promise<void> {
     await this.userModel.updateOne({ _id: id }, { $inc: { tokenVersion: 1 } }).exec();
+  }
+
+  /** Everyone who can be named on a duty title: no password or token fields. */
+  async listStaff(): Promise<{ id: string; name: string; email: string; role: UserRole }[]> {
+    const users = await this.userModel.find().select('name email role').sort({ name: 1 }).lean().exec();
+    return users.map((u) => ({ id: String(u._id), name: u.name, email: u.email, role: u.role }));
   }
 
   async count(): Promise<number> {

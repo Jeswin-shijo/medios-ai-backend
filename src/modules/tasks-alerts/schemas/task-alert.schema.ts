@@ -55,6 +55,20 @@ export class TaskAlertItem {
   /** What the alert points at, e.g. `bed-request:<id>`. */
   @Prop()
   link?: string;
+
+  /** Set on an escalation's alert: it is completed by Acknowledge, not by the toggle. */
+  @Prop({
+    type: {
+      id: String,
+      ladder: String,
+      step: Number,
+      titleKey: String,
+      titleLabel: String,
+      holderNames: { type: [String], default: [] },
+    },
+    _id: false,
+  })
+  escalation?: { id: string; ladder: string; step: number; titleKey: string; titleLabel: string; holderNames: string[] };
 }
 
 export const TaskAlertItemSchema = SchemaFactory.createForClass(TaskAlertItem);

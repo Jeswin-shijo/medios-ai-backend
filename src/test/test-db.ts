@@ -12,6 +12,10 @@ import { Case, CaseDocument, CaseSchema } from '../modules/coordinator/schemas/c
 import { CoordinatorCounter, CoordinatorCounterDocument, CoordinatorCounterSchema } from '../modules/coordinator/schemas/coordinator-counter.schema';
 import { TimelineEvent, TimelineEventDocument, TimelineEventSchema } from '../modules/timeline/schemas/timeline.schema';
 import { HospitalSettings, HospitalSettingsDocument, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
+import { DutyTitle, DutyTitleDocument, DutyTitleSchema } from '../modules/coordinator/schemas/duty-title.schema';
+import { Ladder, LadderDocument, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
+import { Escalation, EscalationDocument, EscalationSchema } from '../modules/coordinator/schemas/escalation.schema';
+import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -48,6 +52,10 @@ export function models() {
     Case: model(Case, CaseSchema) as Model<CaseDocument>,
     CoordinatorCounter: model(CoordinatorCounter, CoordinatorCounterSchema) as Model<CoordinatorCounterDocument>,
     TimelineEvent: model(TimelineEvent, TimelineEventSchema) as Model<TimelineEventDocument>,
+    DutyTitle: model(DutyTitle, DutyTitleSchema) as Model<DutyTitleDocument>,
+    Ladder: model(Ladder, LadderSchema) as Model<LadderDocument>,
+    Escalation: model(Escalation, EscalationSchema) as Model<EscalationDocument>,
+    User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };
 }
