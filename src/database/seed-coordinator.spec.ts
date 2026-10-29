@@ -241,8 +241,11 @@ describe('seedCoordinator', () => {
       const esc = (await m.Escalation.find().lean().exec())[0];
       assert.ok(Math.abs(esc.stepAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000, 'stepAt 5 min before now');
       assert.ok(Math.abs(esc.raisedAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000);
-      const alert = (await m.TaskAlertItem.findById(esc.alert).lean().exec())!;
-      assert.ok(Math.abs((alert as any).createdAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000);
+      // The alert is stored as new (not back-dated), so Tasks & Alerts never buries it on the last page.
+      const alert: any = (await m.TaskAlertItem.findById(esc.alert).lean().exec())!;
+      const others: any[] = await m.TaskAlertItem.find({ _id: { $ne: alert._id } }).lean().exec();
+      assert.ok(others.length > 0);
+      assert.ok(others.every((o) => o.createdAt.getTime() <= alert.createdAt.getTime()), 'the escalation alert is the newest task');
       const waitMsg = (await m.AgentMessage.find({ type: 'bed.waiting', case: esc.case }).lean().exec())[0];
       assert.ok(Math.abs(waitMsg.createdAt.getTime() - (fake.getTime() - 65 * MINUTE)) < 5000, 'bed.waiting about 65 min before now');
       const midnight = new Date(fake);

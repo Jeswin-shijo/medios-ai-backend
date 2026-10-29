@@ -63,7 +63,10 @@ describe('MessagesService', () => {
     });
     registry.register({
       key: 'lab',
-      messageTypes: [{ type: 'lab.pong', agent: 'lab', description: 'pong', payload: { n: 'number' } }],
+      messageTypes: [
+        { type: 'lab.pong', agent: 'lab', description: 'pong', payload: { n: 'number' } },
+        { type: 'lab.note', agent: 'lab', description: 'note', payload: { n: 'number' } },
+      ],
       handles: [
         {
           type: 'er.ping',
@@ -198,13 +201,54 @@ describe('MessagesService', () => {
     const c = new Types.ObjectId().toString();
     const a = await service.send(msg({ case: c, payload: { n: 1 } }));
     const b = await service.send(msg({ case: c, payload: { n: 2 } }));
-    await service.send(msg({ from: 'lab', to: ['er'], payload: { n: 3 } }));
+    await service.send(msg({ from: 'lab', to: ['er'], type: 'lab.note', payload: { n: 3 } }));
     const hi = await service.send(msg({ case: c, priority: 'high', payload: { n: 4 } }));
     assert.equal((await service.list({ case: c })).length, 3);
     assert.equal((await service.list({ agent: 'lab' })).length, 4);
     assert.deepEqual((await service.list({ case: c })).map((m) => m.id), [hi, b, a].map((m) => String(m!._id)));
     assert.deepEqual((await service.list({ case: c, before: String(b!._id) })).map((m) => m.id), [String(a!._id)]);
     assert.equal(await service.countSince(new Date(Date.now() - 60_000)), 4);
+  });
+
+  test("sort 'recent' lists the newest 50 in time order whatever their priority; the default stays emergency-first", async () => {
+    const priorities = ['low', 'medium', 'high', 'critical'] as const;
+    const t0 = Date.now() - 60 * 60_000;
+    // 60 messages, one a second, with mixed priorities and the critical ones among the oldest.
+    const docs = Array.from({ length: 60 }, (_, i) => ({
+      case: null, from: 'er', to: ['lab'], type: 'er.ping', priority: i < 5 ? 'critical' : priorities[i % 3], summary: `m${i}`, payload: { n: i },
+      hop: 0, dedupeKey: `k${i}`, state: 'delivered', attempts: 0, needsPerson: false, opensWork: false, createdAt: new Date(t0 + i * 1000),
+    }));
+    await AgentMessage.collection.insertMany(docs);
+
+    const recent = await service.list({ sort: 'recent' });
+    assert.equal(recent.length, 50);
+    assert.deepEqual(recent.map((m) => m.summary), Array.from({ length: 50 }, (_, k) => `m${59 - k}`));
+    // Paging back from the last one gives the 10 before it, still newest first.
+    const older = await service.list({ sort: 'recent', before: recent[49].id });
+    assert.deepEqual(older.map((m) => m.summary), Array.from({ length: 10 }, (_, k) => `m${9 - k}`));
+
+    const byPriority = await service.list({});
+    assert.deepEqual(byPriority.slice(0, 5).map((m) => m.summary), ['m4', 'm3', 'm2', 'm1', 'm0']);
+    const ranks = byPriority.map((m) => ['critical', 'high', 'medium', 'low'].indexOf(m.priority));
+    assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b));
+  });
+
+  test('send trims a long summary to 140 characters with an ellipsis', async () => {
+    const m = await service.send(msg({ summary: 'x'.repeat(200) }));
+    assert.equal(m!.summary.length, 140);
+    assert.ok(m!.summary.endsWith('…'));
+    const short = await service.send(msg({ summary: 'y'.repeat(140), payload: { n: 2 } }));
+    assert.equal(short!.summary, 'y'.repeat(140));
+  });
+
+  test('send refuses a sender that does not own the type, an unknown recipient or priority', async () => {
+    await assert.rejects(service.send(msg({ from: 'lab' })), BadRequestException);
+    await assert.rejects(service.send(msg({ from: 'coordinator' })), BadRequestException);
+    await assert.rejects(service.send(msg({ to: ['lab', 'nobody' as never] })), BadRequestException);
+    await assert.rejects(service.send(msg({ priority: 'urgent' as never })), BadRequestException);
+    assert.equal(await AgentMessage.countDocuments(), 0);
+    // An agent that is not built yet is still a known recipient.
+    assert.ok(await service.send(msg({ to: ['pharmacy'] })));
   });
 
   test('redeliverPending delivers a pending message exactly once after a restart', async () => {

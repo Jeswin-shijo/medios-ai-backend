@@ -114,7 +114,11 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  /** With an admission: it is discharged. Without: every bed request on the case is closed. No refs at all: not done. */
+  /**
+   * With an admission: it is discharged. Without: every bed request on the case was cancelled and
+   * the patient has no active admission (an assigned request, or a staff placement that beat it,
+   * means the admission ref is on its way). No refs at all: not done.
+   */
   private async closeCheck(caseId: string): Promise<boolean> {
     const c = await this.cases.get(caseId);
     if (!c) return false;
@@ -124,7 +128,9 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
       return admission?.status === 'discharged';
     }
     if (!bedRequestIds?.length) return false;
-    return (await this.requestModel.countDocuments({ _id: { $in: bedRequestIds }, open: true }).exec()) === 0;
+    const notCancelled = await this.requestModel.countDocuments({ _id: { $in: bedRequestIds }, state: { $ne: 'cancelled' } }).exec();
+    if (notCancelled > 0) return false;
+    return !(await this.admissions.exists({ patient: c.patient, status: 'active' }).exec());
   }
 
   private async status() {
@@ -187,7 +193,12 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
         await this.approvals.markDone(source, 'Bed Agent');
         break;
       }
+      case 'searching':
+        // Back with the agent: a person no longer needs to decide.
+        await this.approvals.markDone(source, 'Bed Agent');
+        break;
       case 'waiting': {
+        await this.approvals.markDone(source, 'Bed Agent');
         // Each retry pass re-announces the wait; log it once per wait.
         const last = await this.messages.findLatest('bed.', { requestId: r.id });
         if (last?.type === 'bed.waiting') break;
@@ -246,11 +257,28 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** Puts the admission on the patient's open case (joining it, or opening one if none is open). Sends nothing. */
+  private async refAdmission(
+    requestId: string,
+    patient: { patientId: string; patientUhid: string; patientName: string },
+    admissionId: string,
+  ): Promise<void> {
+    const r = await this.requests.get(requestId).catch(() => null);
+    const { case: joined } = await this.cases.openOrJoin({ ...patient, kind: 'ipd', priority: r?.priority ?? 'medium', openedBy: 'bed' });
+    await this.cases.addRefs(String(joined._id), { admissionId });
+  }
+
   private async onBedChange(c: BedChange): Promise<void> {
     switch (c.kind) {
       case 'admitted': {
-        // The agent's own placements, and staff placements that answer a request, are reported by the request's events.
-        if (!c.byStaff || c.requestId || !c.patientId || !c.patientUhid || !c.patientName || !c.admissionId) return;
+        // The agent's own placements are reported by the request's events.
+        if (!c.byStaff || !c.patientId || !c.patientUhid || !c.patientName || !c.admissionId) return;
+        if (c.requestId) {
+          // A staff placement that answers a request: the request's events send the message, but the
+          // case needs the admission now, before the agent can cancel the request as moot.
+          await this.refAdmission(c.requestId, { patientId: c.patientId, patientUhid: c.patientUhid, patientName: c.patientName }, c.admissionId);
+          return;
+        }
         const { case: opened } = await this.cases.openOrJoin({
           patientId: c.patientId,
           patientUhid: c.patientUhid,

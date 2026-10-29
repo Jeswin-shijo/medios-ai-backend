@@ -1,11 +1,12 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from './agent-registry';
 import { ApprovalsService } from './approvals.service';
-import { CoordinatorEvents } from './coordinator-events';
+import { CoordinatorEvent, CoordinatorEvents } from './coordinator-events';
 import { MessagesService } from './messages.service';
 
 const status = async () => ({ open: 0, capacity: 0, onTimePct: null });
@@ -17,6 +18,7 @@ describe('ApprovalsService', () => {
   let service: ApprovalsService;
   let decisions: string[];
   let failDecision: boolean;
+  let seen: CoordinatorEvent[];
 
   before(async () => {
     await connectTestDb();
@@ -49,7 +51,10 @@ describe('ApprovalsService', () => {
       status,
     });
     const messages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
-    service = new ApprovalsService(Approval, DutyTitle, registry, messages);
+    const events = new CoordinatorEvents();
+    seen = [];
+    events.events$.subscribe((e) => seen.push(e));
+    service = new ApprovalsService(Approval, DutyTitle, registry, messages, events);
   });
 
   const sent = (type: string) => AgentMessage.find({ type }).lean();
@@ -142,6 +147,19 @@ describe('ApprovalsService', () => {
     const list = await service.list({ state: 'done' });
     assert.equal(list.length, 1);
     assert.equal(typeof list[0].id, 'string');
+  });
+
+  test('reassign and markDone tell open screens with an approval event; a no-op markDone does not', async () => {
+    const caseId = String(new Types.ObjectId());
+    const a = await service.request({ type: 'bed.screen', case: caseId, summary: 's', source: { kind: 'bed-request', id: 'r7' } });
+    const id = String(a._id);
+    await service.reassign(actor('Asha', UserRole.ADMIN), id, { kind: 'role', key: 'doctor' }, 'over to you');
+    await service.markDone({ kind: 'bed-request', id: 'r7' }, 'Bed Agent');
+    await service.markDone({ kind: 'bed-request', id: 'r7' }, 'Bed Agent');
+    assert.deepEqual(seen, [
+      { kind: 'approval', id, caseId },
+      { kind: 'approval', id, caseId },
+    ]);
   });
 
   test('an approval whose type is no longer registered cannot be decided', async () => {

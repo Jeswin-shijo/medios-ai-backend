@@ -3,7 +3,7 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { CoordinatorEvents } from './coordinator-events';
-import { AgentKey, AgentMessageInput, Priority, validatePayload } from './coordinator-types';
+import { AGENTS, AgentKey, AgentMessageInput, PRIORITIES, Priority, validatePayload } from './coordinator-types';
 import { AgentRegistry } from './agent-registry';
 import { AgentMessage, MessageDocument } from './schemas/agent-message.schema';
 
@@ -12,6 +12,9 @@ export const HOP_LIMIT = 10;
 export const DUPLICATE_WINDOW_MS = 60_000;
 export const LOCK_MS = 60_000;
 export const REDELIVER_AFTER_MS = 10_000;
+export const SUMMARY_MAX = 140;
+
+const AGENT_KEYS = new Set<string>(AGENTS.map((a) => a.key));
 
 export type MessageProblem = { kind: 'failed' | 'loop'; type: string; case: string | null; reason: string };
 type StoredListener = (m: MessageDocument) => Promise<void>;
@@ -45,10 +48,15 @@ export interface MessageQuery {
   openWork?: boolean;
   limit?: number;
   before?: string;
+  /** `priority` (the default): emergency first, for the work queue. `recent`: newest first, for the log. */
+  sort?: 'priority' | 'recent';
 }
 
 const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
 const idOrNull = (v: unknown) => (v ? String(v) : null);
+
+/** A summary longer than the envelope allows ends in an ellipsis. */
+const clip = (text: string) => (text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text);
 
 function toView(m: any): MessageView {
   return {
@@ -107,6 +115,10 @@ export class MessagesService {
   async send(input: AgentMessageInput): Promise<MessageDocument | null> {
     const def = this.registry.messageType(input.type);
     if (!def) throw new BadRequestException(`Unknown message type "${input.type}"`);
+    if (input.from !== def.agent) throw new BadRequestException(`"${input.type}" is sent by the ${def.agent} agent, not "${input.from}"`);
+    const unknown = (input.to ?? []).filter((k) => !AGENT_KEYS.has(k));
+    if (unknown.length) throw new BadRequestException(`Unknown agent ${unknown.map((k) => `"${k}"`).join(', ')} in "to"`);
+    if (!(PRIORITIES as readonly string[]).includes(input.priority)) throw new BadRequestException(`Unknown priority "${input.priority}"`);
     const errors = validatePayload(def, input.payload);
     if (errors.length) throw new BadRequestException(errors.join('; '));
 
@@ -141,7 +153,7 @@ export class MessagesService {
       to: input.to,
       type: input.type,
       priority: input.priority,
-      summary: input.summary,
+      summary: clip(input.summary ?? ''),
       payload: input.payload ?? {},
       dueBy: input.dueBy ?? null,
       needsPerson: input.needsPerson ?? false,
@@ -211,11 +223,13 @@ export class MessagesService {
         await this.model.updateOne({ _id: id }, { $set: { attempts } }).exec();
       }
       await this.model.updateOne({ _id: id }, { $set: { state: 'failed' }, $unset: { lockedUntil: 1 } }).exec();
+      // The handler's own error stays in the server log: staff see only the type and the tries.
+      this.logger.error(`Message ${id} (${claimed.type}) not delivered after ${DELIVERY_TRIES} tries: ${lastError}`);
       await this.report({
         kind: 'failed',
         type: claimed.type,
         case: idOrNull(claimed.case),
-        reason: `Not delivered after ${DELIVERY_TRIES} tries (${lastError})`,
+        reason: `${claimed.type} not delivered after ${DELIVERY_TRIES} tries`,
       });
       return false;
     } finally {
@@ -262,6 +276,12 @@ export class MessagesService {
       if (!at) throw new BadRequestException('"before" must be a message id or an ISO time');
       match.createdAt = { $lt: at };
     }
+    const limit = Math.min(Math.max(q.limit ?? 50, 1), 500);
+    if (q.sort === 'recent') {
+      // The log: newest first, so `before` pages back through time.
+      const rows = await this.model.find(match).sort({ createdAt: -1, _id: -1 }).limit(limit).lean().exec();
+      return rows.map(toView);
+    }
     const rows = await this.model
       .aggregate([
         { $match: match },
@@ -280,7 +300,7 @@ export class MessagesService {
           },
         },
         { $sort: { rank: 1, createdAt: -1, _id: -1 } },
-        { $limit: Math.min(Math.max(q.limit ?? 50, 1), 500) },
+        { $limit: limit },
       ])
       .exec();
     return rows.map(toView);

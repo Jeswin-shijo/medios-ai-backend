@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 import type { Actor } from '../beds/actor';
 import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from './agent-registry';
+import { CoordinatorEvents } from './coordinator-events';
 import { MessagesService } from './messages.service';
 import { Approval, ApprovalDocument } from './schemas/approval.schema';
 import { DutyTitle, DutyTitleDocument } from './schemas/duty-title.schema';
@@ -52,7 +53,12 @@ export class ApprovalsService {
     @InjectModel(DutyTitle.name) private readonly titleModel: Model<DutyTitleDocument>,
     private readonly registry: AgentRegistry,
     private readonly messages: MessagesService,
+    private readonly events: CoordinatorEvents,
   ) {}
+
+  private emit(a: ApprovalDocument): void {
+    this.events.emit({ kind: 'approval', id: String(a._id), ...(a.case ? { caseId: String(a.case) } : {}) });
+  }
 
   async request(input: { type: string; case?: string | null; summary: string; source?: { kind: string; id: string } }): Promise<ApprovalDocument> {
     const def = this.registry.approvalType(input.type);
@@ -162,18 +168,21 @@ export class ApprovalsService {
       )
       .exec();
     if (!updated) throw new ConflictException(ALREADY);
+    this.emit(updated);
     return view(updated);
   }
 
   /** The owning agent decided on its own screen: close the open approval for that source. */
   async markDone(source: { kind: string; id: string }, byName: string): Promise<ApprovalDocument | null> {
-    return this.model
+    const done = await this.model
       .findOneAndUpdate(
         { 'source.kind': source.kind, 'source.id': source.id, state: 'open' },
         { $set: { state: 'done', decidedByName: byName, decidedAt: new Date() } },
         { new: true },
       )
       .exec();
+    if (done) this.emit(done);
+    return done;
   }
 
   async list(q: { state?: string; limit?: number } = {}): Promise<ApprovalView[]> {

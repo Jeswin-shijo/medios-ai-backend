@@ -31,8 +31,10 @@ export class TasksAlertsService {
     return task;
   }
 
+  /** A task or alert from staff. `escalation` and `link` are set only by the server, so they are dropped here. */
   async create(data: Partial<TaskAlertItem>): Promise<TaskAlertDocument> {
-    const created = new this.taskModel(data);
+    const { escalation: _escalation, link: _link, ...rest } = (data ?? {}) as Partial<TaskAlertItem>;
+    const created = new this.taskModel(rest);
     return created.save();
   }
 

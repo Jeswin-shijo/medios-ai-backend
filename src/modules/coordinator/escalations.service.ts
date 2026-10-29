@@ -1,9 +1,10 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import type { Actor } from '../beds/actor';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
+import { CoordinatorEvents } from './coordinator-events';
 import { MessagesService } from './messages.service';
 import { DutyTitle, DutyTitleDocument } from './schemas/duty-title.schema';
 import { Escalation, EscalationDocument } from './schemas/escalation.schema';
@@ -49,6 +50,8 @@ const NO_HOLDERS = 'Admins (no one holds this title yet)';
 /** Duty titles, ladders and the escalations that walk them. Uses real time, not the clinic clock. */
 @Injectable()
 export class EscalationsService {
+  private readonly logger = new Logger(EscalationsService.name);
+
   constructor(
     @InjectModel(Escalation.name) private readonly model: Model<EscalationDocument>,
     @InjectModel(DutyTitle.name) private readonly titleModel: Model<DutyTitleDocument>,
@@ -56,11 +59,13 @@ export class EscalationsService {
     @InjectModel(TaskAlertItem.name) private readonly alertModel: Model<TaskAlertDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly messages: MessagesService,
+    private readonly events: CoordinatorEvents,
   ) {
     this.messages.onProblem(async (p) => {
       await this.raise({
         ladder: 'default',
         case: p.case,
+        // p.reason never carries a handler's own error text: that stays in the server log.
         reason: `${p.kind === 'failed' ? 'Agent error' : 'Agent loop'}: ${p.reason}`,
         source: { kind: p.kind },
       });
@@ -168,23 +173,36 @@ export class EscalationsService {
     return e;
   }
 
-  /** Moves open escalations whose wait has passed to the next step. Returns how many moved. */
+  /** Moves open escalations whose wait has passed to the next step. Returns how many moved. One failure never stops the rest. */
   async advanceDue(now: Date): Promise<number> {
     const open = await this.model.find({ state: 'open' }).exec();
     let moved = 0;
     for (const e of open) {
-      const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
-      if (!ladder || e.step >= ladder.steps.length - 1) continue;
-      const wait = Math.max(0, ladder.steps[e.step].waitMinutes) * MINUTE_MS;
-      if (new Date(e.stepAt).getTime() + wait > now.getTime()) continue;
-      const next = e.step + 1;
-      // The step in the filter stops two passes from moving the same escalation twice.
-      const updated = await this.model.findOneAndUpdate({ _id: e._id, state: 'open', step: e.step }, { $set: { step: next, stepAt: now } }, { new: true }).exec();
-      if (!updated) continue;
-      await this.writeAlert(updated, ladder.steps[next].title, false);
-      moved += 1;
+      try {
+        if (await this.advanceOne(e, now)) moved += 1;
+      } catch (err) {
+        this.logger.error(`Moving escalation ${String(e._id)} up its ladder failed: ${(err as Error).message}`);
+      }
     }
     return moved;
+  }
+
+  private async advanceOne(e: EscalationDocument, now: Date): Promise<boolean> {
+    const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
+    if (!ladder || e.step >= ladder.steps.length - 1) return false;
+    const wait = Math.max(0, ladder.steps[e.step].waitMinutes) * MINUTE_MS;
+    if (new Date(e.stepAt).getTime() + wait > now.getTime()) return false;
+    const next = e.step + 1;
+    // The step in the filter stops two passes from moving the same escalation twice.
+    const updated = await this.model.findOneAndUpdate({ _id: e._id, state: 'open', step: e.step }, { $set: { step: next, stepAt: now } }, { new: true }).exec();
+    if (!updated) return false;
+    await this.writeAlert(updated, ladder.steps[next].title, false);
+    this.emit(updated);
+    return true;
+  }
+
+  private emit(e: EscalationDocument): void {
+    this.events.emit({ kind: 'escalation', id: String(e._id), ...(e.case ? { caseId: String(e.case) } : {}) });
   }
 
   async acknowledge(actor: Actor, id: string): Promise<void> {
@@ -208,6 +226,7 @@ export class EscalationsService {
       .exec();
     if (!done) throw new ConflictException('Already acknowledged.');
     await this.alertModel.updateOne({ _id: e.alert }, { $set: { status: 'Completed' } }).exec();
+    this.emit(done);
   }
 
   async titles(): Promise<DutyTitleView[]> {

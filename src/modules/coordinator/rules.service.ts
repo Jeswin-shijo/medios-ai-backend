@@ -3,6 +3,7 @@ import type { Actor } from '../beds/actor';
 import { SettingsService } from '../settings/settings.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from './agent-registry';
+import { CoordinatorEvents } from './coordinator-events';
 import { AgentKey, COMING_RULES, RuleDef } from './coordinator-types';
 
 export interface RuleView {
@@ -23,6 +24,7 @@ export class RulesService {
   constructor(
     private readonly registry: AgentRegistry,
     private readonly settings: SettingsService,
+    private readonly events: CoordinatorEvents,
   ) {}
 
   private valueOf(def: RuleDef, settings: any): boolean {
@@ -64,6 +66,7 @@ export class RulesService {
       // updateSettings merges one level deep, so the whole rules object goes back.
       await this.settings.updateSettings({ coordinator: { rules: { ...stored, [key]: on } } } as any, actor);
     }
+    this.events.emit({ kind: 'rule', id: key });
     return this.viewOf(def, await this.settings.getSettings());
   }
 

@@ -38,7 +38,7 @@ describe('ClocksService', () => {
       status,
     });
     messages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
-    escalations = new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages);
+    escalations = new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages, new CoordinatorEvents());
     await escalations.ensureDefaults();
     service = new ClocksService(Clock, registry, messages, escalations);
   });
@@ -128,7 +128,7 @@ describe('ClocksService', () => {
     });
     // The new process starts with nothing in memory.
     const freshMessages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
-    const fresh = new ClocksService(Clock, registry, freshMessages, new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, freshMessages));
+    const fresh = new ClocksService(Clock, registry, freshMessages, new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, freshMessages, new CoordinatorEvents()));
     assert.equal(await fresh.checkDue(new Date()), 1);
     assert.equal(await fresh.checkDue(new Date()), 0);
     assert.equal((await messages.list({ type: 'clock.expired' })).length, 1);

@@ -138,10 +138,10 @@ describe('BedCoordinatorBridge', () => {
     const registry = new AgentRegistry();
     messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, TaskAlertItem, m.User, messages);
+    escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, TaskAlertItem, m.User, messages, new CoordinatorEvents());
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
-    approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages);
+    approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, new CoordinatorEvents());
     bridge = new BedCoordinatorBridge(events, requests, registry, messages, cases, approvals, Admission, BedRequest);
     bridge.onModuleInit();
   });
@@ -355,6 +355,110 @@ describe('BedCoordinatorBridge', () => {
     const [discharged] = await all('bed.discharged');
     assert.equal(String(discharged.case), String(c2._id));
     await noNames();
+  });
+
+  test('a close check between assignment and the bridge catching up keeps the case open', async () => {
+    const p = await patient();
+    const id = await ask({ patientId: p.id });
+    await bridge.idle();
+    // Hold the bridge back: the request is assigned, but the bridge has not written the admission yet.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    (bridge as any).queue = (bridge as any).queue.then(() => gate);
+    await agent.process(id);
+    const req: any = await BedRequest.findById(id).lean();
+    assert.equal(req.state, 'assigned');
+    assert.equal(await cases.evaluateOpenCases(), 0);
+    assert.equal(((await m.Case.findOne().lean()) as any).state, 'open');
+
+    release();
+    await bridge.idle();
+    assert.equal(await m.Case.countDocuments(), 1);
+    const c: any = await m.Case.findOne().lean();
+    assert.equal(c.state, 'open');
+    assert.equal(c.refs.admissionId, String(req.admission));
+    assert.equal(await cases.evaluateOpenCases(), 0);
+  });
+
+  test('a hand placement for a waiting request keeps one case, even when the agent cancels the request first', async () => {
+    const p = await patient();
+    await fillGeneralMen();
+    const id = await ask({ patientId: p.id });
+    await agent.process(id);
+    await bridge.idle();
+    assert.equal(((await BedRequest.findById(id).lean()) as any).state, 'waiting');
+
+    // Staff free a bed and place the patient there for this request...
+    const target = bed('GWA-4');
+    await Bed.updateOne({ _id: target }, { state: 'free', $unset: { occupantGender: 1 } }).exec();
+    const suggestionId = String(new Types.ObjectId());
+    await beds.hold(target, DOCTOR, suggestionId, 'Male');
+    const admission = await beds.admit(target, DOCTOR, {
+      patientId: p.id,
+      suggestionId,
+      doctor: 'Dr. Shajin',
+      department: 'General Medicine',
+      roomClass: 'general',
+      needs: [],
+      notes: '',
+      expectedStayDays: 3,
+      requestId: id,
+    });
+    // ...but a retry pass sees the admission first and closes the request as moot.
+    await agent.process(id);
+    assert.equal(((await BedRequest.findById(id).lean()) as any).state, 'cancelled');
+    await agent.completeByHand(id, {
+      bedId: target,
+      bedLabel: 'GWA-4',
+      wardName: 'General Ward A',
+      admissionId: String(admission._id),
+      actor: DOCTOR,
+      suggestionId,
+    });
+    await bridge.idle();
+    assert.equal(await cases.evaluateOpenCases(), 0);
+
+    assert.equal(await m.Case.countDocuments(), 1);
+    const c: any = await m.Case.findOne().lean();
+    assert.equal(c.state, 'open');
+    assert.equal(c.refs.admissionId, String(admission._id));
+
+    // The discharge lands on the same case and closes it.
+    await beds.discharge(target, DOCTOR, String(admission._id));
+    await bridge.idle();
+    assert.equal(await m.Case.countDocuments(), 1);
+    const closed: any = await m.Case.findOne().lean();
+    assert.equal(closed.state, 'closed');
+    const [discharged] = await all('bed.discharged');
+    assert.equal(String(discharged.case), String(c._id));
+    await noNames();
+  });
+
+  test('a bed.attention approval closes when the request goes back to searching or waiting; a later attention opens a new one', async () => {
+    const p = await patient();
+    const id = await ask({ patientId: p.id, notes: 'Suspected TB, cough for weeks' });
+    await agent.process(id);
+    await bridge.idle();
+    const again = (state: 'searching' | 'waiting' | 'attention') =>
+      events.requestChanged({ id, state, type: 'admission', patientName: '', reason: '' });
+    const open = () => m.Approval.find({ 'source.id': id, state: 'open' }).lean().exec() as Promise<any[]>;
+
+    const [first] = await open();
+    assert.ok(first);
+    again('searching');
+    await bridge.idle();
+    assert.equal((await open()).length, 0);
+    assert.equal(((await m.Approval.findById(first._id).lean()) as any).state, 'done');
+
+    again('attention');
+    await bridge.idle();
+    const [second] = await open();
+    assert.ok(second);
+    assert.notEqual(String(second._id), String(first._id));
+    again('waiting');
+    await bridge.idle();
+    assert.equal((await open()).length, 0);
+    assert.equal(await m.Approval.countDocuments({ 'source.id': id }), 2);
   });
 
   test('a cleaned bed is logged with no case', async () => {

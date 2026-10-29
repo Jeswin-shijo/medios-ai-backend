@@ -25,7 +25,8 @@ export const AGENTS: { key: AgentKey; name: string; job: string }[] = [
   { key: 'patient-support', name: 'Patient Support', job: 'Talks to the patient and family: calls, messages, updates, reminders, check-up calls after going home' },
 ];
 
-export type Priority = 'critical' | 'high' | 'medium' | 'low';
+export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+export type Priority = (typeof PRIORITIES)[number];
 
 export const PRIORITY_RANK: Record<Priority, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 

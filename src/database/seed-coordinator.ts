@@ -383,7 +383,6 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
     status: 'Pending',
     link: `escalation:${escalationId}`,
     escalation: { id: String(escalationId), ladder: 'bed-wait', step: 0, titleKey: dutyAdmin.key, titleLabel: dutyAdmin.label, holderNames: [admin.name] },
-    createdAt: expiredAt,
   });
   await escalations.create({
     _id: escalationId,

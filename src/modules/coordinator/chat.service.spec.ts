@@ -60,11 +60,11 @@ describe('ChatService', () => {
     });
     const events = new CoordinatorEvents();
     messages = new MessagesService(AgentMessage, registry, events);
-    const escalations = new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages);
+    const escalations = new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages, new CoordinatorEvents());
     await escalations.ensureDefaults();
     clocks = new ClocksService(Clock, registry, messages, escalations);
     cases = new CasesService(Case, CoordinatorCounter, messages, registry, new TimelineService(TimelineEvent));
-    const approvals = new ApprovalsService(Approval, DutyTitle, registry, messages);
+    const approvals = new ApprovalsService(Approval, DutyTitle, registry, messages, new CoordinatorEvents());
     const patients = new PatientsService(Patient);
     ai = fakeAi();
     service = new ChatService(ChatLog, Escalation, cases, clocks, approvals, new AgentStatusService(registry, events), patients, ai as unknown as AiService, registry);

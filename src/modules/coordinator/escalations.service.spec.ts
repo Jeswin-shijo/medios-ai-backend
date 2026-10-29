@@ -5,7 +5,7 @@ import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test
 import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from './agent-registry';
-import { CoordinatorEvents } from './coordinator-events';
+import { CoordinatorEvent, CoordinatorEvents } from './coordinator-events';
 import { EscalationsService } from './escalations.service';
 import { MessagesService } from './messages.service';
 
@@ -21,6 +21,8 @@ describe('EscalationsService', () => {
   let dutyAdmin: { id: string; name: string; role: UserRole };
   let superintendent: { id: string; name: string; role: UserRole };
   let nurse: { id: string; name: string; role: UserRole };
+  let events: CoordinatorEvents;
+  let seen: CoordinatorEvent[];
 
   before(async () => {
     await connectTestDb();
@@ -29,7 +31,7 @@ describe('EscalationsService', () => {
     await closeTestDb();
   });
 
-  const makeService = () => new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages);
+  const makeService = () => new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages, events);
   const makeUser = async (name: string, role: UserRole, extra: object = {}) => {
     const u = await User.create({ email: `${name.replace(/\s/g, '').toLowerCase()}@x.test`, passwordHash: 'x', name, role, ...extra });
     return { id: String(u._id), name, role };
@@ -41,6 +43,9 @@ describe('EscalationsService', () => {
     await resetTestDb();
     registry = new AgentRegistry();
     messages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
+    events = new CoordinatorEvents();
+    seen = [];
+    events.events$.subscribe((e) => seen.push(e));
     service = makeService();
     await service.ensureDefaults();
     admin = await makeUser('Asha Admin', UserRole.ADMIN);
@@ -157,6 +162,24 @@ describe('EscalationsService', () => {
     assert.equal((await TaskAlertItem.findById(e.alert).lean())!.status, 'Pending');
   });
 
+  test('a task created through the API cannot carry an escalation or a link', async () => {
+    const e = await raise();
+    const tasks = new TasksAlertsService(TaskAlertItem);
+    const forged = await tasks.create({
+      title: 'Forged',
+      type: 'System',
+      category: 'Critical',
+      escalation: { id: String(e._id), ladder: 'default', step: 0, titleKey: 'x', titleLabel: 'x', holderNames: [] },
+      link: `bed-request:${new Types.ObjectId()}`,
+    } as any);
+    const stored: any = await TaskAlertItem.findById(forged._id).lean();
+    assert.equal(stored.title, 'Forged');
+    assert.equal(stored.escalation, undefined);
+    assert.equal(stored.link, undefined);
+    // So the toggle works on it as on any task.
+    assert.equal((await tasks.toggleStatus(String(forged._id))).status, 'Completed');
+  });
+
   test('a failed message and a loop each raise one default escalation', async () => {
     registry.register({
       key: 'er',
@@ -193,13 +216,49 @@ describe('EscalationsService', () => {
     assert.equal(list.length, 1);
     assert.equal(list[0].ladder, 'default');
     assert.equal(list[0].source.kind, 'failed');
-    assert.ok(list[0].reason.startsWith('Agent error: '));
+    // The handler's own error stays in the server log, out of everything staff see.
+    assert.equal(list[0].reason, 'Agent error: case.opened not delivered after 3 tries');
+    const failedAlert: any = await TaskAlertItem.findById(list[0].alert).lean();
+    assert.equal(failedAlert.title, 'Escalated to Duty administrator: Agent error: case.opened not delivered after 3 tries');
+    const raised = await messages.list({ type: 'escalation.raised' });
+    assert.ok(raised.every((m) => !m.summary.includes('er is down')));
 
     await messages.send({ from: 'er', to: ['lab'], type: 'er.bounce', priority: 'low', summary: 'b', payload: { n: 0 } });
     list = await Escalation.find().sort({ raisedAt: 1 }).lean();
     assert.equal(list.length, 2);
     assert.equal(list[1].source.kind, 'loop');
     assert.ok(list[1].reason.startsWith('Agent loop: '));
+  });
+
+  test('acknowledge and each step move tell open screens with an escalation event', async () => {
+    const caseId = String(new Types.ObjectId());
+    const e = await service.raise({ ladder: 'default', case: caseId, reason: 'Late', source: { kind: 'manual' } });
+    const id = String(e._id);
+    assert.equal(seen.length, 0);
+    await service.advanceDue(new Date(new Date(e.stepAt).getTime() + 15 * MIN));
+    assert.deepEqual(seen, [{ kind: 'escalation', id, caseId }]);
+    await assert.rejects(service.acknowledge(nurse, id), { status: 403 });
+    assert.equal(seen.length, 1);
+    await service.acknowledge(admin, id);
+    assert.deepEqual(seen[1], { kind: 'escalation', id, caseId });
+    const noCase = await raise('no case');
+    await service.acknowledge(admin, String(noCase._id));
+    assert.deepEqual(seen[2], { kind: 'escalation', id: String(noCase._id) });
+  });
+
+  test('one escalation that fails to move does not stop the others in the same pass', async () => {
+    await hold('medical-superintendent', superintendent.id);
+    const bad = await raise('first');
+    const good = await raise('second');
+    const writeAlert = (service as any).writeAlert.bind(service);
+    (service as any).writeAlert = async (e: any, titleKey: string, create: boolean) => {
+      if (String(e._id) === String(bad._id)) throw new Error('alert store down');
+      return writeAlert(e, titleKey, create);
+    };
+    assert.equal(await service.advanceDue(new Date(Date.now() + 20 * MIN)), 1);
+    assert.equal((await Escalation.findById(good._id).lean())!.step, 1);
+    const alert: any = await TaskAlertItem.findById(good.alert).lean();
+    assert.equal(alert.escalation.titleKey, 'medical-superintendent');
   });
 
   test('advanceDue after a restart continues from the stored step', async () => {

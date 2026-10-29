@@ -78,6 +78,11 @@ export class MessageQueryDto extends PagedQueryDto {
   @Transform(toBool)
   @IsBoolean()
   openWork?: boolean;
+
+  @ApiPropertyOptional({ enum: ['priority', 'recent'], default: 'priority', description: 'priority: emergency first (the queue); recent: newest first (the log)' })
+  @IsOptional()
+  @IsIn(['priority', 'recent'])
+  sort?: 'priority' | 'recent';
 }
 
 export class SnapshotRangeDto {

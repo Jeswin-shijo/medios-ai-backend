@@ -5,6 +5,7 @@ import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test
 import { SettingsService } from '../settings/settings.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { AgentRegistry } from './agent-registry';
+import { CoordinatorEvent, CoordinatorEvents } from './coordinator-events';
 import { RulesService } from './rules.service';
 
 const status = async () => ({ open: 0, capacity: 0, onTimePct: null });
@@ -15,6 +16,7 @@ describe('RulesService', () => {
   const { HospitalSettings } = models();
   let settings: SettingsService;
   let service: RulesService;
+  let seen: CoordinatorEvent[];
 
   before(async () => {
     await connectTestDb();
@@ -37,7 +39,10 @@ describe('RulesService', () => {
       ],
       status,
     });
-    service = new RulesService(registry, settings);
+    const events = new CoordinatorEvents();
+    seen = [];
+    events.events$.subscribe((e) => seen.push(e));
+    service = new RulesService(registry, settings, events);
   });
 
   test('rules list locked, switchable and coming-soon rules; locked rules refuse changes; a rule with a settingPath writes that setting (test with ai.bedAutoAllocate); non-admins are refused', async () => {
@@ -74,5 +79,14 @@ describe('RulesService', () => {
     assert.deepEqual((await settings.getSettings()).coordinator.rules, { 'test-a': true, 'test-b': false });
     assert.equal(await service.isOn('emergency-first'), true);
     assert.equal(await service.isOn('unknown'), false);
+  });
+
+  test('a rule change tells open screens with a rule event; a refused change does not', async () => {
+    await assert.rejects(() => service.set(doctor, 'test-a', true), ForbiddenException);
+    await assert.rejects(() => service.set(admin, 'emergency-first', false), ConflictException);
+    assert.equal(seen.length, 0);
+    await service.set(admin, 'test-a', true);
+    await service.set(admin, 'bed-auto-allocate', false);
+    assert.deepEqual(seen, [{ kind: 'rule', id: 'test-a' }, { kind: 'rule', id: 'bed-auto-allocate' }]);
   });
 });
