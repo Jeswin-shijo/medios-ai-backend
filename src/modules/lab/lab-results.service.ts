@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow, displayDate, displayDateTime, displayTime } from '../../common/utils/clinic-time';
@@ -7,7 +8,8 @@ import type { Priority as CasePriority } from '../coordinator/coordinator-types'
 import { MessagesService } from '../coordinator/messages.service';
 import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
-import { LabTestDef, effectiveLimits, flagValue, testByKey } from './lab-catalogue';
+import { LabAiService, templateSummary } from './lab-ai';
+import { LabTestDef, effectiveLimits, flagValue, rangeText, testByKey } from './lab-catalogue';
 import { LabOrdersService } from './lab-orders.service';
 import { LabSettingsService } from './lab-settings.service';
 import { LabLine, LabLineDocument, LabResultRow } from './schemas/lab-line.schema';
@@ -33,7 +35,10 @@ export class LabResultsService {
     private readonly orders: LabOrdersService,
     private readonly messages: MessagesService,
     private readonly labSettings: LabSettingsService,
+    private readonly labAi: LabAiService,
   ) {}
+
+  private readonly logger = new Logger(LabResultsService.name);
 
   // ---------- entering ----------
 
@@ -105,7 +110,16 @@ export class LabResultsService {
       .exec();
     if (!released) throw cannot();
 
-    await this.writeReport(released, request, def, version);
+    const reportId = await this.writeReport(released, request, def, version);
+    // The AI never delays or blocks a release: the template is already on the report, and a valid AI summary replaces it later.
+    void this.labAi
+      .summarise(String(released._id))
+      .then(async (summary) => {
+        const { sample, ...aiSummary } = summary;
+        const still = await this.lines.exists({ _id: released._id, version }).exec();
+        if (still) await this.reports.updateOne({ _id: reportId }, { $set: { aiSummary } }).exec();
+      })
+      .catch((e) => this.logger.warn(`Lab AI summary failed (${e instanceof Error ? e.name : typeof e}); the template stays`));
 
     const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).select('tatDueAt').lean<{ tatDueAt: Date }[]>().exec();
     const tatDueAt = open.length ? new Date(Math.min(...open.map((l) => l.tatDueAt.getTime()))) : line.tatDueAt;
@@ -221,19 +235,13 @@ export class LabResultsService {
     });
   }
 
-  private rangeOf(test: string, p: LabTestDef['params'][number]): string {
-    if (p.text) return test === 'blood-culture' ? 'No growth' : 'Negative';
-    if (p.low !== undefined && p.high !== undefined) return `${p.low}–${p.high}`;
-    return p.low !== undefined ? `≥ ${p.low}` : p.high !== undefined ? `≤ ${p.high}` : '';
-  }
-
   /** One LabTestReport per line: a later release or amendment updates it. */
-  private async writeReport(line: LabLineDocument, request: LabRequestDocument, def: LabTestDef, version: number): Promise<void> {
+  private async writeReport(line: LabLineDocument, request: LabRequestDocument, def: LabTestDef, version: number): Promise<Types.ObjectId> {
     const now = clinicNow();
     const parameters = line.results.map((r) => ({
       name: r.param,
       result: r.value,
-      referenceRange: this.rangeOf(def.key, def.params.find((p) => p.name === r.param)!),
+      referenceRange: rangeText(def.key, def.params.find((p) => p.name === r.param)!),
       unit: r.unit,
       status: STATUS_LABEL[r.flag],
       critical: r.critical,
@@ -248,12 +256,16 @@ export class LabResultsService {
       groups: [{ category: def.label, parameters }],
       labLine: String(line._id),
       amended: version > 1,
+      aiSummary: templateSummary(
+        line.results.map((r, i) => ({ name: r.param, value: r.value, unit: r.unit, referenceRange: parameters[i].referenceRange, flag: r.flag, critical: r.critical })),
+      ),
     };
     let report = line.reportId ? await this.reports.findByIdAndUpdate(line.reportId, { $set: fields }, { new: true }).exec() : null;
     if (!report) {
       report = await this.reports.create(fields);
       await this.lines.updateOne({ _id: line._id }, { $set: { reportId: report._id } }).exec();
     }
+    return report._id as Types.ObjectId;
   }
 
   /** The earlier critical was amended to normal but is still unacknowledged: say so on its alert. */

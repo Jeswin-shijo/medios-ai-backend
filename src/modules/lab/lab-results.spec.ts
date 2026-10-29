@@ -12,6 +12,7 @@ import { MessagesService } from '../coordinator/messages.service';
 import { PatientsService } from '../patients/patients.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
+import type { LabAiService, LabSummaryResult } from './lab-ai';
 import { LabBenchService } from './lab-bench.service';
 import { LabResultsService } from './lab-results.service';
 import { LabCoordinatorRegistration } from './lab-coordinator.registration';
@@ -25,6 +26,9 @@ const LAB: Actor = { id: 'user-lab', name: 'Meera', role: UserRole.LAB };
 const PATH: Actor = { id: 'user-path', name: 'Dr. Meera Nair', role: UserRole.LAB };
 const ADMIN: Actor = { id: 'user-admin', name: 'Admin', role: UserRole.ADMIN };
 const MIN = 60_000;
+/** Each test sets what the AI does; by default it never answers. */
+let aiImpl: (lineId: string) => Promise<LabSummaryResult> = () => new Promise(() => {});
+const noAi = { summarise: (id: string) => aiImpl(id) } as unknown as LabAiService;
 
 describe('LabResultsService', () => {
   const m = models();
@@ -52,6 +56,7 @@ describe('LabResultsService', () => {
   });
 
   beforeEach(async () => {
+    aiImpl = () => new Promise(() => {});
     await resetTestDb();
     const registry = new AgentRegistry();
     const events = new CoordinatorEvents();
@@ -63,7 +68,7 @@ describe('LabResultsService', () => {
     orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
-    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
+    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), noAi);
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });
     patientId = String(p._id);
   });
@@ -357,5 +362,46 @@ describe('LabResultsService', () => {
     await results.amend(LAB, lineId('crp'), { CRP: 9 }, 'recheck');
     await results.release(PATH, lineId('crp'));
     assert.equal((await sent('lab.request-done')).length, 1);
+  });
+  test('release returns before the AI answers, and the report already holds the template summary', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    let asked = 0;
+    aiImpl = () => {
+      asked++;
+      return new Promise(() => {});
+    };
+    await results.release(PATH, lineId('electrolytes'));
+    assert.equal(asked, 1);
+    const report: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
+    assert.deepEqual(report.aiSummary.findings, ['Potassium 6.4 mmol/L — high (critical)']);
+    assert.equal(report.aiSummary.interpretation, '1 value(s) outside the reference range; 1 critical.');
+  });
+
+  test('a valid AI summary replaces the template on the report', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    aiImpl = async () => ({ findings: ['Potassium is high.'], interpretation: 'Raised potassium.', recommendations: ['Repeat the test.'], sample: false });
+    await results.release(PATH, lineId('electrolytes'));
+    for (let i = 0; i < 50; i++) {
+      const r: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
+      if (r.aiSummary.interpretation === 'Raised potassium.') break;
+      await new Promise((ok) => setTimeout(ok, 20));
+    }
+    const report: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
+    assert.deepEqual({ ...report.aiSummary, _id: undefined }.findings, ['Potassium is high.']);
+    assert.equal(report.aiSummary.interpretation, 'Raised potassium.');
+  });
+
+  test('an AI failure leaves the template and does not fail the release', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    aiImpl = async () => {
+      throw new Error('down');
+    };
+    await results.release(PATH, lineId('electrolytes'));
+    await new Promise((ok) => setTimeout(ok, 50));
+    const report: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
+    assert.equal(report.aiSummary.findings[0], 'Potassium 6.4 mmol/L — high (critical)');
   });
 });

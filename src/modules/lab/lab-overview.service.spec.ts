@@ -15,6 +15,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { LabBenchService } from './lab-bench.service';
 import { LabCoordinatorRegistration } from './lab-coordinator.registration';
+import type { LabAiService } from './lab-ai';
 import { LabOrdersService } from './lab-orders.service';
 import { LabOverviewService } from './lab-overview.service';
 import { LabResultsService } from './lab-results.service';
@@ -27,6 +28,9 @@ const PATH: Actor = { id: 'user-path', name: 'Dr. Meera Nair', role: UserRole.LA
 const ADMIN: Actor = { id: 'user-admin', name: 'Admin', role: UserRole.ADMIN };
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+
+/** The AI never answers here, so nothing writes after a test ends. */
+const noAi = { summarise: () => new Promise(() => {}) } as unknown as LabAiService;
 
 describe('Lab close check, status, overview and settings', () => {
   const m = models();
@@ -60,7 +64,7 @@ describe('Lab close check, status, overview and settings', () => {
     orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, settings);
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
-    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings);
+    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings, noAi);
     overview = new LabOverviewService(m.LabSnapshot, m.LabRequest, m.LabLine, m.LabSample, m.Clock, settings);
     const p = await m.Patient.create({ uhid: 'MHK202600902', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000002' });
     patientId = String(p._id);

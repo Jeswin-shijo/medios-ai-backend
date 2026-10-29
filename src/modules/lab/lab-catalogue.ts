@@ -140,6 +140,13 @@ export const LAB_TESTS: LabTestDef[] = [
   },
 ];
 
+/** The reference range as text, e.g. "3.5–5.1" or "≥ 40". */
+export function rangeText(test: string, p: LabParameterDef): string {
+  if (p.text) return test === 'blood-culture' ? 'No growth' : 'Negative';
+  if (p.low !== undefined && p.high !== undefined) return `${p.low}–${p.high}`;
+  return p.low !== undefined ? `≥ ${p.low}` : p.high !== undefined ? `≤ ${p.high}` : '';
+}
+
 export function testByKey(key: string): LabTestDef | undefined {
   return LAB_TESTS.find((t) => t.key === key);
 }
