@@ -53,6 +53,17 @@ describe('QueueService doctor-wise tokens', () => {
     assert.equal(token.series, docA);
   });
 
+  test("an inactive doctor's line is joined only when asked to allow it", async () => {
+    await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+    await assert.rejects(issueFor('U1', docB), /not seeing patients/);
+    const { token } = await issueFor('U1', docB, { allowInactiveDoctor: true });
+    assert.equal(token.label, 'G2-001');
+    assert.equal(token.series, docB);
+    // Still one active token per patient.
+    const again = await issueFor('U1', docA, { allowInactiveDoctor: true });
+    assert.equal(again.existing, true);
+  });
+
   test('a patient holding a token gets it back, whichever doctor is asked', async () => {
     const first = await issueFor('U1', docA);
     const again = await issueFor('U1', docB);

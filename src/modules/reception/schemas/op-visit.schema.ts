@@ -131,3 +131,5 @@ export class OpVisit {
 export const OpVisitSchema = SchemaFactory.createForClass(OpVisit);
 OpVisitSchema.index({ date: 1, status: 1, createdAt: -1 });
 OpVisitSchema.index({ status: 1, expiresAt: 1 });
+// One open visit per patient: a new visit replaces the unpaid one (or is refused while cash is pending).
+OpVisitSchema.index({ uhid: 1 }, { unique: true, partialFilterExpression: { status: 'awaiting-payment' } });

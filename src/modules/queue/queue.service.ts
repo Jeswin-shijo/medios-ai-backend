@@ -58,6 +58,8 @@ export interface IssueRequest {
   doctorId?: string;
   /** Join the line without checking in the patient's appointment. */
   skipAppointment?: boolean;
+  /** Join `doctorId`'s line even if the doctor is no longer active: the visit was paid before they were made inactive. */
+  allowInactiveDoctor?: boolean;
 }
 
 /** Match a series; old tokens and sequences have none, which counts as the hospital-wide '' line. */
@@ -289,7 +291,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async issue(req: IssueRequest, actor: string, source: 'front-desk' | 'kiosk' = 'front-desk') {
     if (!req.uhid && !req.appointmentId) throw new BadRequestException('Give the patient UHID or the appointment to check in');
     const date = this.today();
-    const doctor = await this.doctorFor(req.doctorId);
+    const doctor = await this.doctorFor(req.doctorId, req.allowInactiveDoctor === true);
     const found = await this.appointmentFor(req, date);
     const uhid = req.uhid?.trim() || found!.uhid;
     // Only the default doctor's line checks an appointment in.
@@ -359,10 +361,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** The asked-for doctor (must be active), else the default doctor; null when the hospital has no doctors (one hospital-wide line). */
-  private async doctorFor(doctorId?: string) {
+  private async doctorFor(doctorId?: string, allowInactive = false) {
     if (doctorId) {
       const doctor = await this.opd.getDoctor(doctorId);
-      if (!doctor.active) throw new ConflictException(`${doctor.name} is not seeing patients`);
+      if (!doctor.active && !allowInactive) throw new ConflictException(`${doctor.name} is not seeing patients`);
       return doctor;
     }
     return this.opd.defaultDoctor();

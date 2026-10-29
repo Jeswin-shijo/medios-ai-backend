@@ -31,6 +31,10 @@ const FINISH_LEASE_MS = 30 * 1000;
 /** How long a repeat request waits for that work before answering with the visit as it stands. */
 const SETTLE_WAIT_MS = 5 * 1000;
 const SETTLE_POLL_MS = 50;
+/** How many stuck paid visits one staff list call finishes. */
+const FINISH_PER_LIST = 5;
+/** Tries at creating a visit when a request for the same patient races it. */
+const CREATE_ATTEMPTS = 3;
 
 /** The bill's payment mode. */
 const MODE: Record<PaymentMethod, string> = { UPI: 'UPI', CASH: 'Cash', CARD: 'Card' };
@@ -50,13 +54,19 @@ const after = (from: Date, ms: number) => new Date(from.getTime() + ms);
 const isDuplicate = (err: unknown) => err instanceof mongo.MongoServerError && err.code === 11000;
 /** Paid and given everything payment brings. */
 const isFinished = (visit: OpVisit) => Boolean(visit.opNumber && visit.tokenId && visit.billId);
+/** The query form of "not finished". */
+const UNFINISHED: FilterQuery<OpVisit> = { $or: [{ opNumber: { $exists: false } }, { billId: { $exists: false } }, { tokenId: { $exists: false } }] };
+
+/** `needs-attention`: paid visits still missing their bill or token. */
+export type VisitListStatus = 'awaiting-cash' | 'paid' | 'needs-attention' | 'all';
 
 /**
  * OP visits booked at the reception kiosk. A visit is made for an identified patient
  * and a bookable doctor, then paid by UPI, card (both through the payment provider) or
  * cash (confirmed by staff). Payment is one atomic switch from awaiting-payment to paid,
  * so exactly one completion wins against any other completion, a cancel or expiry; the
- * winner then adds the OP number, the doctor-wise token and the paid bill.
+ * winner then adds the OP number, the paid bill and the doctor-wise token. A patient has
+ * at most one open visit.
  */
 @Injectable()
 export class OpVisitsService {
@@ -86,6 +96,8 @@ export class OpVisitsService {
       const token = await this.tokenView(held, await this.trackingBase());
       throw new ConflictException({ message: `You already have token ${held.label} today.`, code: 'HAS_TOKEN', token });
     }
+    await this.expireDue();
+    await this.refuseIfCashPending(uhid);
     const patient = await this.patients.findOne({ uhid }).exec();
     if (!patient) throw new NotFoundException('Patient not found');
 
@@ -97,26 +109,41 @@ export class OpVisitsService {
     }
     const department = (await this.opd.listDepartments()).find((d) => d.code === doctor.departmentCode)?.name ?? doctor.departmentCode;
 
-    const now = this.now();
-    const visit = await this.visits.create({
-      date: this.queue.today(),
-      uhid,
-      patientName: patient.name,
-      doctorId: String(doctor._id),
-      doctorName: doctor.name,
-      department,
-      departmentCode: doctor.departmentCode,
-      room: doctor.room,
-      fee: doctor.fee,
-      status: 'awaiting-payment',
-      provider: this.payments?.name ?? 'none',
-      kioskId: kiosk.id,
-      kioskName: kiosk.name,
-      via,
-      expiresAt: after(now, UNCHOSEN_MINUTES * MINUTE_MS),
-      history: [{ at: now, event: `Booked with ${doctor.name}, fee ₹${doctor.fee}`, by: kioskActor(kiosk) }],
-    });
-    return this.view(visit);
+    // One open visit per patient (a unique index backs this): an unpaid UPI, card or unchosen one is replaced.
+    for (let attempt = 1; ; attempt++) {
+      const now = this.now();
+      await this.visits
+        .updateMany(
+          { uhid, status: 'awaiting-payment', method: { $ne: 'CASH' } },
+          { $set: { status: 'cancelled' }, $push: { history: { at: now, event: 'Replaced by a new visit', by: kioskActor(kiosk) } } },
+        )
+        .exec();
+      try {
+        const visit = await this.visits.create({
+          date: this.queue.today(),
+          uhid,
+          patientName: patient.name,
+          doctorId: String(doctor._id),
+          doctorName: doctor.name,
+          department,
+          departmentCode: doctor.departmentCode,
+          room: doctor.room,
+          fee: doctor.fee,
+          status: 'awaiting-payment',
+          provider: this.payments?.name ?? 'none',
+          kioskId: kiosk.id,
+          kioskName: kiosk.name,
+          via,
+          expiresAt: after(now, UNCHOSEN_MINUTES * MINUTE_MS),
+          history: [{ at: now, event: `Booked with ${doctor.name}, fee ₹${doctor.fee}`, by: kioskActor(kiosk) }],
+        });
+        return this.view(visit);
+      } catch (err) {
+        // Another visit for the patient was made at the same moment (a double tap): replace it too, unless it now waits for cash.
+        if (!isDuplicate(err) || attempt === CREATE_ATTEMPTS) throw err;
+        await this.refuseIfCashPending(uhid);
+      }
+    }
   }
 
   /** Chooses (or changes) how the patient pays; a new choice replaces the earlier order. */
@@ -205,13 +232,21 @@ export class OpVisitsService {
 
   // ---------------------------------------------------------------- staff
 
-  /** A day's visits (default today), newest first; `awaiting-cash` is the counter's list. */
-  async list(query: { date?: string; status?: 'awaiting-cash' | 'paid' | 'all' } = {}): Promise<VisitView[]> {
+  /**
+   * A day's visits (default today), newest first. `awaiting-cash` is the counter's list;
+   * `needs-attention` is paid visits still missing their bill or token that no request is
+   * finishing right now, from any day unless a date is given. Each call first finishes a
+   * few of today's stuck visits.
+   */
+  async list(query: { date?: string; status?: VisitListStatus } = {}): Promise<VisitView[]> {
     if (query.date) parseIsoDay(query.date); // 400 unless YYYY-MM-DD
     await this.expireDue();
-    const filter: FilterQuery<OpVisitDocument> = { date: query.date ?? this.queue.today() };
+    await this.finishStuck();
+    const attention = query.status === 'needs-attention';
+    const filter: FilterQuery<OpVisitDocument> = attention && !query.date ? {} : { date: query.date ?? this.queue.today() };
     if (query.status === 'awaiting-cash') Object.assign(filter, { status: 'awaiting-payment', method: 'CASH' });
     if (query.status === 'paid') filter.status = 'paid';
+    if (attention) Object.assign(filter, { status: 'paid', ...UNFINISHED, finishingUntil: { $not: { $gt: this.now() } } });
     const visits = await this.visits.find(filter).sort({ createdAt: -1, _id: -1 }).exec();
     const base = await this.trackingBase();
     return Promise.all(visits.map((v) => this.view(v, base)));
@@ -253,23 +288,51 @@ export class OpVisitsService {
   }
 
   /**
-   * Adds the OP number, token and bill to a paid visit, storing each as it goes so
-   * a repeat after a crash picks up where this stopped. Only the holder of the
-   * visit's finishing lease runs this.
+   * Adds the OP number, the bill and then the token to a paid visit, storing each as it
+   * goes so a later request picks up where this stopped; the bill comes first so a
+   * recorded payment always has one. Only the holder of the visit's finishing lease runs
+   * this, and it gives the lease up at the end, done or failed, so a retry need not wait.
    */
   private async finish(visit: OpVisitDocument): Promise<OpVisitDocument> {
     const by = visit.confirmedBy || 'System';
     let current = visit;
     try {
       if (!current.opNumber) current = await this.assignOpNumber(current, by);
-      if (!current.tokenId) current = await this.issueToken(current, by);
       if (!current.billId) current = await this.createBill(current, by);
+      if (!current.tokenId) current = await this.issueToken(current, by);
       return current;
-    } catch (err) {
-      // Let the next request try again at once rather than wait out the lease.
-      await this.visits.updateOne({ _id: visit._id }, { $unset: { finishingUntil: 1 } }).exec();
-      throw err;
+    } finally {
+      // Only our own lease: if this ran past it, another request may hold a newer one.
+      await this.visits.updateOne({ _id: visit._id, finishingUntil: visit.finishingUntil }, { $unset: { finishingUntil: 1 } }).exec();
     }
+  }
+
+  /** Takes the finishing lease of an unfinished paid visit when no live request holds it, and finishes it; null otherwise. */
+  private async takeOver(id: unknown): Promise<OpVisitDocument | null> {
+    const now = this.now();
+    const claimed = await this.visits
+      .findOneAndUpdate(
+        { _id: id, status: 'paid', ...UNFINISHED, finishingUntil: { $not: { $gt: now } } },
+        { $set: { finishingUntil: after(now, FINISH_LEASE_MS) } },
+        { new: true },
+      )
+      .exec();
+    return claimed ? this.finish(claimed) : null;
+  }
+
+  /**
+   * Today's paid visits left without their bill or token (finishing failed, or the server
+   * stopped part-way) and whose lease has run out: a few are finished on each call, so the
+   * staff list, polled all day, heals them. Failures are logged and tried again next call.
+   */
+  private async finishStuck() {
+    const stuck = await this.visits
+      .find({ date: this.queue.today(), status: 'paid', ...UNFINISHED, finishingUntil: { $not: { $gt: this.now() } } })
+      .sort({ paidAt: 1, _id: 1 })
+      .limit(FINISH_PER_LIST)
+      .select('_id')
+      .exec();
+    await Promise.all(stuck.map((v) => this.takeOver(v._id).catch((err: Error) => this.logger.warn(`Visit ${v._id}: could not finish (${err.message})`))));
   }
 
   /**
@@ -281,15 +344,8 @@ export class OpVisitsService {
     const giveUpAt = Date.now() + SETTLE_WAIT_MS;
     let current = visit;
     while (!isFinished(current)) {
-      const now = this.now();
-      const claimed = await this.visits
-        .findOneAndUpdate(
-          { _id: current._id, status: 'paid', billId: { $exists: false }, finishingUntil: { $not: { $gt: now } } },
-          { $set: { finishingUntil: after(now, FINISH_LEASE_MS) } },
-          { new: true },
-        )
-        .exec();
-      if (claimed) return this.finish(claimed);
+      const finished = await this.takeOver(current._id);
+      if (finished) return finished;
       if (Date.now() >= giveUpAt) break;
       await sleep(SETTLE_POLL_MS);
       current = (await this.visits.findById(current._id).exec()) ?? current;
@@ -307,7 +363,8 @@ export class OpVisitsService {
 
   /** The doctor-wise token. A patient given one elsewhere in the meantime keeps it, and no second one is made. */
   private async issueToken(visit: OpVisitDocument, by: string) {
-    const { token, existing } = await this.queue.issue({ uhid: visit.uhid, doctorId: visit.doctorId }, by, 'kiosk');
+    // Paid for: the token is issued even if the doctor was made inactive after booking.
+    const { token, existing } = await this.queue.issue({ uhid: visit.uhid, doctorId: visit.doctorId, allowInactiveDoctor: true }, by, 'kiosk');
     const event = existing ? `Patient already held token ${token.label}; no new token was issued` : `Token ${token.label} issued`;
     return this.store(visit, 'tokenId', { tokenId: String(token._id), tokenLabel: token.label }, event, by);
   }
@@ -336,15 +393,15 @@ export class OpVisitsService {
       if (!made) throw err;
       bill = made;
     }
-    return this.store(visit, 'billId', { billId: String(bill._id), billNumber }, `Bill ${billNumber}: ₹${visit.fee} paid by ${SAID[method]}`, by, { finishingUntil: 1 });
+    return this.store(visit, 'billId', { billId: String(bill._id), billNumber }, `Bill ${billNumber}: ₹${visit.fee} paid by ${SAID[method]}`, by);
   }
 
   /** Saves one finishing step unless it is already saved; returns the visit as stored. */
-  private async store(visit: OpVisitDocument, step: 'opNumber' | 'tokenId' | 'billId', set: Partial<OpVisit>, event: string, by: string, unset?: Record<string, 1>) {
+  private async store(visit: OpVisitDocument, step: 'opNumber' | 'tokenId' | 'billId', set: Partial<OpVisit>, event: string, by: string) {
     const saved = await this.visits
       .findOneAndUpdate(
         { _id: visit._id, [step]: { $exists: false } },
-        { $set: set, $push: { history: { at: this.now(), event, by } }, ...(unset && { $unset: unset }) },
+        { $set: set, $push: { history: { at: this.now(), event, by } } },
         { new: true },
       )
       .exec();
@@ -352,6 +409,17 @@ export class OpVisitsService {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** A patient sent to the counter must pay there, or have staff cancel it, before starting again. */
+  private async refuseIfCashPending(uhid: string) {
+    const cash = await this.visits.findOne({ uhid, status: 'awaiting-payment', method: 'CASH' }).exec();
+    if (cash) {
+      throw new ConflictException({
+        message: `You have a payment waiting at the counter (code ${cash.paymentCode}). Please pay there or ask the staff to cancel it.`,
+        code: 'CASH_PENDING',
+      });
+    }
+  }
 
   /** The order for the chosen method, and the fields of an earlier choice it clears. */
   private async paymentTerms(visit: OpVisitDocument, method: PaymentMethod, payeeName: string): Promise<{ set: Partial<OpVisit>; unset: Record<string, 1> }> {
