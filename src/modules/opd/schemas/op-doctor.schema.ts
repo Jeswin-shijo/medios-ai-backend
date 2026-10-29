@@ -58,3 +58,5 @@ export class OpDoctor {
 }
 
 export const OpDoctorSchema = SchemaFactory.createForClass(OpDoctor);
+// Database backstop for the service's check: two active doctors never share token letters.
+OpDoctorSchema.index({ tokenPrefix: 1 }, { unique: true, partialFilterExpression: { active: true } });

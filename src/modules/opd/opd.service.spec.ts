@@ -94,6 +94,35 @@ describe('OpdService', () => {
     assert.equal(String((await opd.defaultDoctor())!._id), String(gen._id));
   });
 
+  test('concurrent creates with the same token letters leave exactly one active doctor', async () => {
+    const results = await Promise.allSettled([
+      opd.createDoctor(doctor({ name: 'A' })),
+      opd.createDoctor(doctor({ name: 'B', room: 'Room 102' })),
+    ]);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    assert.ok(rejected.reason instanceof ConflictException);
+    assert.equal(await m().OpDoctor.countDocuments({ active: true, tokenPrefix: 'G' }), 1);
+  });
+
+  test('the database refuses a second active doctor with the same letters, even past the service', async () => {
+    await opd.createDoctor(doctor());
+    await assert.rejects(m().OpDoctor.create({ ...doctor({ name: 'Raw' }) }), (e: any) => e.code === 11000);
+  });
+
+  test('updateDoctor reactivating onto taken letters answers 409', async () => {
+    const a = await opd.createDoctor(doctor({ name: 'A' }));
+    await opd.updateDoctor(String(a._id), { active: false });
+    await opd.createDoctor(doctor({ name: 'B', room: 'Room 102' }));
+    await assert.rejects(opd.updateDoctor(String(a._id), { active: true }), ConflictException);
+  });
+
+  test('updateDepartment and updateDoctor answer 404 for a malformed or unknown id', async () => {
+    await assert.rejects(opd.updateDepartment('nope', { name: 'x' }), /Department not found/);
+    await assert.rejects(opd.updateDepartment('000000000000000000000000', { name: 'x' }), /Department not found/);
+    await assert.rejects(opd.updateDoctor('nope', { fee: 1 }), /Doctor not found/);
+  });
+
   test('getDoctor answers 404 for a missing or malformed id', async () => {
     await assert.rejects(opd.getDoctor('nope'), /Doctor not found/);
   });

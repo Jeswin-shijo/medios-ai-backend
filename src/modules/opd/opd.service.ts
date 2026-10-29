@@ -56,7 +56,13 @@ export class OpdService {
 
   async updateDepartment(id: string, dto: Partial<DepartmentInput>): Promise<DepartmentDocument> {
     const { code: _code, ...changes } = dto; // the code never changes: doctors point at it
-    const updated = await this.departments.findByIdAndUpdate(id, changes, { new: true, runValidators: true }).exec();
+    const updated = await this.departments
+      .findByIdAndUpdate(id, changes, { new: true, runValidators: true })
+      .exec()
+      .catch((e) => {
+        if (e?.name === 'CastError') return null; // a malformed id is just "not found"
+        throw e;
+      });
     if (!updated) throw new NotFoundException('Department not found');
     return updated;
   }
@@ -79,7 +85,7 @@ export class OpdService {
   async createDoctor(dto: DoctorInput): Promise<OpDoctorDocument> {
     const data = { avgConsultMinutes: 10, active: true, ...dto };
     await this.validateDoctor(data);
-    return this.doctors.create(data);
+    return this.doctors.create(data).catch((e) => this.rethrowPrefixClash(e, data.tokenPrefix));
   }
 
   async updateDoctor(id: string, dto: Partial<DoctorInput>): Promise<OpDoctorDocument> {
@@ -87,7 +93,7 @@ export class OpdService {
     const merged = { ...doctor.toObject(), ...dto };
     await this.validateDoctor(merged, id);
     doctor.set(dto);
-    return doctor.save();
+    return doctor.save().catch((e) => this.rethrowPrefixClash(e, merged.tokenPrefix));
   }
 
   /** The doctor the kiosk uses by default: the one named in settings if active, else the first active one. */
@@ -115,6 +121,15 @@ export class OpdService {
       const candidate = department.tokenPrefix.slice(0, 3 - suffix.length) + suffix; // stays within 3 characters
       if (!used.has(candidate)) return candidate;
     }
+  }
+
+  /** A concurrent request won the race for these token letters: answer as the up-front check would. */
+  private async rethrowPrefixClash(error: any, tokenPrefix: string): Promise<never> {
+    if (error?.code === 11000) {
+      const clash = await this.doctors.findOne({ active: true, tokenPrefix }).exec();
+      throw new ConflictException(`Token letters "${tokenPrefix}" are already used by Dr. ${clash?.name ?? 'another doctor'}`);
+    }
+    throw error;
   }
 
   private async validateDoctor(doctor: { departmentCode: string; room: string; tokenPrefix: string; sessions?: SessionInput[]; active?: boolean }, selfId?: string) {
