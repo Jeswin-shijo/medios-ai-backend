@@ -250,6 +250,23 @@ MONGODB_URI=... npm run import-beds -- path/to/beds.csv
 
 ---
 
+## 🧭 Coordinator
+
+The Coordinator is the one place that follows a patient's journey across the hospital's agents. Each agent reports to it (today the Bed Agent), and it keeps:
+
+- **Cases:** one per patient (`CASE-0001`, ...), open until every agent's close check passes.
+- **A message log:** what each agent told the others, with the UHID and bed label, never the patient's name.
+- **Clocks, escalations and approvals:** a clock that runs out raises an escalation up a ladder of duty titles. Things that need a person become approvals.
+- **Hourly snapshots** for the overview cards and trends.
+
+- **Routes** (all under `/api/coordinator`): `GET overview`, `GET snapshots`, `GET cases`, `GET cases/:id`, `GET messages`, `GET agents`, `GET approvals`, `POST approvals/:id/act`, `POST approvals/:id/reassign`, `POST escalations/:id/ack`, `GET rules`, `PUT rules/:key`, `GET request-types`, `GET ladders`, `PUT ladders`, `GET titles`, `PUT titles`, `GET staff`, `POST ask` and `GET stream`.
+- **The stream.** `GET stream` is server-sent events. The web app listens to it so the Coordinator page updates live.
+- **Settings.** Settings → Coordinator (admins) switches each agent's rules on and off. Duty titles (for example Duty administrator, Medical superintendent) and ladders (who an escalation goes to, step by step, and how long to wait) are set with `PUT titles` and `PUT ladders`. A title nobody holds goes to every admin.
+- **The Ask box.** `POST ask` answers questions about the hospital's activity. The AI never sees names, UHIDs or database ids: they are replaced before anything is sent.
+- **Demo data.** `npm run seed` also loads about a dozen cases with their messages, one open approval, one expired bed-wait clock with an open escalation (it moves up its ladder about 10 minutes after seeding) and 168 hourly snapshots.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.
