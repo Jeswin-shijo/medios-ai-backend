@@ -65,7 +65,7 @@ describe('Lab close check, status, overview and settings', () => {
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
     results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings, noAi, m.Clock);
-    overview = new LabOverviewService(m.LabSnapshot, m.LabRequest, m.LabLine, m.LabSample, m.Clock, settings);
+    overview = new LabOverviewService(m.LabSnapshot, m.LabRequest, m.LabLine, m.LabSample, m.Clock, settings, orders);
     const p = await m.Patient.create({ uhid: 'MHK202600902', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000002' });
     patientId = String(p._id);
   });
@@ -349,6 +349,42 @@ describe('Lab close check, status, overview and settings', () => {
     await results.release(PATH, r.lines[0].id);
     const row = (await overview.criticalList())[0];
     assert.equal(row.amended, true);
+  });
+
+  test('an amended, unacknowledged critical stays listed while its amendment awaits validation', async () => {
+    const r = await order(['electrolytes']);
+    await receive(r);
+    await release(r.lines[0].id, { Sodium: 140, Potassium: 6.4 });
+    await results.amend(LAB, r.lines[0].id, { Sodium: 140, Potassium: 6.6 }, 'Re-run on the analyser');
+    const rows = await overview.criticalList();
+    assert.equal(rows.length, 1);
+    const row = rows[0];
+    assert.equal(row.pendingAmendment, true);
+    assert.equal(row.ackAt, null);
+    // The values shown are the released ones, not the amendment still waiting for a second person.
+    assert.deepEqual(row.criticals, [{ param: 'Potassium', value: 6.4, unit: 'mmol/L', flag: 'high' }]);
+    assert.equal(row.value, '6.4');
+    assert.equal(row.patientName, 'Ravi Kumar');
+    assert.equal(row.patientUhid, 'MHK202600902');
+    assert.deepEqual(row.location, { area: 'OPD' });
+    await results.release(PATH, r.lines[0].id);
+    const after = (await overview.criticalList())[0];
+    assert.equal(after.pendingAmendment, false);
+    assert.deepEqual(after.criticals, [{ param: 'Potassium', value: 6.6, unit: 'mmol/L', flag: 'high' }]);
+    assert.equal((await overview.overview()).critical[0].lineId, r.lines[0].id);
+  });
+
+  test('a CBC with a critical haemoglobin and platelets lists both', async () => {
+    const r = await order(['cbc']);
+    await receive(r);
+    await release(r.lines[0].id, { Haemoglobin: 6.2, WBC: 7, Platelets: 15 });
+    const [row] = await overview.criticalList();
+    assert.deepEqual(row.criticals, [
+      { param: 'Haemoglobin', value: 6.2, unit: 'g/dL', flag: 'low' },
+      { param: 'Platelets', value: 15, unit: '×10³/µL', flag: 'low' },
+    ]);
+    assert.equal(row.parameter, 'Haemoglobin');
+    assert.equal(row.pendingAmendment, false);
   });
 
   test('limitsHistory is server-only: a round-tripped settings object passes, a fake history is ignored', async () => {

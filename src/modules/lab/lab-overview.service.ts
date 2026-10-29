@@ -7,7 +7,10 @@ import type { StatCardData } from '../beds/bed-overview';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { LAB_TESTS, targetMinutes, testByKey } from './lab-catalogue';
 import { labOnTimePct } from './lab-coordinator.registration';
+import { LabOrdersService } from './lab-orders.service';
+import { lastCritical } from './lab-results.service';
 import { LabSettingsService } from './lab-settings.service';
+import type { LabArea } from './schemas/lab-location.schema';
 import { LabLine, LabLineDocument } from './schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
 import { LabSample, LabSampleDocument } from './schemas/lab-sample.schema';
@@ -47,6 +50,14 @@ export interface LabCriticalRow {
   ackAt: string | null;
   /** True when the line has been amended (version above 1). */
   amended: boolean;
+  /** True while an amendment of this result waits for a second person (the values shown are still the released ones). */
+  pendingAmendment: boolean;
+  /** For staff screens only: never in a message. */
+  patientName: string;
+  patientUhid: string;
+  location: { area: LabArea; ward?: string };
+  /** Every critical value of the released version (or, after an amendment to normal, of the last version that had one). */
+  criticals: { param: string; value: string | number; unit: string; flag: string }[];
   /** From the running critical clock; null once acknowledged. */
   dueAt: string | null;
 }
@@ -83,6 +94,7 @@ export class LabOverviewService {
     @InjectModel(LabSample.name) private readonly samples: Model<LabSampleDocument>,
     @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
     private readonly labSettings: LabSettingsService,
+    private readonly orders: LabOrdersService,
   ) {}
 
   /** Stores this hour's numbers (real clock), replacing any earlier snapshot of the same hour. */
@@ -123,26 +135,29 @@ export class LabOverviewService {
   }
 
   /**
-   * Criticals that need attention: every released critical nobody has acknowledged (from any day, its
-   * clock may still be escalating), then those acknowledged today. Unacknowledged first, oldest first;
-   * then acknowledged, newest first. The ack time is on the clinic clock, so "today" is clinic midnight
-   * (the same as real midnight in production).
+   * Criticals that need attention: every critical nobody has acknowledged, whatever the line's status (from
+   * any day, its clock may still be escalating, and an amendment may be waiting for validation), then those
+   * acknowledged today. Unacknowledged first, oldest first; then acknowledged, newest first. The ack time is
+   * on the clinic clock, so "today" is clinic midnight (the same as real midnight in production).
    */
   async criticalList(): Promise<LabCriticalRow[]> {
     const midnight = clinicNow();
     midnight.setHours(0, 0, 0, 0);
     const lines = await this.lines
       .find({
-        status: 'released',
         'critical.active': true,
         $or: [{ 'critical.ackAt': { $exists: false } }, { 'critical.ackAt': { $gte: midnight } }],
       })
-      .select('request test releasedAt releasedRealAt lastReleasedRealAt results history critical version')
+      .select('request test status releasedAt releasedRealAt lastReleasedRealAt results history critical version')
       .lean<any[]>()
       .exec();
     if (!lines.length) return [];
     const [parents, running] = await Promise.all([
-      this.requests.find({ _id: { $in: [...new Set(lines.map((l) => String(l.request)))] } }).select('number orderedBy').lean<any[]>().exec(),
+      this.requests
+        .find({ _id: { $in: [...new Set(lines.map((l) => String(l.request)))] } })
+        .select('number orderedBy case patientName patientUhid')
+        .lean<any[]>()
+        .exec(),
       this.clocks
         .find({ def: 'lab-critical', state: 'running', ref: { $in: lines.map((l) => String(l._id)) } })
         .select('ref dueAt')
@@ -150,6 +165,8 @@ export class LabOverviewService {
         .exec(),
     ]);
     const parent = new Map(parents.map((r) => [String(r._id), r]));
+    const where = new Map<string, { area: LabArea; ward?: string }>();
+    for (const c of new Set(parents.map((r) => String(r.case)))) where.set(c, await this.orders.location(c));
     const dueOf = new Map(running.map((c) => [c.ref, c.dueAt]));
     const at = (l: any) => new Date(l.lastReleasedRealAt ?? l.releasedRealAt ?? 0).getTime();
     const ackAt = (l: any) => new Date(l.critical?.ackAt ?? 0).getTime();
@@ -160,23 +177,29 @@ export class LabOverviewService {
       return ua ? at(a) - at(b) : ackAt(b) - ackAt(a);
     });
     return lines.map((l) => {
-      // An amendment to normal keeps the earlier critical open: show the value that was critical.
-      const c =
-        (l.results ?? []).find((r: any) => r.critical) ??
-        [...(l.history ?? [])].reverse().flatMap((h: any) => h.results ?? []).find((r: any) => r.critical);
+      // The released values (never an amendment still awaiting validation); after an amendment to normal
+      // that kept the critical open, the values that were critical.
+      const rows = lastCritical(l)?.rows ?? (l.results ?? []).filter((r: any) => r.critical);
+      const c = rows[0];
+      const p = parent.get(String(l.request));
       return {
         lineId: String(l._id),
-        requestNumber: parent.get(String(l.request))?.number ?? '',
+        requestNumber: p?.number ?? '',
         test: l.test,
         label: testByKey(l.test)?.label ?? l.test,
         parameter: c?.param ?? '',
         value: c ? String(c.value) : '',
         unit: c?.unit ?? '',
-        orderedBy: parent.get(String(l.request))?.orderedBy?.name ?? '',
+        orderedBy: p?.orderedBy?.name ?? '',
         releasedAt: iso(l.releasedAt),
         ackBy: l.critical?.ackBy ?? null,
         ackAt: iso(l.critical?.ackAt),
         amended: (l.version ?? 0) > 1,
+        pendingAmendment: l.status === 'awaiting-validation' && (l.history ?? []).length > 0,
+        patientName: p?.patientName ?? '',
+        patientUhid: p?.patientUhid ?? '',
+        location: (p && where.get(String(p.case))) ?? { area: 'OPD' },
+        criticals: rows.map((r: any) => ({ param: r.param, value: r.value, unit: r.unit, flag: r.flag })),
         dueAt: iso(dueOf.get(String(l._id))),
       };
     });
