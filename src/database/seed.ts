@@ -26,6 +26,7 @@ import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/que
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
+import { seedEr } from './seed-er';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
@@ -189,6 +190,8 @@ async function seed() {
   await seedBeds(process.env.CLINIC_DATE ?? DEMO_DAY);
   // Cases, messages, an approval, an escalation and snapshots for the Coordinator, built on the bed requests above.
   await seedCoordinator(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // The ER day: visits, bays, cases, clocks and messages (after the Coordinator, which wipes cases and clocks).
+  await seedEr(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

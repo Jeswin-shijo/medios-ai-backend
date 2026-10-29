@@ -54,7 +54,7 @@ export interface LadderView {
   steps: LadderStep[];
 }
 
-const NO_HOLDERS = 'Admins (no one holds this title yet)';
+export const NO_HOLDERS = 'Admins (no one holds this title yet)';
 
 /** Duty titles, ladders and the escalations that walk them. Uses real time, not the clinic clock. */
 @Injectable()

@@ -267,6 +267,20 @@ The Coordinator is the one place that follows a patient's journey across the hos
 
 ---
 
+## 🚑 Emergency Room
+
+The ER agent runs the emergency department's front door: arrival, triage, doctor review, bays and the fast-track pathways. Fixed rules decide the triage colour, the targets and the pathways; the AI only explains and drafts. It lives in `src/modules/er`.
+
+- **Visits:** one per arrival (`ER-0001`, ...), with a status of waiting for triage, waiting for a doctor, in treatment, waiting for a bed or left. A patient has at most one open visit. An unknown patient is registered as a placeholder (`Unknown male, ER-0012`, details pending) that staff fill in later.
+- **Triage:** red, orange, yellow or green. The doctor target is 10, 30, 120 or 240 minutes from arrival, and triage itself must happen within 10 minutes.
+- **Pathways:** chest pain, stroke and sepsis start from the complaint and vitals (switch `er-auto-pathways`), each with timed steps.
+- **Bays:** 12 bays (two for resus) and 8 stretchers; a bay holds one visit.
+- **With the Coordinator:** each visit has a case, and the ER sends messages (never a name) such as `er.arrived`, `er.triaged` and `er.left`. Its clocks (`er-triage`, `er-doctor` and one per pathway step) escalate up the `er` ladder: ER nurse in charge, ER consultant, Medical superintendent. A patient admitted from the ER waits as a Bed Agent request on the same case.
+- **Routes** (all under `/api/er`): see `er.controller.ts`.
+- **Demo data.** `npm run seed` also loads about 25 visits on the clinic day (15 in the ER across all four colours and every status, the rest gone home or elsewhere), their cases, clocks and messages, one overdue doctor review with an open escalation (about 5 minutes late, then it moves up its ladder), one patient waiting for a bed, one placeholder patient, one expected arrival and 168 hourly snapshots. Where the main demo has too few patients, the seed adds made-up ones (marked "ER demo patient" in the address). The seed also reruns on its own and replaces only what it made.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.
