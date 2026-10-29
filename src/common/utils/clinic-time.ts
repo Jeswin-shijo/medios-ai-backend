@@ -44,9 +44,10 @@ export function clockMinutes(time: string): number {
  * The current moment on the clinic's day. Development pins CLINIC_DATE to the seed's
  * day (like the web app's VITE_CLINIC_DATE) so "today" and "tomorrow" line up with
  * the demo schedule; the time of day is always real. Unset, this is plain `new Date()`.
+ * `at` replaces the real moment (an injected clock), pinned the same way.
  */
-export function clinicNow(): Date {
-  const now = new Date();
+export function clinicNow(at: Date = new Date()): Date {
+  const now = new Date(at.getTime());
   const pinned = ISO_DAY.exec(process.env.CLINIC_DATE ?? '');
   if (pinned) now.setFullYear(Number(pinned[1]), Number(pinned[2]) - 1, Number(pinned[3]));
   return now;

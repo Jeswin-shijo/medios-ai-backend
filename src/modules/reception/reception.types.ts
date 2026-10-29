@@ -1,3 +1,5 @@
+import type { PaymentMethod, VisitStatus } from './schemas/op-visit.schema';
+
 /** The kiosk device making a request. */
 export interface KioskRef {
   id: string;
@@ -36,4 +38,31 @@ export interface IdentifyResult {
   patient: PatientSummary;
   activeToken: KioskTokenView | null;
   appointmentToday: { time: string } | null;
+}
+
+/** An OP visit as the kiosk and the staff desk see it. */
+export interface VisitView {
+  id: string;
+  status: VisitStatus;
+  method?: PaymentMethod;
+  /** Whole rupees. */
+  fee: number;
+  /** Paid through the sample provider: screens must say SAMPLE. */
+  sample: boolean;
+  doctor: { id: string; name: string; department: string; room: string };
+  patient: { name: string; uhid: string };
+  /** Cash only: the four digits the patient shows at the counter. */
+  paymentCode?: string;
+  upiUri?: string;
+  expiresAt: string;
+  paidAt?: string;
+  /** "26 Sep 2026, 10:24 AM", on the clinic day. */
+  paidAtDisplay?: string;
+  transactionId?: string;
+  opNumber?: string;
+  billNumber?: string;
+  token?: KioskTokenView;
+  kioskName: string;
+  via: string;
+  createdAt: string;
 }

@@ -11,6 +11,8 @@ import { Department, DepartmentDocument, DepartmentSchema } from '../modules/opd
 import { ReceptionSession, ReceptionSessionDocument, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
 import { OtpChallenge, OtpChallengeDocument, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
 import { OpDoctor, OpDoctorDocument, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
+import { OpVisit, OpVisitDocument, OpVisitSchema } from '../modules/reception/schemas/op-visit.schema';
+import { OpSequence, OpSequenceDocument, OpSequenceSchema } from '../modules/reception/schemas/op-sequence.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_reception_dev).
@@ -47,6 +49,8 @@ export function models() {
     OpDoctor: model(OpDoctor, OpDoctorSchema) as Model<OpDoctorDocument>,
     ReceptionSession: model(ReceptionSession, ReceptionSessionSchema) as Model<ReceptionSessionDocument>,
     OtpChallenge: model(OtpChallenge, OtpChallengeSchema) as Model<OtpChallengeDocument>,
+    OpVisit: model(OpVisit, OpVisitSchema) as Model<OpVisitDocument>,
+    OpSequence: model(OpSequence, OpSequenceSchema) as Model<OpSequenceDocument>,
   };
 }
 
