@@ -132,7 +132,7 @@ describe('ErTriageService', () => {
 
     const out = await service.retriage(NURSE, v.id, 'red', 'Collapsed in the waiting area');
     assert.equal(out.colour, 'red');
-    assert.equal(out.triage!.changeReason, 'Collapsed in the waiting area');
+    assert.equal(out.triage!.history[1].reason, 'Collapsed in the waiting area');
     assert.equal(await clocks.checkDue(new Date()), 1);
     const esc: any[] = await m.Escalation.find().lean();
     assert.equal(esc.length, 1);
@@ -262,5 +262,49 @@ describe('ErTriageService', () => {
 
     await m.ErVisit.updateOne({ _id: v.id }, { $set: { status: 'left' } });
     await assert.rejects(service.doctorSeen(NURSE, v.id), (e: any) => e.status === 409 && e.message === 'This patient has left the ER.');
+  });
+
+  test('re-triage keeps the first triage and records every change in the history', async () => {
+    const first: Actor = { id: 'u1', name: 'Nurse First', role: UserRole.NURSE };
+    const second: Actor = { id: 'u2', name: 'Dr Second', role: UserRole.DOCTOR };
+    const v = await arrive('fever');
+    const t = await service.triage(first, v.id, input({ complaint: 'fever', colour: 'yellow' }));
+    await service.retriage(second, v.id, 'orange', 'Getting worse');
+    const out = await service.retriage(first, v.id, 'red', 'Collapsed');
+    assert.equal(out.colour, 'red');
+    assert.equal(out.triage!.byName, 'Nurse First');
+    assert.equal(out.triage!.at, t.triage!.at);
+    assert.equal(out.triage!.changeReason, undefined);
+    assert.deepEqual(out.triage!.history.map((h) => [h.kind, h.colour, h.byName, h.reason]), [
+      ['triage', 'yellow', 'Nurse First', undefined],
+      ['retriage', 'orange', 'Dr Second', 'Getting worse'],
+      ['retriage', 'red', 'Nurse First', 'Collapsed'],
+    ]);
+    const staff = await service.startPathway(second, v.id, 'sepsis');
+    assert.equal(staff.pathways[0].startedByName, 'Dr Second');
+  });
+
+  test('red, orange, red within a second still moves the doctor clock to the red time', async () => {
+    const v = await arrive('fever');
+    await service.triage(NURSE, v.id, input({ complaint: 'fever', colour: 'yellow' }));
+    await service.retriage(NURSE, v.id, 'red', 'Worse');
+    await service.retriage(NURSE, v.id, 'orange', 'Better');
+    await service.retriage(NURSE, v.id, 'red', 'Worse again');
+    assert.equal((await sent('er.retriaged')).length, 3);
+    assert.equal(new Date((await clockOf('er-doctor', v.caseId)).dueAt).getTime(), (await created(v.id)) + 10 * MIN);
+  });
+
+  test('start, cancel and restart gives the step clock again', async () => {
+    const v = await arrive('chest-pain');
+    await service.triage(NURSE, v.id, input());
+    await service.cancelPathway(NURSE, v.id, 'chest-pain', 'Wrong');
+    assert.equal((await clockOf('er-step-ecg', v.caseId)).state, 'met');
+    await service.startPathway(NURSE, v.id, 'chest-pain');
+    await service.cancelPathway(NURSE, v.id, 'chest-pain', 'Wrong again');
+    await service.startPathway(NURSE, v.id, 'chest-pain');
+    assert.equal((await sent('er.pathway-started')).length, 3);
+    assert.equal((await sent('er.pathway-cancelled')).length, 2);
+    const running = await m.Clock.find({ def: 'er-step-ecg', case: v.caseId, state: 'running' }).lean();
+    assert.equal(running.length, 1);
   });
 });

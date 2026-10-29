@@ -143,6 +143,7 @@ export class ErTriageService {
       vitalsId = String(record._id);
     }
 
+    const at = clinicNow();
     const updated = await this.visits
       .findOneAndUpdate(
         { _id: visit._id, status: 'waiting-triage' },
@@ -155,8 +156,9 @@ export class ErTriageService {
               reasons: suggestion.reasons,
               colour: input.colour,
               byName: actor.name,
-              at: clinicNow(),
+              at,
               ...(reason ? { changeReason: reason } : {}),
+              history: [{ colour: input.colour, byName: actor.name, at, kind: 'triage', ...(reason ? { reason } : {}) }],
             },
             ...(vitalsId ? { vitalsId } : {}),
             ...(typeof input.painScore === 'number' ? { painScore: input.painScore } : {}),
@@ -214,7 +216,10 @@ export class ErTriageService {
     const updated = await this.visits
       .findOneAndUpdate(
         { _id: visit._id, 'triage.colour': old, status: { $ne: 'left' } },
-        { $set: { 'triage.colour': colour, 'triage.changeReason': why, 'triage.byName': actor.name, 'triage.at': clinicNow() } },
+        {
+          $set: { 'triage.colour': colour },
+          $push: { 'triage.history': { colour, byName: actor.name, at: clinicNow(), reason: why, kind: 'retriage' } },
+        },
         { new: true },
       )
       .exec();
@@ -237,6 +242,8 @@ export class ErTriageService {
       priority: BED_PRIORITY[colour],
       summary: `${updated.number} re-triaged ${old} to ${colour}: ${this.complaintLabel(updated.complaint)}`,
       payload: { visitId: String(updated._id), colour, doctorDueAt },
+      // The same change twice in a minute (red, orange, red) is a new action, not a repeat.
+      dedupeKey: `er.retriaged:${String(updated._id)}:${updated.triage!.history.length}`,
     });
     return toVisitView(updated);
   }
@@ -245,7 +252,7 @@ export class ErTriageService {
     const visit = await this.loadTriaged(visitId);
     if (!PATHWAYS[key]) throw new BadRequestException('Unknown pathway');
     if (runningKeys(visit).includes(key)) throw new ConflictException(`The ${PATHWAYS[key].label} pathway is already running.`);
-    const updated = await this.beginPathway(visit, key, 'staff', String(visit.case), await this.targets());
+    const updated = await this.beginPathway(visit, key, 'staff', String(visit.case), await this.targets(), undefined, actor.name);
     if (!updated) throw new ConflictException(`The ${PATHWAYS[key].label} pathway is already running.`);
     return toVisitView(updated);
   }
@@ -261,6 +268,7 @@ export class ErTriageService {
     caseId: string,
     targets: Record<string, number>,
     doctorDueAt?: Date,
+    byName?: string,
   ): Promise<ErVisitDocument | null> {
     const have = new Set((visit.steps ?? []).map((s) => s.key));
     const newSteps = PATHWAYS[key].steps.filter((s) => !have.has(s.key)).map((s) => ({ key: s.key }));
@@ -268,7 +276,7 @@ export class ErTriageService {
       .findOneAndUpdate(
         // Two starts at once: only one finds no running entry.
         { _id: visit._id, status: { $ne: 'left' }, pathways: { $not: { $elemMatch: { key, cancelled: { $exists: false } } } } },
-        { $push: { pathways: { key, startedBy }, ...(newSteps.length ? { steps: { $each: newSteps } } : {}) } },
+        { $push: { pathways: { key, startedBy, ...(startedBy === 'staff' && byName ? { startedByName: byName } : {}) }, ...(newSteps.length ? { steps: { $each: newSteps } } : {}) } },
         { new: true },
       )
       .exec();
@@ -287,6 +295,8 @@ export class ErTriageService {
         stepDue: this.stepDue(updated, key, targets),
         doctorDueAt: doctorDueAt ?? this.doctorDueAt(updated, this.colourOf(updated), runningKeys(updated), targets),
       },
+      // Start, cancel, restart sends the same payload again: the entry's place makes each start its own.
+      dedupeKey: `er.pathway-started:${String(updated._id)}:${updated.pathways.length - 1}`,
     });
     return updated;
   }
@@ -313,6 +323,7 @@ export class ErTriageService {
       priority: BED_PRIORITY[colour],
       summary: `${updated.number} ${colour}: ${PATHWAYS[key].label} pathway cancelled`,
       payload: { visitId: String(updated._id), pathway: key, doctorDueAt: this.doctorDueAt(updated, colour, runningKeys(updated), await this.targets()) },
+      dedupeKey: `er.pathway-cancelled:${String(updated._id)}:${updated.pathways.map((p) => p.key).lastIndexOf(key)}`,
     });
     return toVisitView(updated);
   }

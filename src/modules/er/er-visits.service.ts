@@ -52,14 +52,22 @@ export interface ErVisitView {
   arrivedAt: string;
   /** The confirmed triage colour, or null while untriaged. */
   colour: TriageColour | null;
-  triage: { suggested: string; reasons: string[]; colour: string; byName: string; at: string; changeReason?: string } | null;
+  triage: {
+    suggested: string;
+    reasons: string[];
+    colour: string;
+    byName: string;
+    at: string;
+    changeReason?: string;
+    history: { colour: string; byName: string; at: string; reason?: string; kind: 'triage' | 'retriage' }[];
+  } | null;
   vitalsId: string | null;
   painScore: number | null;
   bayId: string | null;
   /** Filled in once bays exist. */
   bayName: string | null;
   status: ErStatus;
-  pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; cancelled: { byName: string; reason: string; at: string } | null }[];
+  pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; startedByName?: string; cancelled: { byName: string; reason: string; at: string } | null }[];
   steps: { key: StepKey; doneAt: string | null; byName: string | null }[];
   doctorSeenAt: string | null;
   disposition: { kind: ErDispositionKind; byName: string; at: string; notes: string } | null;
@@ -97,7 +105,9 @@ export function toVisitView(v: any): ErVisitView {
     arrivedAt: iso(v.arrivedAt)!,
     colour: (v.triage?.colour as TriageColour) ?? null,
     triage: v.triage
-      ? { suggested: v.triage.suggested, reasons: v.triage.reasons ?? [], colour: v.triage.colour, byName: v.triage.byName, at: iso(v.triage.at)!, ...(v.triage.changeReason ? { changeReason: v.triage.changeReason } : {}) }
+      ? { suggested: v.triage.suggested, reasons: v.triage.reasons ?? [], colour: v.triage.colour, byName: v.triage.byName, at: iso(v.triage.at)!, ...(v.triage.changeReason ? { changeReason: v.triage.changeReason } : {}),
+          history: (v.triage.history ?? []).map((h: any) => ({ colour: h.colour, byName: h.byName, at: iso(h.at)!, ...(h.reason ? { reason: h.reason } : {}), kind: h.kind })),
+        }
       : null,
     vitalsId: v.vitalsId ?? null,
     painScore: v.painScore ?? null,
@@ -107,6 +117,7 @@ export function toVisitView(v: any): ErVisitView {
     pathways: (v.pathways ?? []).map((p: any) => ({
       key: p.key,
       startedBy: p.startedBy,
+      ...(p.startedByName ? { startedByName: p.startedByName } : {}),
       cancelled: p.cancelled ? { byName: p.cancelled.byName, reason: p.cancelled.reason, at: iso(p.cancelled.at)! } : null,
     })),
     steps: (v.steps ?? []).map((s: any) => ({ key: s.key, doneAt: iso(s.doneAt), byName: s.byName ?? null })),

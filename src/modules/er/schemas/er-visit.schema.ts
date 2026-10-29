@@ -14,6 +14,17 @@ export type ErStatus = (typeof ER_STATUSES)[number];
 export const ER_DISPOSITIONS = ['admit', 'home', 'transfer', 'left-against-advice', 'died'] as const;
 export type ErDispositionKind = (typeof ER_DISPOSITIONS)[number];
 
+/** One colour decision. The list only ever grows. */
+@Schema({ _id: false })
+export class ErTriageEntry {
+  @Prop({ required: true }) colour: string;
+  @Prop({ required: true }) byName: string;
+  @Prop({ required: true }) at: Date;
+  @Prop() reason?: string;
+  @Prop({ required: true, type: String, enum: ['triage', 'retriage'] }) kind: 'triage' | 'retriage';
+}
+
+/** `byName`, `at` and `changeReason` stay the first triage's; `colour` is the current one; `history` has every change. */
 @Schema({ _id: false })
 export class ErTriage {
   @Prop({ required: true }) suggested: string;
@@ -22,6 +33,7 @@ export class ErTriage {
   @Prop({ required: true }) byName: string;
   @Prop({ required: true }) at: Date;
   @Prop() changeReason?: string;
+  @Prop({ type: [ErTriageEntry], default: [] }) history: ErTriageEntry[];
 }
 
 @Schema({ _id: false })
@@ -35,6 +47,8 @@ export class ErCancelled {
 export class ErPathway {
   @Prop({ required: true }) key: string;
   @Prop({ required: true, type: String, enum: ['rules', 'staff'] }) startedBy: 'rules' | 'staff';
+  /** Who started it, when `startedBy` is staff. */
+  @Prop() startedByName?: string;
   @Prop({ type: ErCancelled }) cancelled?: ErCancelled;
 }
 
@@ -71,7 +85,7 @@ export class ErVisit {
   @Prop() painScore?: number;
   @Prop({ type: Types.ObjectId }) bay?: Types.ObjectId;
   @Prop({ required: true, type: String, enum: ER_STATUSES, default: 'waiting-triage' }) status: ErStatus;
-  @Prop({ type: [ErPathway], default: [] }) pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; cancelled?: ErCancelled }[];
+  @Prop({ type: [ErPathway], default: [] }) pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; startedByName?: string; cancelled?: ErCancelled }[];
   @Prop({ type: [ErStep], default: [] }) steps: { key: StepKey; doneAt?: Date; byName?: string }[];
   @Prop() doctorSeenAt?: Date;
   @Prop({ type: ErDisposition }) disposition?: ErDisposition;
