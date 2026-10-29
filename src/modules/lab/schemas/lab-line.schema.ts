@@ -57,3 +57,4 @@ export class LabLine {
 
 export const LabLineSchema = SchemaFactory.createForClass(LabLine);
 LabLineSchema.index({ releasedRealAt: 1 });
+LabLineSchema.index({ status: 1, reportId: 1 });

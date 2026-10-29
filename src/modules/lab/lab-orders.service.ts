@@ -7,9 +7,11 @@ import { CasesService } from '../coordinator/cases.service';
 import type { Priority as CasePriority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
+import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { COLLECT_MINUTES, LAB_TESTS, Priority, TUBE_LABEL, groupIntoTubes, targetMinutes, testByKey } from './lab-catalogue';
+import { writeLabReport } from './lab-report-writer';
 import { LabSettingsService } from './lab-settings.service';
 import { LAB_PRIORITIES, LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
 import { LabLine, LabLineDocument, LabLineStatus } from './schemas/lab-line.schema';
@@ -19,6 +21,10 @@ import { LabArea, LabLocation, LabLocationDocument } from './schemas/lab-locatio
 const MIN_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const SUMMARY_MAX = 140;
+/** An order younger than this is still being placed; the reconcile pass leaves it alone. */
+const RECONCILE_GRACE_MS = 30_000;
+const RECONCILE_BATCH = 50;
+const RECONCILE_WINDOW = 500;
 const CLOSED_LINE: LabLineStatus[] = ['released', 'cancelled'];
 const CASE_PRIORITY: Record<Priority, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
 
@@ -36,6 +42,9 @@ export interface LabRequestQuery {
   priority?: Priority;
   /** true: not finished yet; false: finished. */
   open?: boolean;
+  /** Request number, UHID or patient name (part of it, any case). */
+  search?: string;
+  area?: LabArea;
   limit?: number;
 }
 
@@ -86,6 +95,16 @@ export interface LabRequestView {
   done: boolean;
 }
 
+export interface SampleLabel {
+  sampleNumber: string;
+  tubeLabel: string;
+  tests: string[];
+  patientUhid: string;
+  requestNumber: string;
+  priority: Priority;
+  orderedAt: string;
+}
+
 const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const earliest = (dates: Date[]) => new Date(Math.min(...dates.map((d) => d.getTime())));
@@ -115,6 +134,7 @@ export class LabOrdersService {
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
     private readonly labSettings: LabSettingsService,
+    @InjectModel(LabTestReport.name) private readonly reports: Model<LabReportDocument>,
   ) {}
 
   // ---------- ordering ----------
@@ -255,6 +275,88 @@ export class LabOrdersService {
     }
   }
 
+  // ---------- reconcile ----------
+
+  /**
+   * The safety net the scheduler runs every minute. It repairs what a crash between "do the work" and
+   * "tell the Coordinator" can leave behind, each branch bounded:
+   * (a) lab.ordered never sent, (b) all samples collected but no collection-done, (c) every line closed
+   * but no request-done, (d) a released line that has no report. Returns how many each branch fixed.
+   */
+  async reconcile(): Promise<{ ordered: number; collectionDone: number; requestDone: number; reports: number }> {
+    const out = { ordered: 0, collectionDone: 0, requestDone: 0, reports: 0 };
+
+    // (a) Not announced and older than the grace period, so an order still being placed is left alone.
+    const stale = await this.requests
+      .find({ announcedAt: { $exists: false }, createdAt: { $lt: new Date(Date.now() - RECONCILE_GRACE_MS) } })
+      .sort({ _id: 1 })
+      .limit(RECONCILE_BATCH)
+      .exec();
+    for (const r of stale) {
+      await this.announceOrdered(r);
+      out.ordered++;
+    }
+
+    // (b) and (c) look at requests that are not finished, oldest first, in a bounded window.
+    const open = await this.requests
+      .find({ doneAt: { $exists: false } })
+      .sort({ _id: 1 })
+      .limit(RECONCILE_WINDOW)
+      .select('_id collectionDoneAt')
+      .lean<{ _id: Types.ObjectId; collectionDoneAt?: Date }[]>()
+      .exec();
+    if (open.length) {
+      const ids = open.map((r) => r._id);
+      const sampleStats = await this.samples
+        .aggregate<{ _id: Types.ObjectId; taken: number; waiting: number }>([
+          { $match: { request: { $in: ids } } },
+          {
+            $group: {
+              _id: '$request',
+              taken: { $sum: { $cond: [{ $in: ['$status', ['collected', 'received']] }, 1, 0] } },
+              waiting: { $sum: { $cond: [{ $eq: ['$status', 'waiting'] }, 1, 0] } },
+            },
+          },
+        ])
+        .exec();
+      const lineStats = await this.lines
+        .aggregate<{ _id: Types.ObjectId; total: number; open: number }>([
+          { $match: { request: { $in: ids } } },
+          { $group: { _id: '$request', total: { $sum: 1 }, open: { $sum: { $cond: [{ $in: ['$status', CLOSED_LINE] }, 0, 1] } } } },
+        ])
+        .exec();
+      const sById = new Map(sampleStats.map((s) => [String(s._id), s]));
+      const lById = new Map(lineStats.map((l) => [String(l._id), l]));
+      for (const r of open) {
+        const s = sById.get(String(r._id));
+        if (!r.collectionDoneAt && s && s.taken > 0 && s.waiting === 0) {
+          await this.announceDone(r._id, 'lab.collection-done');
+          out.collectionDone++;
+        }
+        const l = lById.get(String(r._id));
+        if (l && l.total > 0 && l.open === 0) {
+          await this.announceDone(r._id, 'lab.request-done');
+          out.requestDone++;
+        }
+      }
+    }
+
+    // (d) Released but no report: write it and record the reportId.
+    const unreported = await this.lines
+      .find({ status: 'released', reportId: { $exists: false } })
+      .sort({ _id: 1 })
+      .limit(RECONCILE_BATCH)
+      .exec();
+    for (const line of unreported) {
+      const request = await this.requests.findById(line.request).exec();
+      const def = testByKey(line.test);
+      if (!request || !def) continue;
+      await writeLabReport(this.reports, this.lines, line, request, def, line.version || 1);
+      out.reports++;
+    }
+    return out;
+  }
+
   // ---------- cancelling ----------
 
   async cancelLine(actor: Actor, lineId: string, reason: string): Promise<LabRequestView> {
@@ -375,8 +477,31 @@ export class LabOrdersService {
     if (query.priority) filter.priority = query.priority;
     if (query.open === true) filter.doneAt = { $exists: false };
     if (query.open === false) filter.doneAt = { $exists: true };
+    const search = typeof query.search === 'string' ? query.search.trim().slice(0, 100) : '';
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ number: rx }, { patientUhid: rx }, { patientName: rx }];
+    }
     const limit = Math.min(Math.max(Math.trunc(Number(query.limit)) || 100, 1), 500);
-    return this.toViews(await this.requests.find(filter).sort({ createdAt: -1, _id: -1 }).limit(limit).exec());
+    const views = await this.toViews(await this.requests.find(filter).sort({ createdAt: -1, _id: -1 }).limit(limit).exec());
+    return query.area ? views.filter((v) => v.location.area === query.area) : views;
+  }
+
+  /** Tube labels for a request's live samples. No patient name: a label carries the UHID and the numbers only. */
+  async labels(requestId: string): Promise<SampleLabel[]> {
+    const view = await this.get(requestId);
+    const label = new Map(view.lines.map((l) => [l.id, l.label]));
+    return view.samples
+      .filter((s) => s.status !== 'rejected' && s.status !== 'cancelled')
+      .map((s) => ({
+        sampleNumber: s.number,
+        tubeLabel: s.tubeLabel,
+        tests: s.lines.map((id) => label.get(id)).filter((t): t is string => !!t),
+        patientUhid: view.patientUhid,
+        requestNumber: view.number,
+        priority: view.priority,
+        orderedAt: view.orderedAt,
+      }));
   }
 
   forPatient(patientId: string): Promise<LabRequestView[]> {

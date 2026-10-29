@@ -38,6 +38,50 @@ export interface CollectionItem {
   overdue: boolean;
 }
 
+export interface WorklistSample {
+  sampleId: string;
+  sampleNumber: string;
+  tube: string;
+  tubeLabel: string;
+  tests: string[];
+  requestId: string;
+  requestNumber: string;
+  priority: Priority;
+  patientName: string;
+  patientUhid: string;
+  collectedAt: string | null;
+  collectedBy: string | null;
+}
+
+export interface WorklistLine {
+  lineId: string;
+  test: string;
+  label: string;
+  requestId: string;
+  requestNumber: string;
+  priority: Priority;
+  patientName: string;
+  patientUhid: string;
+  tatDueAt: string;
+  results: { param: string; value: string | number; unit: string; flag: string; critical: boolean }[];
+  critical: boolean;
+  enteredBy: { name: string } | null;
+  enteredAt: string | null;
+  sentBack: { by: string; reason: string; at: string } | null;
+}
+
+export interface Worklist {
+  /** Collected, waiting for the lab to receive them. */
+  toReceive: WorklistSample[];
+  /** Received tests with no results yet (a first entry). */
+  toEnter: WorklistLine[];
+  /** Entered results waiting for a second person; criticals first. */
+  toValidate: WorklistLine[];
+  /** Received tests a validator sent back for correction. */
+  sentBack: WorklistLine[];
+}
+
+const WORKLIST_MAX = 200;
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const cut = (s: string) => s.slice(0, SUMMARY_MAX);
 
@@ -208,5 +252,75 @@ export class LabBenchService {
     const s = isValidObjectId(id) ? await this.samples.findById(id).exec() : null;
     if (!s) throw new NotFoundException('Sample not found');
     return s;
+  }
+
+  // ---------- the bench worklist ----------
+
+  async worklist(): Promise<Worklist> {
+    const [collected, received, awaiting] = await Promise.all([
+      this.samples.find({ status: 'collected' }).sort({ _id: 1 }).limit(WORKLIST_MAX).exec(),
+      this.lines.find({ status: 'received' }).sort({ _id: 1 }).limit(WORKLIST_MAX).exec(),
+      this.lines.find({ status: 'awaiting-validation' }).sort({ _id: 1 }).limit(WORKLIST_MAX).exec(),
+    ]);
+    const lineIds = collected.flatMap((s) => s.lines);
+    const sampleLines = lineIds.length ? await this.lines.find({ _id: { $in: lineIds } }).select('test').lean<{ _id: Types.ObjectId; test: string }[]>().exec() : [];
+    const testOf = new Map(sampleLines.map((l) => [String(l._id), l.test]));
+    const requestIds = [...new Set([...collected.map((s) => String(s.request)), ...received.map((l) => String(l.request)), ...awaiting.map((l) => String(l.request))])];
+    const requests = requestIds.length ? await this.requests.find({ _id: { $in: requestIds } }).exec() : [];
+    const byId = new Map(requests.map((r) => [String(r._id), r]));
+    const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
+
+    const toReceive: WorklistSample[] = [];
+    for (const s of collected) {
+      const r = byId.get(String(s.request));
+      if (!r) continue;
+      toReceive.push({
+        sampleId: String(s._id),
+        sampleNumber: s.number,
+        tube: s.tube,
+        tubeLabel: TUBE_LABEL[s.tube],
+        tests: s.lines.map((id) => testOf.get(String(id))).filter((t): t is string => !!t).map((t) => testByKey(t)?.label ?? t),
+        requestId: String(r._id),
+        requestNumber: r.number,
+        priority: r.priority,
+        patientName: r.patientName,
+        patientUhid: r.patientUhid,
+        collectedAt: iso(s.collected?.at),
+        collectedBy: s.collected?.by ?? null,
+      });
+    }
+    toReceive.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+
+    const lineView = (l: LabLineDocument): WorklistLine | null => {
+      const r = byId.get(String(l.request));
+      if (!r) return null;
+      const critical = (l.results ?? []).some((x) => x.critical);
+      return {
+        lineId: String(l._id),
+        test: l.test,
+        label: testByKey(l.test)?.label ?? l.test,
+        requestId: String(r._id),
+        requestNumber: r.number,
+        priority: r.priority,
+        patientName: r.patientName,
+        patientUhid: r.patientUhid,
+        tatDueAt: iso(l.tatDueAt)!,
+        results: l.results ?? [],
+        critical,
+        enteredBy: l.enteredBy ? { name: l.enteredBy.name } : null,
+        enteredAt: iso(l.enteredAt),
+        sentBack: l.sentBack ? { by: l.sentBack.by, reason: l.sentBack.reason, at: iso(l.sentBack.at)! } : null,
+      };
+    };
+    const order = (a: WorklistLine, b: WorklistLine) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.tatDueAt.localeCompare(b.tatDueAt);
+    const received_ = received.map(lineView).filter((v): v is WorklistLine => !!v);
+    const toValidate = awaiting.map(lineView).filter((v): v is WorklistLine => !!v);
+    toValidate.sort((a, b) => Number(b.critical) - Number(a.critical) || order(a, b));
+    return {
+      toReceive,
+      toEnter: received_.filter((v) => !v.sentBack).sort(order),
+      toValidate,
+      sentBack: received_.filter((v) => !!v.sentBack).sort(order),
+    };
   }
 }

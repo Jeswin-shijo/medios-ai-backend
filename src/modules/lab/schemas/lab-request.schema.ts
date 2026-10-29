@@ -31,3 +31,5 @@ export class LabRequest {
 }
 
 export const LabRequestSchema = SchemaFactory.createForClass(LabRequest);
+LabRequestSchema.index({ doneAt: 1 });
+LabRequestSchema.index({ announcedAt: 1 });

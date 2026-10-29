@@ -43,7 +43,7 @@ describe('LabOrdersService', () => {
     registry = new AgentRegistry();
     messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    service = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
+    service = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), m.LabTestReport);
     registration = new LabCoordinatorRegistration(registry, service, messages, m.LabRequest, m.LabLine);
     registration.onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });

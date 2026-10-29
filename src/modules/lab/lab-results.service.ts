@@ -2,15 +2,16 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { clinicNow, displayDate, displayDateTime, displayTime } from '../../common/utils/clinic-time';
+import { clinicNow, displayDateTime } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import type { Priority as CasePriority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
-import { LabAiService, templateSummary } from './lab-ai';
-import { LabTestDef, effectiveLimits, flagValue, rangeText, testByKey } from './lab-catalogue';
+import { LabAiService } from './lab-ai';
+import { LabTestDef, effectiveLimits, flagValue, testByKey } from './lab-catalogue';
 import { LabOrdersService } from './lab-orders.service';
+import { writeLabReport } from './lab-report-writer';
 import { LabSettingsService } from './lab-settings.service';
 import { LabLine, LabLineDocument, LabResultRow } from './schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
@@ -19,7 +20,6 @@ const SUMMARY_MAX = 140;
 const ACK_MINUTES = 15;
 const CLOSED_LINE = ['released', 'cancelled'];
 const CASE_PRIORITY: Record<string, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
-const STATUS_LABEL = { normal: 'Normal', low: 'Low', high: 'High', abnormal: 'Abnormal' } as const;
 
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const cut = (s: string) => s.slice(0, SUMMARY_MAX);
@@ -236,40 +236,8 @@ export class LabResultsService {
     });
   }
 
-  /** One LabTestReport per line: a later release or amendment updates it. */
-  private async writeReport(line: LabLineDocument, request: LabRequestDocument, def: LabTestDef, version: number): Promise<Types.ObjectId> {
-    const now = clinicNow();
-    const parameters = line.results.map((r) => ({
-      name: r.param,
-      result: r.value,
-      referenceRange: rangeText(def.key, def.params.find((p) => p.name === r.param)!),
-      unit: r.unit,
-      status: STATUS_LABEL[r.flag],
-      critical: r.critical,
-    }));
-    const fields = {
-      uhid: request.patientUhid,
-      testName: def.label,
-      category: def.category,
-      date: displayDate(now),
-      time: displayTime(now),
-      status: line.results.some((r) => r.flag !== 'normal') ? 'Abnormal' : 'Completed',
-      groups: [{ category: def.label, parameters }],
-      labLine: String(line._id),
-      amended: version > 1,
-      aiSummary: {
-        sample: false,
-        ...templateSummary(
-        line.results.map((r, i) => ({ name: r.param, value: r.value, unit: r.unit, referenceRange: parameters[i].referenceRange, flag: r.flag, critical: r.critical })),
-        ),
-      },
-    };
-    let report = line.reportId ? await this.reports.findByIdAndUpdate(line.reportId, { $set: fields }, { new: true }).exec() : null;
-    if (!report) {
-      report = await this.reports.create(fields);
-      await this.lines.updateOne({ _id: line._id }, { $set: { reportId: report._id } }).exec();
-    }
-    return report._id as Types.ObjectId;
+  private writeReport(line: LabLineDocument, request: LabRequestDocument, def: LabTestDef, version: number): Promise<Types.ObjectId> {
+    return writeLabReport(this.reports, this.lines, line, request, def, version);
   }
 
   /** The earlier critical was amended to normal but is still unacknowledged: say so on its alert. */

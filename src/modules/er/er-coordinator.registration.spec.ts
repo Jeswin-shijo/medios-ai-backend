@@ -121,7 +121,7 @@ describe('ErCoordinatorRegistration', () => {
     const settings = new SettingsService(m.HospitalSettings);
     triage = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings), visits);
     new ErCoordinatorRegistration(registry, visits, bays, messages, triage, m.ErVisit, m.Clock).onModuleInit();
-    labOrders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, patients, cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
+    labOrders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, patients, cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), m.LabTestReport);
     new LabCoordinatorRegistration(registry, labOrders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, labOrders, messages);
 

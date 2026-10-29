@@ -38,6 +38,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { BedsModule } from './modules/beds/beds.module';
 import { CoordinatorModule } from './modules/coordinator/coordinator.module';
 import { ErModule } from './modules/er/er.module';
+import { LabModule } from './modules/lab/lab.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -86,6 +87,7 @@ import { HealthController } from './health.controller';
     BedsModule,
     CoordinatorModule,
     ErModule,
+    LabModule,
   ],
   controllers: [HealthController],
   // Guards run in this order: rate limit, then authentication, then role checks.

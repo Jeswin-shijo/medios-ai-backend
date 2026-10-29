@@ -61,7 +61,7 @@ describe('Lab close check, status, overview and settings', () => {
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     settings = new LabSettingsService(new SettingsService(m.HospitalSettings));
-    orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, settings);
+    orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, settings, m.LabTestReport);
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
     results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings, noAi);
