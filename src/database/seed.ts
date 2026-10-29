@@ -27,6 +27,7 @@ import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
 import { seedEr } from './seed-er';
+import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
@@ -44,6 +45,8 @@ const STAFF_ACCOUNTS = [
   { email: 'pharmacy@medios.ai', name: 'Neethu George', department: 'Pharmacy', role: 'pharmacist' },
   { email: 'lab@medios.ai', name: 'Vishnu Prasad', department: 'Laboratory', role: 'lab' },
   { email: 'frontdesk@medios.ai', name: 'Front Desk', department: 'Reception', role: 'staff' },
+  // The pathologist validates what lab@ enters: results need two people.
+  ...LAB_DEMO_ACCOUNTS,
 ];
 const BCRYPT_ROUNDS = 12;
 /** The clinic day the fixtures describe (CLINIC_DATE in development). */
@@ -137,7 +140,7 @@ async function seed() {
 
   const [doctor] = fixture('users');
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_ROUNDS);
-  await replace('users (doctor, admin, nurse, pharmacy, lab, front desk)', model(User, UserSchema), [
+  await replace('users (doctor, admin, nurse, pharmacy, lab, front desk, pathologist)', model(User, UserSchema), [
     {
       email: DEMO_EMAIL,
       passwordHash,
@@ -192,6 +195,8 @@ async function seed() {
   await seedCoordinator(process.env.CLINIC_DATE ?? DEMO_DAY);
   // The ER day: visits, bays, cases, clocks and messages (after the Coordinator, which wipes cases and clocks).
   await seedEr(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // The lab day: requests on the ER, ward and outpatient cases above, with samples, results, reports, clocks and messages.
+  await seedLab(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

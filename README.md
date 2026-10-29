@@ -281,6 +281,19 @@ The ER agent runs the emergency department's front door: arrival, triage, doctor
 
 ---
 
+## 🧪 Lab Agent
+
+The Lab agent runs the lab's day: orders, sample collection, receiving and rejecting samples, result entry, validation by a second person, release and critical values. Fixed rules flag every value; people enter, validate and act; the AI only summarises released results (with a template fallback). It lives in `src/modules/lab`.
+
+- **Requests:** a doctor orders up to 10 tests at one priority (`LR-0001`, ...), and each tube becomes a sample (`S-260926-0001`, ...). Priorities are STAT, urgent and routine (collect within 15, 60 or 240 minutes).
+- **Two-person rule:** the person who enters a result cannot validate it. Release writes the Lab Report, and an amendment needs a reason and a second validation.
+- **Critical values:** a critical result raises a "Lab Alert" in Tasks & Alerts and starts the `lab-critical` clock. A doctor or admin acknowledges it, or it escalates up the `lab-critical` ladder (Duty doctor, then Medical superintendent).
+- **With the Coordinator:** each request joins the patient's case, and the Lab sends messages (never a name) such as `lab.ordered`, `lab.received` and `lab.resulted`. Its clocks (`lab-collect`, `lab-recollect`, `lab-tat` and `lab-critical`) escalate up the `lab` ladder: Lab in charge, Duty administrator, Medical superintendent. A scheduler pass every 60 seconds (`reconcile()`) resends anything a crash left unsent.
+- **Routes** (all under `/api/lab`): see `lab.controller.ts`.
+- **Demo data.** `npm run seed` also loads about 30 requests on the clinic day: in the ER (on the open ER cases, one with a blood culture for the sepsis pathway), on the wards (on the admitted patients' cases) and in outpatients (cases the Lab opens for patients who had none). They cover every state: waiting, collected, received, awaiting validation, released (one amended) and cancelled, with two rejected samples that each have a recollection. Three results are critical: one released five minutes ago and still unacknowledged (its clock runs out about 10 minutes after the seed, then it escalates), and two acknowledged by Dr. Shajin. Every released result has its Lab Report, and 168 hourly snapshots feed the cards. Demo logins: `lab@medios.ai` enters results (and holds Lab in charge), `pathologist@medios.ai` ("Dr. Meera Nair") validates them, and `doctor@medios.ai` holds Duty doctor; password `Admin@123`, local only. The Lab seed runs only inside the full `npm run seed`, and it clears only Lab data first: its requests, samples, lines, locations and snapshots, the Lab's messages, clocks, cases and escalations, its Lab Alerts and the Lab Reports that came from a test line. The main demo's own lab reports stay. Reseed right before a demo: clocks run on real time, so seeded work goes overdue within minutes.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.
