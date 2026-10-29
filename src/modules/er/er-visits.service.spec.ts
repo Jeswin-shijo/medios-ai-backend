@@ -11,6 +11,7 @@ import { PatientCardsService } from '../queue/patient-cards.service';
 import { QueueService } from '../queue/queue.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
+import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration } from './er-coordinator.registration';
 import { ErVisitsService } from './er-visits.service';
 import { PATHWAYS } from './er-rules';
@@ -44,13 +45,14 @@ describe('ErVisitsService', () => {
     await resetTestDb();
     patientCount = 0;
     registry = new AgentRegistry();
-    new ErCoordinatorRegistration(registry).onModuleInit();
     messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     const patients = new PatientsService(m.Patient);
     // A card lookup never issues a queue token, so the queue service is not needed here.
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
-    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages);
+    const bays = new ErBaysService(m.ErBay, m.ErVisit);
+    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    new ErCoordinatorRegistration(registry, service, bays, messages, m.ErVisit, m.Clock).onModuleInit();
   });
 
   test('the ER agent registers its message types, clocks and rule', () => {

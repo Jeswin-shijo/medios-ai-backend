@@ -20,6 +20,7 @@ import { Approval, ApprovalDocument, ApprovalSchema } from '../modules/coordinat
 import { CoordinatorSnapshot, CoordinatorSnapshotDocument, CoordinatorSnapshotSchema } from '../modules/coordinator/schemas/coordinator-snapshot.schema';
 import { ChatLog, ChatLogDocument, ChatLogSchema } from '../modules/coordinator/schemas/chat-log.schema';
 import { ErVisit, ErVisitDocument, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
+import { ErBay, ErBayDocument, ErBaySchema } from '../modules/er/schemas/er-bay.schema';
 import { ErExpected, ErExpectedDocument, ErExpectedSchema } from '../modules/er/schemas/er-expected.schema';
 import { VitalsRecord, VitalsRecordDocument, VitalsRecordSchema } from '../modules/vitals/schemas/vitals.schema';
 import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
@@ -69,6 +70,7 @@ export function models() {
     ChatLog: model(ChatLog, ChatLogSchema) as Model<ChatLogDocument>,
     ErVisit: model(ErVisit, ErVisitSchema) as Model<ErVisitDocument>,
     VitalsRecord: model(VitalsRecord, VitalsRecordSchema) as Model<VitalsRecordDocument>,
+    ErBay: model(ErBay, ErBaySchema) as Model<ErBayDocument>,
     ErExpected: model(ErExpected, ErExpectedSchema) as Model<ErExpectedDocument>,
     PatientCard: model(PatientCard, PatientCardSchema) as Model<PatientCardDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,

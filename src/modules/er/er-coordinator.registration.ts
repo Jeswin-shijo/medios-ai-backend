@@ -1,9 +1,17 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
+import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
+import { MessagesService } from '../coordinator/messages.service';
+import { ErBaysService } from './er-bays.service';
 import { PATHWAYS, PathwayKey, StepKey } from './er-rules';
+import { ErVisitsService } from './er-visits.service';
+import { ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
 
 const TRIAGE_MINUTES = 10;
+const DAY_MS = 24 * 60 * 60_000;
 
 const type = (t: string, description: string, payload: MessageTypeDef['payload']): MessageTypeDef => ({
   type: t,
@@ -64,10 +72,32 @@ const doctorDue = (payload: Record<string, unknown>): Date | null => {
   return d && !isNaN(d.getTime()) ? d : null;
 };
 
+/**
+ * The share of doctor reviews done by their due time, among those finished since `since` (a real
+ * time, not the clinic clock). A review closed by the patient leaving counts too. Null when none.
+ */
+export async function erOnTimePct(clocks: Model<ClockDocument>, since: Date): Promise<number | null> {
+  const done = await clocks
+    .find({ def: 'er-doctor', stoppedAt: { $gte: since } })
+    .select('dueAt stoppedAt')
+    .lean<{ dueAt: Date; stoppedAt: Date }[]>()
+    .exec();
+  if (!done.length) return null;
+  const onTime = done.filter((c) => c.stoppedAt.getTime() <= c.dueAt.getTime()).length;
+  return Math.round((onTime / done.length) * 100);
+}
+
 /** Tells the Coordinator what the ER agent sends, and the clocks and rule it brings. */
 @Injectable()
 export class ErCoordinatorRegistration implements OnModuleInit {
-  constructor(private readonly registry: AgentRegistry) {}
+  constructor(
+    private readonly registry: AgentRegistry,
+    private readonly visitsService: ErVisitsService,
+    private readonly bays: ErBaysService,
+    private readonly messages: MessagesService,
+    @InjectModel(ErVisit.name) private readonly visits: Model<ErVisitDocument>,
+    @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
+  ) {}
 
   onModuleInit(): void {
     this.registry.register(this.definition());
@@ -100,6 +130,8 @@ export class ErCoordinatorRegistration implements OnModuleInit {
         },
         ...STEP_CLOCKS,
       ],
+      handles: [{ type: 'bed.assigned', handler: (messageId) => this.onBedAssigned(messageId) }],
+      closeChecks: [{ agent: 'er', label: 'ER visit finished', check: (caseId) => this.closeCheck(caseId) }],
       rules: [
         {
           key: 'er-auto-pathways',
@@ -109,8 +141,29 @@ export class ErCoordinatorRegistration implements OnModuleInit {
           default: true,
         },
       ],
-      // Task 5 fills in the real numbers.
-      status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
+      status: () => this.status(),
     };
+  }
+
+  /** The Bed Agent placed the patient on this message's case. */
+  private async onBedAssigned(messageId: string): Promise<void> {
+    const message = await this.messages.get(messageId);
+    if (message?.case) await this.visitsService.onBedAssigned(message.case);
+  }
+
+  /** 'n/a' with no ER visit on the case; 'pass' when every one has left. */
+  private async closeCheck(caseId: string): Promise<'pass' | 'fail' | 'n/a'> {
+    const statuses = await this.visits.find({ case: caseId }).select('status').lean<{ status: string }[]>().exec();
+    if (!statuses.length) return 'n/a';
+    return statuses.every((v) => v.status === 'left') ? 'pass' : 'fail';
+  }
+
+  private async status() {
+    const [open, capacity, onTimePct] = await Promise.all([
+      this.visits.countDocuments({ status: { $in: [...OPEN_ER_STATUSES] } }).exec(),
+      this.bays.countInUse(),
+      erOnTimePct(this.clocks, new Date(Date.now() - DAY_MS)),
+    ]);
+    return { open, capacity, onTimePct };
   }
 }

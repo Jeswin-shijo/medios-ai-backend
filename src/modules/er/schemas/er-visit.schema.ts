@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import type { ComplaintKey, PathwayKey, StepKey, TriageColour } from '../er-rules';
 
 export type ErVisitDocument = ErVisit & Document;
@@ -72,7 +72,7 @@ export class ErDisposition {
 export class ErVisit {
   /** ER-0001, from the `er` counter. */
   @Prop({ required: true, unique: true }) number: string;
-  @Prop({ type: Types.ObjectId, ref: 'Patient', required: true }) patient: Types.ObjectId;
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Patient', required: true }) patient: Types.ObjectId;
   @Prop({ required: true }) patientUhid: string;
   @Prop({ required: true }) patientName: string;
   @Prop({ required: true, type: String, enum: ER_MODES }) mode: ErMode;
@@ -83,7 +83,9 @@ export class ErVisit {
   @Prop({ type: ErTriage }) triage?: ErTriage;
   @Prop() vitalsId?: string;
   @Prop() painScore?: number;
-  @Prop({ type: Types.ObjectId }) bay?: Types.ObjectId;
+  @Prop({ type: MongooseSchema.Types.ObjectId }) bay?: Types.ObjectId;
+  /** The bay's name, kept here so the visit shows it without a lookup. An occupied bay cannot be renamed. */
+  @Prop() bayName?: string;
   @Prop({ required: true, type: String, enum: ER_STATUSES, default: 'waiting-triage' }) status: ErStatus;
   @Prop({ type: [ErPathway], default: [] }) pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; startedByName?: string; cancelled?: ErCancelled }[];
   @Prop({ type: [ErStep], default: [] }) steps: { key: StepKey; doneAt?: Date; byName?: string }[];
@@ -94,7 +96,7 @@ export class ErVisit {
   @Prop() handoverNote?: string;
   /** Set once er.arrived reached the Coordinator; a visit without it is announced again on the next arrival. */
   @Prop() announcedAt?: Date;
-  @Prop({ type: Types.ObjectId, ref: 'Case', required: true }) case: Types.ObjectId;
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Case', required: true }) case: Types.ObjectId;
 }
 
 export const ErVisitSchema = SchemaFactory.createForClass(ErVisit);

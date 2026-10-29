@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId, mongo } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -9,9 +9,10 @@ import { MessagesService } from '../coordinator/messages.service';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { PatientsService } from '../patients/patients.service';
 import { PatientCardsService } from '../queue/patient-cards.service';
-import { COLOUR_RANK, COMPLAINTS, ComplaintKey, PathwayKey, StepKey, TriageColour } from './er-rules';
+import { BED_PRIORITY, COLOUR_RANK, COMPLAINTS, ComplaintKey, PathwayKey, StepKey, TriageColour } from './er-rules';
+import { ErBaysService } from './er-bays.service';
 import { ErExpected, ErExpectedDocument } from './schemas/er-expected.schema';
-import { ER_MODES, ErDispositionKind, ErMode, ErStatus, ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
+import { ER_DISPOSITIONS, ER_MODES, ErDispositionKind, ErMode, ErStatus, ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
 
 const DUPLICATE_KEY = 11000;
 const HOUR_MS = 3_600_000;
@@ -64,7 +65,6 @@ export interface ErVisitView {
   vitalsId: string | null;
   painScore: number | null;
   bayId: string | null;
-  /** Filled in once bays exist. */
   bayName: string | null;
   status: ErStatus;
   pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; startedByName?: string; cancelled: { byName: string; reason: string; at: string } | null }[];
@@ -112,7 +112,7 @@ export function toVisitView(v: any): ErVisitView {
     vitalsId: v.vitalsId ?? null,
     painScore: v.painScore ?? null,
     bayId: v.bay ? String(v.bay) : null,
-    bayName: null,
+    bayName: v.bayName ?? null,
     status: v.status,
     pathways: (v.pathways ?? []).map((p: any) => ({
       key: p.key,
@@ -163,6 +163,7 @@ export class ErVisitsService {
     private readonly cards: PatientCardsService,
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
+    private readonly bays: ErBaysService,
   ) {}
 
   private async nextNumber(): Promise<string> {
@@ -347,5 +348,91 @@ export class ErVisitsService {
       this.expected.find({ state: 'waiting' }).sort({ expectedAt: 1 }).lean().exec(),
     ]);
     return { visits: visits.sort(boardOrder).map(toVisitView), expected: expected.map(toExpectedView) };
+  }
+
+  /**
+   * The doctor's decision. `admit` waits for a bed (the bay is kept); every other kind sends the
+   * patient out of the ER, from any open status, because a patient can leave before triage or
+   * while waiting for a bed. Each change is one guarded update, so a repeat or a race is refused.
+   */
+  async dispose(actor: Actor, visitId: string, kind: ErDispositionKind, notes?: string): Promise<ErVisitView> {
+    if (!ER_DISPOSITIONS.includes(kind)) throw new BadRequestException('"kind" must be admit, home, transfer, left-against-advice or died');
+    const visit = isValidObjectId(visitId) ? await this.visits.findById(visitId).exec() : null;
+    if (!visit) throw new NotFoundException('ER visit not found');
+    const at = clinicNow();
+    const disposition = { kind, byName: actor.name, at, notes: (notes ?? '').trim() };
+
+    if (kind === 'admit') {
+      const updated = await this.visits
+        .findOneAndUpdate({ _id: visit._id, status: { $in: ['waiting-doctor', 'in-treatment'] } }, { $set: { status: 'waiting-bed', disposition } }, { new: true })
+        .exec();
+      if (!updated) {
+        const now = await this.visits.findById(visit._id).select('status').lean().exec();
+        if (now?.status === 'left') throw new ConflictException('This patient has left the ER.');
+        if (now?.status === 'waiting-bed') throw new ConflictException('This patient is already waiting for a bed.');
+        throw new ConflictException('Triage this patient first.');
+      }
+      await this.sendDisposition(updated, kind);
+      return toVisitView(updated);
+    }
+
+    const updated = await this.visits
+      .findOneAndUpdate(
+        { _id: visit._id, status: { $ne: 'left' } },
+        { $set: { status: 'left', leftAt: at, leftReason: kind, disposition }, $unset: { bay: 1, bayName: 1 } },
+        { new: true },
+      )
+      .exec();
+    if (!updated) throw new ConflictException('This patient has left the ER.');
+    await this.bays.freeVisit(visitId);
+    await this.sendDisposition(updated, kind);
+    await this.sendLeft(updated, kind);
+    return toVisitView(updated);
+  }
+
+  /**
+   * The Bed Agent placed the patient: a visit of this case that waited for a bed leaves the ER.
+   * No such visit is normal (a ward admission that never came through the ER). Safe to repeat.
+   */
+  async onBedAssigned(caseId: string): Promise<void> {
+    if (!isValidObjectId(caseId)) return;
+    const updated = await this.visits
+      .findOneAndUpdate(
+        { case: caseId, status: 'waiting-bed' },
+        { $set: { status: 'left', leftAt: clinicNow(), leftReason: 'admitted' }, $unset: { bay: 1, bayName: 1 } },
+        { new: true },
+      )
+      .exec();
+    if (!updated) return;
+    await this.bays.freeVisit(String(updated._id));
+    await this.sendLeft(updated, 'admitted');
+  }
+
+  private async sendDisposition(visit: ErVisitDocument, kind: ErDispositionKind): Promise<void> {
+    const colour = visit.triage?.colour as TriageColour | undefined;
+    await this.messages.send({
+      case: String(visit.case),
+      from: 'er',
+      to: ['coordinator'],
+      type: 'er.disposition',
+      priority: colour ? BED_PRIORITY[colour] : 'medium',
+      summary: `${visit.number}: decision is ${kind}`,
+      payload: { visitId: String(visit._id), kind },
+      // Admit, then transfer, is a real sequence; only the same decision twice is a repeat.
+      dedupeKey: `er.disposition:${visit._id}:${kind}`,
+    });
+  }
+
+  private async sendLeft(visit: ErVisitDocument, reason: string): Promise<void> {
+    await this.messages.send({
+      case: String(visit.case),
+      from: 'er',
+      to: ['coordinator'],
+      type: 'er.left',
+      priority: 'medium',
+      summary: `${visit.number} left the ER (${reason})`,
+      payload: { visitId: String(visit._id), reason },
+      dedupeKey: `er.left:${visit._id}`,
+    });
   }
 }

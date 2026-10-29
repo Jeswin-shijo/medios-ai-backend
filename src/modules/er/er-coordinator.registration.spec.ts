@@ -1,0 +1,324 @@
+import * as assert from 'node:assert/strict';
+import { after, before, beforeEach, describe, test } from 'node:test';
+import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
+import { AiService } from '../ai/ai.service';
+import { AiProviderName, AiResult, StructuredTask } from '../ai/ai-types';
+import { Actor } from '../beds/actor';
+import { BedAgentService } from '../beds/bed-agent.service';
+import { BedAlerts } from '../beds/bed-alerts';
+import { BedCoordinatorBridge } from '../beds/bed-coordinator.bridge';
+import { BedEvents } from '../beds/bed-events';
+import { buildBedSeed } from '../beds/bed-layout';
+import { BedRequestsService } from '../beds/bed-requests.service';
+import { BedsService } from '../beds/beds.service';
+import { SuggestionsService } from '../beds/suggestions.service';
+import { AgentRegistry } from '../coordinator/agent-registry';
+import { ApprovalsService } from '../coordinator/approvals.service';
+import { CasesService } from '../coordinator/cases.service';
+import { ClocksService } from '../coordinator/clocks.service';
+import { CoordinatorEvents } from '../coordinator/coordinator-events';
+import { EscalationsService } from '../coordinator/escalations.service';
+import { MessagesService } from '../coordinator/messages.service';
+import { PatientsService } from '../patients/patients.service';
+import { PatientCardsService } from '../queue/patient-cards.service';
+import { QueueService } from '../queue/queue.service';
+import { SettingsService } from '../settings/settings.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { UserRole } from '../users/schemas/user.schema';
+import { ErBaysService } from './er-bays.service';
+import { ErCoordinatorRegistration, erOnTimePct } from './er-coordinator.registration';
+import { ErVisitsService } from './er-visits.service';
+
+const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
+const DOCTOR: Actor = { id: 'user-doctor', name: 'Dr. Shajin', role: UserRole.DOCTOR };
+const MIN = 60_000;
+
+function fakeAi() {
+  return {
+    provider: 'sample' as AiProviderName,
+    async status() {
+      return { provider: 'sample' as AiProviderName, model: 'sample', features: { bedSuggestions: true } };
+    },
+    async runStructured<T>(task: StructuredTask<T>): Promise<AiResult<T>> {
+      const value = task.validate(task.sample());
+      const base = { provider: 'sample' as AiProviderName, model: 'sample', latencyMs: 0 };
+      return value === null ? { ok: false, failure: 'invalid', ...base } : { ok: true, value, sample: true, ...base };
+    },
+  };
+}
+
+describe('ErCoordinatorRegistration', () => {
+  const m = models();
+  let registry: AgentRegistry;
+  let messages: MessagesService;
+  let cases: CasesService;
+  let clocks: ClocksService;
+  let bays: ErBaysService;
+  let visits: ErVisitsService;
+  let beds: BedsService;
+  let requests: BedRequestsService;
+  let agent: BedAgentService;
+  let bridge: BedCoordinatorBridge;
+  let patientCount: number;
+
+  const patient = async (name = 'Ravi Kumar') => {
+    patientCount++;
+    const p = await m.Patient.create({ uhid: `MHK2026008${String(patientCount).padStart(2, '0')}`, name, age: 52, gender: 'Male', phone: `9200000${String(patientCount).padStart(3, '0')}` });
+    return { id: String(p._id), uhid: p.uhid, name };
+  };
+  const arrive = async (name?: string) => {
+    const p = await patient(name);
+    return { p, v: await visits.arrive(NURSE, { patientId: p.id, mode: 'walk-in', complaint: 'chest-pain' }) };
+  };
+  const set = (id: string, update: Record<string, unknown>) => m.ErVisit.updateOne({ _id: id }, update).exec();
+  const triaged = (id: string) => set(id, { status: 'waiting-doctor', triage: { suggested: 'orange', reasons: [], colour: 'orange', byName: 'Nurse Anita', at: new Date(), history: [] } });
+  const sent = (type: string) => m.AgentMessage.find({ type }).sort({ createdAt: 1 }).lean().exec() as Promise<any[]>;
+  const caseState = async (id: string) => ((await m.Case.findById(id).lean()) as any).state;
+  const bayId = async (name: string) => String(((await m.ErBay.findOne({ name }).lean()) as any)._id);
+
+  before(async () => {
+    await connectTestDb();
+  });
+  after(async () => {
+    await closeTestDb();
+  });
+
+  beforeEach(async () => {
+    await resetTestDb();
+    patientCount = 0;
+    const seed = buildBedSeed();
+    const wards = await m.Ward.insertMany(seed.wards);
+    const wardId = new Map(wards.map((w) => [w.code, w._id]));
+    await m.Bed.insertMany(seed.beds.map(({ wardCode, namedPatientUhid: _uhid, ...b }) => ({ ...b, ward: wardId.get(wardCode) })));
+
+    registry = new AgentRegistry();
+    const events = new CoordinatorEvents();
+    messages = new MessagesService(m.AgentMessage, registry, events);
+    cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
+    const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
+    await escalations.ensureDefaults();
+    clocks = new ClocksService(m.Clock, registry, messages, escalations);
+    const approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, events);
+
+    bays = new ErBaysService(m.ErBay, m.ErVisit);
+    await bays.ensureDefaults();
+    const patients = new PatientsService(m.Patient);
+    const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
+
+    const bedEvents = new BedEvents();
+    beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, bedEvents);
+    requests = new BedRequestsService(m.BedRequest, patients, beds, new BedAlerts(m.TaskAlertItem), bedEvents);
+    const suggestions = new SuggestionsService(m.BedSuggestion, beds, patients, fakeAi() as unknown as AiService);
+    agent = new BedAgentService(requests, suggestions, beds, new SettingsService(m.HospitalSettings), bedEvents);
+    bridge = new BedCoordinatorBridge(bedEvents, requests, registry, messages, cases, approvals, m.Admission, m.BedRequest);
+    bridge.onModuleInit();
+  });
+
+  const ask = async (patientId: string) =>
+    String(
+      (
+        await requests.create(DOCTOR, {
+          type: 'admission',
+          roomClass: 'general',
+          needs: [],
+          notes: 'Chest pain, observation',
+          department: 'Emergency',
+          doctor: 'Dr. Shajin',
+          expectedStayDays: 2,
+          priority: 'high',
+          patientId,
+        })
+      )._id,
+    );
+
+  test('the ER agent registers its types, clocks, rule and close check', async () => {
+    const def = registry.get('er')!;
+    assert.ok(def.messageTypes.some((t) => t.type === 'er.left'));
+    assert.ok(registry.clock('er-triage') && registry.clock('er-doctor'));
+    assert.ok(registry.rules().some((r) => r.key === 'er-auto-pathways'));
+    assert.deepEqual(def.handles?.map((h) => h.type), ['bed.assigned']);
+    const check = registry.closeChecks().find((c) => c.agent === 'er')!;
+    assert.equal(check.label, 'ER visit finished');
+    // A case with no ER visit: the ER agent has no say.
+    const { case: c } = await cases.openOrJoin({ patientId: (await patient()).id, patientUhid: 'U', patientName: 'N', kind: 'ipd', priority: 'medium', openedBy: 'bed' });
+    assert.equal(await check.check(String(c._id)), 'n/a');
+  });
+
+  test('sent home closes the ER visit and the case', async () => {
+    const { v } = await arrive();
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    assert.equal(await caseState(v.caseId), 'open');
+    const check = registry.closeChecks().find((c) => c.agent === 'er')!;
+    assert.equal(await check.check(v.caseId), 'fail');
+
+    const out = await visits.dispose(DOCTOR, v.id, 'home', 'Advice given');
+    assert.equal(out.status, 'left');
+    assert.equal(out.leftReason, 'home');
+    assert.equal(out.disposition?.kind, 'home');
+    assert.equal(out.disposition?.byName, 'Dr. Shajin');
+    assert.equal(out.disposition?.notes, 'Advice given');
+    assert.ok(out.leftAt);
+    assert.equal(out.bayId, null);
+    assert.equal(await m.ErBay.countDocuments({ visit: { $exists: true } }), 0);
+
+    assert.equal(await check.check(v.caseId), 'pass');
+    assert.equal(await caseState(v.caseId), 'closed');
+    const disposition = await sent('er.disposition');
+    const left = await sent('er.left');
+    assert.equal(disposition.length, 1);
+    assert.equal(left.length, 1);
+    assert.deepEqual(left[0].payload, { visitId: v.id, reason: 'home' });
+    for (const msg of [...disposition, ...left]) assert.ok(!JSON.stringify(msg).includes('Ravi Kumar'));
+    assert.ok(disposition[0].summary.includes('ER-0001') && disposition[0].summary.includes('home'));
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'home', ''), { status: 409, message: 'This patient has left the ER.' });
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'admit', ''), { status: 409, message: 'This patient has left the ER.' });
+  });
+
+  test('admit needs a triaged visit, keeps the bay, and a second admit is refused', async () => {
+    const { v } = await arrive();
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'admit', ''), { status: 409, message: 'Triage this patient first.' });
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'sideways' as any, ''), { status: 400 });
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    const admitted = await visits.dispose(DOCTOR, v.id, 'admit', 'Needs monitoring');
+    assert.equal(admitted.status, 'waiting-bed');
+    assert.equal(admitted.disposition?.kind, 'admit');
+    assert.equal(admitted.bayName, 'Bay 3', 'the bay is kept until the patient leaves');
+    assert.equal(admitted.leftAt, null);
+    await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'admit', ''), { status: 409 });
+    assert.equal((await sent('er.disposition')).length, 1);
+    assert.equal((await sent('er.left')).length, 0);
+    assert.equal(await caseState(v.caseId), 'open');
+
+    // Waiting for a bed with none free: the patient is transferred out instead, and the admit is overwritten.
+    const out = await visits.dispose(DOCTOR, v.id, 'transfer', 'No bed here');
+    assert.equal(out.status, 'left');
+    assert.equal(out.disposition?.kind, 'transfer');
+    assert.equal(await m.ErBay.countDocuments({ visit: { $exists: true } }), 0);
+    assert.equal((await sent('er.disposition')).length, 2, 'admit then transfer are both logged');
+    assert.equal((await sent('er.left')).length, 1);
+  });
+
+  test('a patient can walk out before triage: the triage clock stops with no escalation', async () => {
+    const { v } = await arrive();
+    assert.equal(await clocks.countRunning(), 1);
+    const out = await visits.dispose(DOCTOR, v.id, 'left-against-advice', 'Walked out');
+    assert.equal(out.status, 'left');
+    assert.equal(out.leftReason, 'left-against-advice');
+    assert.equal(await clocks.countRunning(), 0);
+    const [clock]: any[] = await m.Clock.find().lean();
+    assert.equal(clock.def, 'er-triage');
+    assert.equal(clock.state, 'met');
+    assert.equal(await clocks.checkDue(new Date(Date.now() + 60 * MIN)), 0);
+    assert.equal(await m.Escalation.countDocuments(), 0);
+    assert.equal(await caseState(v.caseId), 'closed');
+  });
+
+  test('admitted: the ER visit leaves when the Bed Agent assigns a bed and the case stays open until discharge', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    const request: any = await m.BedRequest.findById(requestId).lean();
+    assert.equal(request.state, 'assigned');
+
+    const visit: any = await m.ErVisit.findById(v.id).lean();
+    assert.equal(visit.status, 'left');
+    assert.equal(visit.leftReason, 'admitted');
+    assert.ok(visit.leftAt);
+    assert.equal(visit.bay, undefined);
+    assert.equal(await m.ErBay.countDocuments({ visit: { $exists: true } }), 0);
+    const [left] = await sent('er.left');
+    assert.deepEqual(left.payload, { visitId: v.id, reason: 'admitted' });
+    assert.equal(String(left.case), v.caseId);
+    assert.equal(await clocks.countRunning(), 0);
+    // The Bed Agent's admission keeps the case open.
+    assert.equal(await caseState(v.caseId), 'open');
+
+    // Discharge the bed patient and the case closes.
+    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission));
+    await bridge.idle();
+    assert.equal(await caseState(v.caseId), 'closed');
+  });
+
+  test('a redelivered bed.assigned does nothing the second time', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    const [assigned] = await sent('bed.assigned');
+    const before = (await m.ErVisit.findById(v.id).lean()) as any;
+    const handler = registry.get('er')!.handles![0].handler;
+    await handler(String(assigned._id));
+    await handler(String(assigned._id));
+    const after = (await m.ErVisit.findById(v.id).lean()) as any;
+    assert.equal(after.leftAt.getTime(), before.leftAt.getTime());
+    assert.equal((await sent('er.left')).length, 1);
+  });
+
+  test('a ward admission with no ER visit is left alone', async () => {
+    const p = await patient();
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    assert.equal((await sent('bed.assigned')).length, 1);
+    assert.equal((await sent('er.left')).length, 0);
+    assert.equal(await m.ErVisit.countDocuments(), 0);
+  });
+
+  test('a placeholder patient can be admitted through a bed request', async () => {
+    const v = await visits.arrive(NURSE, { emergency: { gender: 'Male', approxAge: 40, description: 'Blue jacket, found at the gate' }, mode: 'ambulance', complaint: 'unresponsive' });
+    const placeholder: any = await m.Patient.findOne({ detailsPending: true }).lean();
+    assert.equal(placeholder.phone, '');
+    await triaged(v.id);
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(String(placeholder._id));
+    await agent.process(requestId);
+    await bridge.idle();
+    const request: any = await m.BedRequest.findById(requestId).lean();
+    assert.equal(request.state, 'assigned');
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'left');
+    const all = JSON.stringify(await m.AgentMessage.find().lean());
+    assert.ok(!all.includes(placeholder.name), 'the placeholder name must not be in a message');
+  });
+
+  test('status counts patients, bays and on-time doctor reviews', async () => {
+    const status = registry.get('er')!.status;
+    assert.deepEqual(await status(), { open: 0, capacity: 20, onTimePct: null });
+    const a = await arrive();
+    const b = await arrive();
+    await arrive();
+    await visits.dispose(DOCTOR, b.v.id, 'home', '');
+    await m.ErBay.updateOne({ name: 'Stretcher 1' }, { outOfUse: true });
+    assert.deepEqual(await status(), { open: 2, capacity: 19, onTimePct: null });
+
+    const now = Date.now();
+    const clock = (due: number, stopped: number | null, def = 'er-doctor') => ({
+      def,
+      case: a.v.caseId,
+      startedBy: new (require('mongoose').Types.ObjectId)(),
+      startedAt: new Date(now - 3 * 60 * MIN),
+      dueAt: new Date(due),
+      state: stopped ? 'met' : 'running',
+      ...(stopped ? { stoppedAt: new Date(stopped) } : {}),
+    });
+    await m.Clock.collection.insertMany([
+      clock(now - 60 * MIN, now - 90 * MIN),
+      clock(now - 60 * MIN, now - 30 * MIN),
+      clock(now - 60 * MIN, now - 25 * 60 * MIN), // older than a day: not counted
+      clock(now + 60 * MIN, null),
+      clock(now - 60 * MIN, now - 10 * MIN, 'er-triage'),
+    ] as any[]);
+    assert.equal((await status()).onTimePct, 50);
+    assert.equal(await erOnTimePct(m.Clock, new Date(now - 26 * 60 * MIN)), 67);
+    assert.equal(await erOnTimePct(m.Clock, new Date(now + MIN)), null);
+  });
+});

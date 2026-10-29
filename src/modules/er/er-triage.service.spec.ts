@@ -17,6 +17,7 @@ import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { VitalsService } from '../vitals/vitals.service';
+import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration } from './er-coordinator.registration';
 import { ErTriageService, TriageInput } from './er-triage.service';
 import { ErVisitsService } from './er-visits.service';
@@ -43,7 +44,6 @@ describe('ErTriageService', () => {
     await resetTestDb();
     patientCount = 0;
     const registry = new AgentRegistry();
-    new ErCoordinatorRegistration(registry).onModuleInit();
     const events = new CoordinatorEvents();
     const messages = new MessagesService(m.AgentMessage, registry, events);
     const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
@@ -52,7 +52,9 @@ describe('ErTriageService', () => {
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
-    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages);
+    const bays = new ErBaysService(m.ErBay, m.ErVisit);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
     const settings = new SettingsService(m.HospitalSettings);
     service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, settings);
   });
