@@ -222,7 +222,8 @@ export class LabBenchService {
       collectBy: recollectBy,
       replaces: claimed._id,
     });
-    await this.lines.updateMany({ _id: { $in: redo.map((l) => l._id) } }, { $set: { status: 'ordered' } }).exec();
+    // Only lines still waiting on this sample go back to "ordered": one cancelled meanwhile stays cancelled.
+    await this.lines.updateMany({ _id: { $in: redo.map((l) => l._id) }, status: { $in: ['collected', 'received'] } }, { $set: { status: 'ordered' } }).exec();
     // Collection is open again: the next full collection says "done" again and stops the recollect clock.
     await this.requests.updateOne({ _id: request._id }, { $unset: { collectionDoneAt: '' } }).exec();
     await this.messages.send({

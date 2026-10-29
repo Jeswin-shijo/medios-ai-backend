@@ -312,6 +312,24 @@ describe('LabBenchService', () => {
     assert.ok(near((await tatClock(r.id)).dueAt, t0 + 80 * MIN), 'then troponin: the receipt at 20 plus 60');
   });
 
+  test('reject resets only lines still collected or received: a line cancelled meanwhile stays cancelled', async () => {
+    const r = await order(['cbc', 'hba1c'], 'urgent'); // both on one EDTA tube
+    assert.equal(r.samples.length, 1);
+    await bench.collect(NURSE, r.samples[0].number);
+    await bench.receive(LAB, r.samples[0].id);
+    const hba1c = r.lines.find((l) => l.test === 'hba1c')!.id;
+    // The doctor cancels HbA1c while the rejection is being made (between its read and its write).
+    const next = orders.nextSampleNumber.bind(orders);
+    orders.nextSampleNumber = async () => {
+      await m.LabLine.updateOne({ _id: hba1c }, { $set: { status: 'cancelled', cancelled: { by: 'Dr. Shajin', reason: 'Not needed', at: new Date() } } });
+      return next();
+    };
+    await bench.reject(LAB, r.samples[0].id, 'clotted');
+    orders.nextSampleNumber = next;
+    assert.equal(((await m.LabLine.findById(hba1c).lean()) as any).status, 'cancelled');
+    assert.equal(((await m.LabLine.findById(r.lines.find((l) => l.test === 'cbc')!.id).lean()) as any).status, 'ordered');
+  });
+
   test('two concurrent collects of the last two samples send one lab.collection-done and stop lab-collect', async () => {
     const r = await order(['cbc', 'rft']);
     assert.equal(r.samples.length, 2);

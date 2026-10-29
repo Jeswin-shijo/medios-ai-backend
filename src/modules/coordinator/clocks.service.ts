@@ -71,8 +71,14 @@ export class ClocksService implements OnModuleInit {
         this.logger.log(`Dropped the old clocks index ${old.name}; clocks are now one per case and item`);
       }
     } catch (e) {
-      // No collection yet, or the index is already gone: nothing to migrate.
-      this.logger.debug(`Clocks index check skipped: ${(e as Error).message}`);
+      const err = e as { code?: number; codeName?: string; message?: string };
+      if (err.code === 26 || err.codeName === 'NamespaceNotFound' || /ns (not found|does not exist)/i.test(err.message ?? '')) {
+        // No collection yet: nothing to migrate.
+        this.logger.debug(`Clocks index check skipped: ${err.message}`);
+      } else {
+        // The old index would still allow only one clock per case: say so loudly.
+        this.logger.error(`Dropping the old clocks index failed: ${err.message}`);
+      }
     }
   }
 

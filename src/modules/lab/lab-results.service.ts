@@ -129,7 +129,8 @@ export class LabResultsService {
 
     // The critical work comes first, so a failure further on never leaves a critical result unannounced.
     if (keepOpen) {
-      const was = (line.history[line.history.length - 1]?.results ?? []).filter((r) => r.critical);
+      // The values of the last version that was critical, however many amendments ago.
+      const was = lastCritical(line)?.rows ?? [];
       await this.amendAlert(request, line._id as Types.ObjectId, def, was, line.results);
     }
     if (criticals.length) {

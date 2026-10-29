@@ -213,8 +213,8 @@ interface LineBuild {
  * outpatient side in every state, with their samples, results, reports, cases, clocks, Coordinator messages,
  * critical alerts and a week of hourly snapshots. Run after seedCoordinator and seedEr: the requests sit on
  * their open cases. Staff-visible times use the clinic clock (`clinicDay`); everything else uses the real
- * clock, placed so nothing is after `nowMs` and no running clock is overdue except none: the designed
- * unacknowledged critical result is due about ten minutes after `nowMs`. `nowMs` is for tests.
+ * clock, placed so nothing is after `nowMs` and no running clock is overdue; the designed unacknowledged
+ * critical result comes closest, due about ten minutes after `nowMs`. `nowMs` is for tests.
  */
 export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Promise<void> {
   const requests = model(LabRequest, LabRequestSchema);

@@ -249,8 +249,9 @@ describe('Lab close check, status, overview and settings', () => {
     await assert.rejects(settings.saveTargets(ADMIN, { cbc: { stat: 1.5 } }), { status: 400 });
     await assert.rejects(settings.saveLimits(ADMIN, { 'nope.x': { low: 1 } }), { status: 400 });
     await assert.rejects(settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 'x' } }), { status: 400 });
-    // Settings can't be patched around the service either.
-    await assert.rejects(new SettingsService(m.HospitalSettings).updateSettings({ lab: { targets: { cbc: { stat: 5 } } } } as any, { role: UserRole.DOCTOR }), { status: 403 });
+    // Settings can't be patched around the service either: a raw lab patch is ignored, whoever sends it.
+    await new SettingsService(m.HospitalSettings).updateSettings({ lab: { targets: { cbc: { stat: 5 } } } } as any, { role: UserRole.DOCTOR });
+    assert.equal((await settings.getTargets()).cbc.stat, 30);
 
     await settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 6.5 } });
     const r = await order(['electrolytes']);
@@ -261,7 +262,7 @@ describe('Lab close check, status, overview and settings', () => {
   });
 
   test("saveLimits refuses a critical limit inside the normal range", async () => {
-    await assert.rejects(settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 5 } }), { status: 400, message: "A critical limit can't sit inside the normal range." });
+    await assert.rejects(settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 5 } }), { status: 400, message: "Potassium (Electrolytes): a critical limit can't sit inside the normal range." });
     await assert.rejects(settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { low: 4 } }), { status: 400 });
     await settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 5.1 } }); // equal to the reference high is fine
     // Troponin has a reference high of 0.04: a critical high of 0.04 is the default and stays valid.
@@ -429,6 +430,19 @@ describe('Lab close check, status, overview and settings', () => {
     const { history } = await settings.getLimits();
     assert.equal(history.length, 1);
     assert.equal(history[0].by, 'Admin');
+  });
+
+  test("an admin's raw lab settings patch is ignored: lab settings change only through the Lab settings service", async () => {
+    const svc = new SettingsService(m.HospitalSettings);
+    await svc.updateSettings({ lab: { targets: { cbc: { stat: 5 } }, criticalLimits: { 'electrolytes.Potassium': { high: 9 } } }, profile: { name: 'Dr. Shajin' } } as any, { role: UserRole.ADMIN });
+    assert.equal((await settings.getTargets()).cbc.stat, 30);
+    assert.equal((await settings.getLimits()).limits['electrolytes.Potassium'].high, 6.2);
+    assert.equal(((await svc.getSettings()) as any).profile.name, 'Dr. Shajin', 'the rest of the patch is saved');
+    // The service still saves them.
+    await settings.saveTargets(ADMIN, { cbc: { stat: 25 } });
+    assert.equal((await settings.getTargets()).cbc.stat, 25);
+    await settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 6.5 } });
+    assert.equal((await settings.getLimits()).limits['electrolytes.Potassium'].high, 6.5);
   });
 
   test('text parameters have no numeric limits; a one-sided parameter saves', async () => {

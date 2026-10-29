@@ -98,9 +98,9 @@ export class SettingsService {
   }
 
   /**
-   * Merges each supplied section over the stored one, key by key; unknown sections are ignored.
-   * Only an admin may change "Allocate beds automatically": a save from anyone else that
-   * carries the stored value (or leaves it out) goes through.
+   * Merges each supplied section over the stored one, key by key; unknown sections are ignored, and so is
+   * the lab section (see LabSettingsService). Only an admin may change "Allocate beds automatically": a save
+   * from anyone else that carries the stored value (or leaves it out) goes through.
    */
   async updateSettings(updates: Partial<HospitalSettings>, by: { role: string }): Promise<HospitalSettings> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
@@ -123,19 +123,11 @@ export class SettingsService {
         throw new ForbiddenException('Only an admin can change pathway targets.');
       }
     }
-    // The limits history is written only by LabSettingsService.saveLimits, never by a settings patch.
-    if ((updates as any)?.lab && typeof (updates as any).lab === 'object') {
-      const { limitsHistory: _ignored, ...rest } = (updates as any).lab;
-      updates = { ...updates, lab: rest } as Partial<HospitalSettings>;
-    }
-    const labPatch = (updates as any)?.lab;
-    if (by?.role !== UserRole.ADMIN && labPatch && typeof labPatch === 'object') {
-      const stored = settings.get('lab') ?? {};
-      for (const key of ['targets', 'criticalLimits']) {
-        if (labPatch[key] !== undefined && !isDeepStrictEqual(labPatch[key], stored[key] ?? {})) {
-          throw new ForbiddenException('Only an admin can change lab targets and critical limits.');
-        }
-      }
+    // Lab settings (targets, critical limits and their history) change only through LabSettingsService,
+    // which validates them and records who changed a limit: a generic patch's lab section is dropped, for every role.
+    if (updates && typeof updates === 'object' && 'lab' in updates) {
+      const { lab: _ignored, ...rest } = updates as Record<string, unknown>;
+      updates = rest as Partial<HospitalSettings>;
     }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];
@@ -144,6 +136,13 @@ export class SettingsService {
       }
     }
     return settings.save();
+  }
+
+  /** Saves the lab turnaround targets. Only LabSettingsService.saveTargets calls this. */
+  async setLabTargets(targets: NonNullable<HospitalSettings['lab']['targets']>): Promise<void> {
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    settings.set('lab', { ...(settings.get('lab') ?? {}), targets });
+    await settings.save();
   }
 
   /** Saves the critical limits with their history. Only LabSettingsService.saveLimits calls this. */

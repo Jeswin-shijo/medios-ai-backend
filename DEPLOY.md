@@ -57,6 +57,18 @@ npm run create-user
 
 `npm run seed` loads the demo hospital instead. It wipes the database first and creates demo logins whose password is published (`Admin@123`). It refuses any database that isn't on this machine unless you set `SEED_ALLOW_REMOTE=true`. Only do that for a throwaway demo database.
 
+Then replace the demo passwords straight away. Run `npm run create-user` (same `MONGODB_URI`) once per demo login, with a new `USER_PASSWORD` and the login's own `USER_ROLE` (create-user also sets the role, and defaults to `admin`):
+
+| `USER_EMAIL` | `USER_ROLE` |
+|---|---|
+| `admin@medios.ai` | `admin` |
+| `doctor@medios.ai` | `doctor` |
+| `nurse@medios.ai` | `nurse` |
+| `frontdesk@medios.ai` | `staff` |
+| `pharmacy@medios.ai` | `pharmacist` |
+| `lab@medios.ai` | `lab` |
+| `pathologist@medios.ai` | `lab` |
+
 ## 4. Web app: Vercel
 
 1. Import the web app repository (`medi-os-ai`). Vercel reads its `vercel.json`, so no build settings need changing.

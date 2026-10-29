@@ -60,7 +60,7 @@ export class LabSettingsService {
     const stored = ((await this.settings.getSettings()).lab?.targets ?? {}) as Targets;
     const merged: Targets = { ...stored };
     for (const [key, v] of Object.entries(patch)) merged[key] = { ...(merged[key] ?? {}), ...v };
-    await this.settings.updateSettings({ lab: { targets: merged } }, actor);
+    await this.settings.setLabTargets(merged);
     return this.getTargets();
   }
 
@@ -89,7 +89,7 @@ export class LabSettingsService {
         if (v !== null && (typeof v !== 'number' || !Number.isFinite(v))) throw new BadRequestException(`"${key}.${side}" must be a number or null`);
         // A critical value must also be flagged, so it can't sit inside the normal range.
         const inside = v !== null && param && ((side === 'low' && param.low !== undefined && (v as number) > param.low) || (side === 'high' && param.high !== undefined && (v as number) < param.high));
-        if (inside) throw new BadRequestException("A critical limit can't sit inside the normal range.");
+        if (inside) throw new BadRequestException(`${param!.name} (${testByKey(test)!.label}): a critical limit can't sit inside the normal range.`);
         patch[key][side] = v as number | null;
       }
     }

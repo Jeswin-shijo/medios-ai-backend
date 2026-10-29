@@ -431,6 +431,20 @@ describe('LabResultsService', () => {
     assert.equal((await alerts())[0].status, 'Completed');
   });
 
+  test('a second amendment of a still-unacknowledged critical names the critical values, never "Was ; now"', async () => {
+    const { lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, K);
+    await results.release(PATH, id);
+    await results.amend(LAB, id, NORMAL, 'Wrong sample value');
+    await results.release(PATH, id);
+    await results.amend(LAB, id, { Sodium: 141, Potassium: 4.3 }, 'Re-run');
+    await results.release(PATH, id);
+    const [a] = await alerts();
+    assert.ok(a.subtitle.startsWith('Was Potassium 6.4 mmol/L; now Sodium 141, Potassium 4.3'), a.subtitle);
+    assert.equal(a.status, 'Pending');
+  });
+
   test('amending an acknowledged critical to normal leaves nothing to acknowledge', async () => {
     const { lineId } = await received(['electrolytes']);
     const id = lineId('electrolytes');

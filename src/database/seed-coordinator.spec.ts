@@ -8,6 +8,13 @@ import { seedCoordinator } from './seed-coordinator';
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
 const DAY = '2026-09-26';
+/** A fixed moment for the main seed: yesterday at noon, always in the past and never near an hour or day boundary. */
+const NOON = (() => {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+})();
 
 describe('seedCoordinator', () => {
   const m = models();
@@ -38,7 +45,7 @@ describe('seedCoordinator', () => {
     try {
       await seedBeds(DAY);
       log = [];
-      await seedCoordinator(DAY);
+      await seedCoordinator(DAY, NOON);
     } finally {
       console.log = real;
     }
@@ -161,7 +168,7 @@ describe('seedCoordinator', () => {
   test('history has 168 hourly points', async () => {
     const snaps = await m.CoordinatorSnapshot.find().sort({ hour: 1 }).lean().exec();
     assert.equal(snaps.length, 168);
-    const last = hourOf(new Date()).getTime();
+    const last = hourOf(new Date(NOON)).getTime();
     snaps.forEach((s, i) => assert.equal(s.hour.getTime(), last - (167 - i) * HOUR));
     assert.ok(snaps.every((s) => s.activeWorkflows >= 0 && s.agentsOnline === 2 && s.tasksToday >= 1 && s.escalations >= 1), 'no hour is empty, so any hour has a day-ago trend');
     const open = (await m.Approval.countDocuments({ state: 'open' }).exec()) + (await m.Escalation.countDocuments({ state: 'open' }).exec());
@@ -194,7 +201,7 @@ describe('seedCoordinator', () => {
     const real = console.log;
     console.log = () => undefined;
     try {
-      await seedCoordinator(DAY);
+      await seedCoordinator(DAY, NOON);
     } finally {
       console.log = real;
     }
