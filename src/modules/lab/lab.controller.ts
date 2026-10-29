@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -23,6 +23,11 @@ const LAB_BENCH = [UserRole.ADMIN, UserRole.LAB];
 /** Acknowledge critical results. */
 const LAB_ACK = [UserRole.ADMIN, UserRole.DOCTOR];
 const ADMIN = [UserRole.ADMIN];
+
+/** A settings body must be a plain object: an array or null is a 400 before the service sees it. */
+function plainObject(body: unknown): void {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('The body must be an object');
+}
 
 @ApiTags('Lab')
 @ApiBearerAuth()
@@ -208,9 +213,9 @@ export class LabController {
 
   @Get('critical')
   @Roles(...LAB_READ)
-  @ApiOperation({ summary: "Today's critical results and whether each has been acknowledged" })
+  @ApiOperation({ summary: "Unacknowledged critical results from any day, and those acknowledged today" })
   async critical() {
-    return { critical: (await this.overview.overview()).critical };
+    return { critical: await this.overview.criticalList() };
   }
 
   @Post('lines/:id/acknowledge')
@@ -235,6 +240,7 @@ export class LabController {
   @Roles(...ADMIN)
   @ApiOperation({ summary: 'Change turnaround targets (admin); send an object of "<test>": { stat, routine }' })
   async saveTargets(@CurrentUser() user: any, @Body() body: Record<string, unknown>) {
+    plainObject(body);
     return { targets: await this.settings.saveTargets(actorOf(user), body) };
   }
 
@@ -249,6 +255,7 @@ export class LabController {
   @Roles(...ADMIN)
   @ApiOperation({ summary: 'Change critical limits (admin); send an object of "<test>.<parameter>": { low, high }' })
   saveLimits(@CurrentUser() user: any, @Body() body: Record<string, unknown>) {
+    plainObject(body);
     return this.settings.saveLimits(actorOf(user), body);
   }
 }

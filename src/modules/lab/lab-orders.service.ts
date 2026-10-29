@@ -482,9 +482,9 @@ export class LabOrdersService {
       const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       filter.$or = [{ number: rx }, { patientUhid: rx }, { patientName: rx }];
     }
+    if (query.area) filter.$and = [{ case: { $in: await this.caseIdsInArea(query.area) } }];
     const limit = Math.min(Math.max(Math.trunc(Number(query.limit)) || 100, 1), 500);
-    const views = await this.toViews(await this.requests.find(filter).sort({ createdAt: -1, _id: -1 }).limit(limit).exec());
-    return query.area ? views.filter((v) => v.location.area === query.area) : views;
+    return this.toViews(await this.requests.find(filter).sort({ createdAt: -1, _id: -1 }).limit(limit).exec());
   }
 
   /** Tube labels for a request's live samples. No patient name: a label carries the UHID and the numbers only. */
@@ -502,6 +502,25 @@ export class LabOrdersService {
         priority: view.priority,
         orderedAt: view.orderedAt,
       }));
+  }
+
+  /**
+   * The cases (that have lab requests) whose location is the area: a saved location wins; with none, the
+   * Coordinator case kind decides (er: ER, ipd: Ward, anything else: OPD), as in location().
+   */
+  private async caseIdsInArea(area: LabArea): Promise<Types.ObjectId[]> {
+    const all = (await this.requests.distinct('case').exec()) as Types.ObjectId[];
+    if (!all.length) return [];
+    const saved = await this.locations.find({ case: { $in: all } }).select('case area').lean<{ case: Types.ObjectId; area: LabArea }[]>().exec();
+    const hasSaved = new Set(saved.map((l) => String(l.case)));
+    const out = saved.filter((l) => l.area === area).map((l) => l.case);
+    const unsaved = all.filter((c) => !hasSaved.has(String(c)));
+    const kinds = await this.cases.kindsOf(unsaved.map(String));
+    for (const c of unsaved) {
+      const kind = kinds.get(String(c));
+      if ((kind === 'er' ? 'ER' : kind === 'ipd' ? 'Ward' : 'OPD') === area) out.push(c);
+    }
+    return out;
   }
 
   forPatient(patientId: string): Promise<LabRequestView[]> {

@@ -239,4 +239,21 @@ describe('LabOrdersService', () => {
     assert.ok(s.length <= 140, s);
     assert.match(s, /\+\d+ more \(ROUTINE\)$/);
   });
+  test('area is resolved in the query: 5 OPD requests are all found behind 120 newer ER requests', async () => {
+    for (let i = 0; i < 5; i++) await service.order(DOC, { patientId, tests: ['crp'], priority: 'routine' });
+    const p2 = await m.Patient.create({ uhid: 'MHK202600902', name: 'Asha Devi', age: 40, gender: 'Female', phone: '9100000002' });
+    await cases.openOrJoin({ patientId: String(p2._id), patientUhid: p2.uhid, patientName: p2.name, kind: 'er', priority: 'high', openedBy: 'er' });
+    for (let i = 0; i < 120; i++) await service.order(DOC, { patientId: String(p2._id), tests: ['crp'], priority: 'routine' });
+    const opd = await service.list({ area: 'OPD' });
+    assert.equal(opd.length, 5);
+    assert.ok(opd.every((v) => v.location.area === 'OPD'));
+    const er = await service.list({ area: 'ER', limit: 500 });
+    assert.equal(er.length, 120);
+    const ward = await service.list({ area: 'Ward' });
+    assert.equal(ward.length, 0);
+    // a saved location wins over the case kind
+    await service.setLocation(opd[0].caseId, 'Ward', 'Ward 2');
+    assert.equal((await service.list({ area: 'Ward' })).length, 5);
+    assert.equal((await service.list({ area: 'OPD' })).length, 0);
+  });
 });

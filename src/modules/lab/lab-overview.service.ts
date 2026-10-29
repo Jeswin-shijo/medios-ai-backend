@@ -120,6 +120,65 @@ export class LabOverviewService {
     };
   }
 
+  /**
+   * Criticals that need attention: every released critical nobody has acknowledged (from any day, its
+   * clock may still be escalating), then those acknowledged today. Unacknowledged first, oldest first;
+   * then acknowledged, newest first. The ack time is on the clinic clock, so "today" is clinic midnight
+   * (the same as real midnight in production).
+   */
+  async criticalList(): Promise<LabCriticalRow[]> {
+    const midnight = clinicNow();
+    midnight.setHours(0, 0, 0, 0);
+    const lines = await this.lines
+      .find({
+        status: 'released',
+        'critical.active': true,
+        $or: [{ 'critical.ackAt': { $exists: false } }, { 'critical.ackAt': { $gte: midnight } }],
+      })
+      .select('request test releasedAt releasedRealAt lastReleasedRealAt results history critical')
+      .lean<any[]>()
+      .exec();
+    if (!lines.length) return [];
+    const [parents, running] = await Promise.all([
+      this.requests.find({ _id: { $in: [...new Set(lines.map((l) => String(l.request)))] } }).select('number orderedBy').lean<any[]>().exec(),
+      this.clocks
+        .find({ def: 'lab-critical', state: 'running', ref: { $in: lines.map((l) => String(l._id)) } })
+        .select('ref dueAt')
+        .lean<{ ref: string; dueAt: Date }[]>()
+        .exec(),
+    ]);
+    const parent = new Map(parents.map((r) => [String(r._id), r]));
+    const dueOf = new Map(running.map((c) => [c.ref, c.dueAt]));
+    const at = (l: any) => new Date(l.lastReleasedRealAt ?? l.releasedRealAt ?? 0).getTime();
+    const ackAt = (l: any) => new Date(l.critical?.ackAt ?? 0).getTime();
+    lines.sort((a, b) => {
+      const ua = !a.critical?.ackAt;
+      const ub = !b.critical?.ackAt;
+      if (ua !== ub) return ua ? -1 : 1;
+      return ua ? at(a) - at(b) : ackAt(b) - ackAt(a);
+    });
+    return lines.map((l) => {
+      // An amendment to normal keeps the earlier critical open: show the value that was critical.
+      const c =
+        (l.results ?? []).find((r: any) => r.critical) ??
+        [...(l.history ?? [])].reverse().flatMap((h: any) => h.results ?? []).find((r: any) => r.critical);
+      return {
+        lineId: String(l._id),
+        requestNumber: parent.get(String(l.request))?.number ?? '',
+        test: l.test,
+        label: testByKey(l.test)?.label ?? l.test,
+        parameter: c?.param ?? '',
+        value: c ? String(c.value) : '',
+        unit: c?.unit ?? '',
+        orderedBy: parent.get(String(l.request))?.orderedBy?.name ?? '',
+        releasedAt: iso(l.releasedAt),
+        ackBy: l.critical?.ackBy ?? null,
+        ackAt: iso(l.critical?.ackAt),
+        dueAt: iso(dueOf.get(String(l._id))),
+      };
+    });
+  }
+
   async series(range: LabSeriesRange): Promise<{ range: LabSeriesRange; points: LabSeriesPoint[] }> {
     const hours = range === '7d' ? 7 * 24 : 24;
     const last = hourOf(new Date()).getTime();
@@ -176,33 +235,7 @@ export class LabOverviewService {
     }).filter((r) => r.count > 0);
 
     const criticalLines = releasedToday.filter((l) => (l.results ?? []).some((r: any) => r.critical));
-    const running = criticalLines.length
-      ? await this.clocks
-          .find({ def: 'lab-critical', state: 'running', ref: { $in: criticalLines.map((l) => String(l._id)) } })
-          .select('ref dueAt')
-          .lean<{ ref: string; dueAt: Date }[]>()
-          .exec()
-      : [];
-    const dueOf = new Map(running.map((c) => [c.ref, c.dueAt]));
-    const critical: LabCriticalRow[] = criticalLines
-      .sort((a, b) => new Date(b.releasedRealAt).getTime() - new Date(a.releasedRealAt).getTime())
-      .map((l) => {
-        const c = l.results.find((r: any) => r.critical);
-        return {
-          lineId: String(l._id),
-          requestNumber: parent.get(String(l.request))?.number ?? '',
-          test: l.test,
-          label: testByKey(l.test)?.label ?? l.test,
-          parameter: c.param,
-          value: String(c.value),
-          unit: c.unit ?? '',
-          orderedBy: parent.get(String(l.request))?.orderedBy?.name ?? '',
-          releasedAt: iso(l.releasedAt),
-          ackBy: l.critical?.ackBy ?? null,
-          ackAt: iso(l.critical?.ackAt),
-          dueAt: iso(dueOf.get(String(l._id))),
-        };
-      });
+    const critical = await this.criticalList();
 
     const ordersByHour = Array.from({ length: 24 }, () => 0);
     for (const r of requestsToday) ordersByHour[new Date(r.createdAt).getHours()]++;

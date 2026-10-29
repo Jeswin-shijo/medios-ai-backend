@@ -38,6 +38,14 @@ describe('OrderDto', () => {
   });
 });
 
+describe('OrderDto note', () => {
+  test('the note is trimmed', async () => {
+    const { errors, inst } = await run(OrderDto, { ...order, note: '  fasting  ' });
+    assert.deepEqual(errors, []);
+    assert.equal((inst as OrderDto).note, 'fasting');
+  });
+});
+
 describe('ReasonDto and AckDto', () => {
   test('reason is 1 to 300 characters after trimming', async () => {
     await ok(ReasonDto, { reason: 'Patient refused' });

@@ -78,7 +78,7 @@ export class OrderDto {
   @IsIn(TEST_KEYS, { each: true })
   tests: string[];
   @ApiProperty({ enum: LAB_PRIORITIES }) @IsIn(LAB_PRIORITIES as readonly string[]) priority: 'stat' | 'urgent' | 'routine';
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @ApiPropertyOptional() @IsOptional() @Transform(trim) @IsString() @MaxLength(500) note?: string;
   @ApiPropertyOptional({ minimum: 1, maximum: 72, description: 'Also order a repeat this many hours later' })
   @IsOptional()
   @IsInt()

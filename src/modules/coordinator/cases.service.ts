@@ -187,6 +187,13 @@ export class CasesService {
     return (await this.model.findOne({ patient, ...isOpen }).exec()) ?? this.model.findOne({ patient }).sort({ openedAt: -1, _id: -1 }).exec();
   }
 
+  /** The kind of each given case; a case that does not exist is left out. */
+  async kindsOf(ids: string[]): Promise<Map<string, CaseKind>> {
+    const valid = ids.filter((i) => Types.ObjectId.isValid(i));
+    const rows = valid.length ? await this.model.find({ _id: { $in: valid } }).select('kind').lean<{ _id: Types.ObjectId; kind: CaseKind }[]>().exec() : [];
+    return new Map(rows.map((r) => [String(r._id), r.kind]));
+  }
+
   async list(q: CaseQuery = {}): Promise<CaseDocument[]> {
     const match: Record<string, unknown> = {};
     if (q.state) match.state = q.state;

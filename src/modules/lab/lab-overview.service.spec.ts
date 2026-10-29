@@ -172,6 +172,32 @@ describe('Lab close check, status, overview and settings', () => {
     assert.equal(o.critical[0].dueAt, null, 'the clock stopped');
   });
 
+  test('an unacknowledged critical from yesterday stays listed, and once acknowledged today moves to the acknowledged group', async () => {
+    const old = await order(['electrolytes']);
+    await receive(old);
+    await release(old.lines[0].id, { Sodium: 140, Potassium: 6.4 });
+    const yesterday = new Date(Date.now() - 26 * 3_600_000);
+    await backdate(old.lines[0].id, { releasedRealAt: yesterday, lastReleasedRealAt: yesterday, releasedAt: yesterday });
+    const recent = await order(['glucose']);
+    await receive(recent);
+    await release(recent.lines[0].id, { Glucose: 30 });
+
+    let list = await overview.criticalList();
+    assert.deepEqual(list.map((x) => [x.requestNumber, x.ackAt]), [['LR-0001', null], ['LR-0002', null]], 'unacknowledged, oldest first');
+    assert.ok(list[0].dueAt, 'dueAt comes from the running clock');
+    assert.equal((await overview.overview()).critical.length, 2, 'the overview uses the same list');
+
+    await results.acknowledge(DOC, old.lines[0].id, 'ok');
+    list = await overview.criticalList();
+    assert.deepEqual(list.map((x) => x.requestNumber), ['LR-0002', 'LR-0001'], 'unacknowledged first, then acknowledged');
+    assert.ok(list[1].ackAt);
+    assert.equal(list[1].dueAt, null);
+
+    // acknowledged on an earlier day: it drops off
+    await backdate(old.lines[0].id, { 'critical.ackAt': new Date(Date.now() - 48 * 3_600_000) });
+    assert.deepEqual((await overview.criticalList()).map((x) => x.requestNumber), ['LR-0002']);
+  });
+
   test('the rejection rate is rejected samples over samples collected today', async () => {
     assert.equal((await overview.overview()).performance.rejectionRate, null);
     const r = await order(['cbc', 'crp', 'glucose', 'abg'], 'routine'); // four tubes
