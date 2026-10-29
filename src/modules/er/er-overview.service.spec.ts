@@ -137,14 +137,12 @@ describe('ErOverviewService and ErTargetsService', () => {
     assert.equal(o.performance.arrivalsByHour.reduce((a, b) => a + b, 0), 5);
   });
 
-  test('the on-time card reads the doctor clocks finished today', async () => {
-    const caseId = new Types.ObjectId();
-    const base = { def: 'er-doctor', case: caseId, state: 'done' };
+  test('the on-time card reads the doctor reviews finished today, not reviews closed by the patient leaving', async () => {
+    const seen = await visit({ colour: 'orange', doctorAfter: 10 });
+    const gone = await visit({ colour: 'orange', status: 'left', leftAfter: 20 });
     const now = new Date();
-    await m.Clock.collection.insertMany([
-      { ...base, startedAt: now, dueAt: new Date(now.getTime() + MIN), stoppedAt: now },
-      { ...base, startedAt: now, dueAt: new Date(now.getTime() - MIN), stoppedAt: now },
-    ] as any[]);
+    const clock = (v: any, dueMin: number) => ({ def: 'er-doctor', case: v.case, state: 'met', startedAt: now, dueAt: new Date(now.getTime() + dueMin * MIN), stoppedAt: now });
+    await m.Clock.collection.insertMany([clock(seen, 1), clock(seen, -1), clock(gone, -1)] as any[]);
     const o = await overview.overview();
     assert.equal(o.cards.onTimePct.value, 50);
     assert.equal(o.performance.onTimePct, 50);

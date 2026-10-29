@@ -55,7 +55,7 @@ describe('ErTriageService', () => {
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
-    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
     new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
     const settings = new SettingsService(m.HospitalSettings);
     service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings), visits);
@@ -362,5 +362,81 @@ describe('ErTriageService', () => {
     assert.equal((await sent('er.pathway-cancelled')).length, 2);
     const running = await m.Clock.find({ def: 'er-step-ecg', case: v.caseId, state: 'running' }).lean();
     assert.equal(running.length, 1);
+  });
+
+  test('a triage that reached the Coordinator is marked; a lost one is sent by reconcile', async () => {
+    const v = await arrive('other');
+    await service.triage(NURSE, v.id, input({ complaint: 'other', colour: 'yellow' }));
+    assert.ok(((await m.ErVisit.findById(v.id).lean()) as any).triageAnnouncedAt instanceof Date);
+
+    const w = await arrive('other');
+    const messages = (service as any).messages;
+    const real = messages.send.bind(messages);
+    messages.send = async (msg: any) => {
+      if (msg.type === 'er.triaged') throw new Error('bus down');
+      return real(msg);
+    };
+    await assert.rejects(service.triage(NURSE, w.id, input({ complaint: 'other', colour: 'yellow' })), /bus down/);
+    messages.send = real;
+    assert.equal(((await m.ErVisit.findById(w.id).lean()) as any).triageAnnouncedAt, undefined);
+    assert.equal(await m.Clock.countDocuments({ def: 'er-doctor', case: w.caseId }), 0);
+
+    assert.equal((await visits.reconcile()).triaged, 1);
+    const doctor = await m.Clock.findOne({ def: 'er-doctor', case: w.caseId, state: 'running' }).lean().exec();
+    assert.equal(new Date((doctor as any).dueAt).getTime(), (await created(w.id)) + 120 * MIN);
+    assert.ok(((await m.ErVisit.findById(w.id).lean()) as any).triageAnnouncedAt instanceof Date);
+  });
+
+  test('a disposition landing between triage and its message sends nothing: no clock on a new case', async () => {
+    const v = await arrive('chest-pain');
+    const cases = (service as any).cases;
+    const real = cases.openOrJoin.bind(cases);
+    let first = true;
+    cases.openOrJoin = async (opts: any) => {
+      if (first) {
+        first = false;
+        // The doctor sends the patient home while the triage is still being saved.
+        await visits.dispose(ADMIN, v.id, 'home', 'Walked out');
+      }
+      return real(opts);
+    };
+    const out = await service.triage(NURSE, v.id, input());
+    assert.equal(out.status, 'left');
+    assert.equal((await sent('er.triaged')).length, 0);
+    assert.equal((await sent('er.pathway-started')).length, 0);
+    assert.equal(await m.Clock.countDocuments({ case: { $ne: new Types.ObjectId(v.caseId) } }), 0, 'no clock on another case');
+    assert.equal(await clocks.countRunning(), 0);
+  });
+
+  test('re-triage sends to the visit\'s own case', async () => {
+    const v = await arrive('fever');
+    await service.triage(NURSE, v.id, input({ complaint: 'fever', colour: 'yellow' }));
+    await service.retriage(NURSE, v.id, 'orange', 'Worse');
+    const [msg] = await sent('er.retriaged');
+    assert.equal(String(msg.case), v.caseId);
+  });
+
+  test('a pathway started after Seen by doctor has its doctor step done already', async () => {
+    const DOCTOR: Actor = { id: 'user-doctor', name: 'Dr. Shajin', role: UserRole.DOCTOR };
+    const v = await arrive('other');
+    await service.triage(NURSE, v.id, input({ complaint: 'other', colour: 'yellow' }));
+    const seen = await service.doctorSeen(DOCTOR, v.id);
+    assert.ok(seen.doctorSeenAt);
+    const out = await service.startPathway(NURSE, v.id, 'sepsis');
+    const doctor = out.steps.find((s) => s.key === 'doctor')!;
+    assert.equal(doctor.doneAt, seen.doctorSeenAt);
+    assert.equal(doctor.byName, 'Dr. Shajin');
+    assert.ok(out.steps.filter((s) => s.key !== 'doctor').every((s) => s.doneAt === null), 'the other steps still need doing');
+    assert.equal(await m.Clock.countDocuments({ def: 'er-doctor', case: v.caseId, state: 'running' }), 0);
+
+    // Seen before the doctor's name was kept: the step still shows as done.
+    const w = await arrive('other');
+    await service.triage(NURSE, w.id, input({ complaint: 'other', colour: 'yellow' }));
+    const at = new Date();
+    await m.ErVisit.updateOne({ _id: w.id }, { $set: { doctorSeenAt: at, status: 'in-treatment' } });
+    const later = await service.startPathway(NURSE, w.id, 'stroke');
+    const step = later.steps.find((s) => s.key === 'doctor')!;
+    assert.equal(step.doneAt, at.toISOString());
+    assert.equal(step.byName, 'Seen by doctor');
   });
 });

@@ -113,6 +113,12 @@ export class ErTriageService {
     return visit.triage.colour as TriageColour;
   }
 
+  /** The visit as it is now when it has left the ER since `visit` was read; otherwise null. */
+  private async leftSince(visit: ErVisitDocument): Promise<ErVisitDocument | null> {
+    const now = await this.visits.findById(visit._id).exec();
+    return now?.status === 'left' ? now : null;
+  }
+
   async triage(actor: Actor, visitId: string, input: TriageInput): Promise<ErVisitView> {
     const visit = await this.load(visitId);
     if (visit.status !== 'waiting-triage') throw new ConflictException('This patient is already triaged. Use re-triage.');
@@ -177,7 +183,8 @@ export class ErTriageService {
       .exec();
     if (!updated) throw new ConflictException('This patient is already triaged. Use re-triage.');
 
-    const { case: theCase } = await this.cases.openOrJoin({
+    // Only raises the case's priority: the messages go to the visit's own case, never one opened meanwhile.
+    await this.cases.openOrJoin({
       patientId: String(updated.patient),
       patientUhid: updated.patientUhid,
       patientName: updated.patientName,
@@ -185,12 +192,15 @@ export class ErTriageService {
       priority: BED_PRIORITY[input.colour],
       openedBy: 'er',
     });
-    const caseId = String(theCase._id);
+    const caseId = String(updated.case);
 
     const targets = await this.targets();
     const toStart = (await this.rules.isOn('er-auto-pathways')) ? pathwaysFor(input.complaint, vitals) : [];
     // The clock already counts the pathways that are about to start.
     const doctorDueAt = this.doctorDueAt(updated, input.colour, toStart, targets);
+    // A disposition may have landed since the update: a patient who left gets no clocks.
+    const gone = await this.leftSince(updated);
+    if (gone) return (await this.views.toViews([gone]))[0];
     await this.messages.send({
       case: caseId,
       from: 'er',
@@ -200,6 +210,8 @@ export class ErTriageService {
       summary: `${updated.number} triaged ${input.colour}: ${this.complaintLabel(input.complaint)}`,
       payload: { visitId: String(updated._id), colour: input.colour, doctorDueAt },
     });
+    // Reached the Coordinator: the reconcile pass need not send it again.
+    await this.visits.updateOne({ _id: updated._id }, { triageAnnouncedAt: new Date() }).exec();
 
     let current: ErVisitDocument = updated;
     for (const key of toStart) {
@@ -233,7 +245,8 @@ export class ErTriageService {
       .exec();
     if (!updated) throw new ConflictException('The colour changed while you were editing. Check the patient and try again.');
 
-    const { case: theCase } = await this.cases.openOrJoin({
+    // Only raises the case's priority, as in triage.
+    await this.cases.openOrJoin({
       patientId: String(updated.patient),
       patientUhid: updated.patientUhid,
       patientName: updated.patientName,
@@ -242,8 +255,10 @@ export class ErTriageService {
       openedBy: 'er',
     });
     const doctorDueAt = this.doctorDueAt(updated, colour, runningKeys(updated), await this.targets());
+    const gone = await this.leftSince(updated);
+    if (gone) return (await this.views.toViews([gone]))[0];
     await this.messages.send({
-      case: String(theCase._id),
+      case: String(updated.case),
       from: 'er',
       to: ['coordinator'],
       type: 'er.retriaged',
@@ -279,7 +294,9 @@ export class ErTriageService {
     byName?: string,
   ): Promise<ErVisitDocument | null> {
     const have = new Set((visit.steps ?? []).map((s) => s.key));
-    const newSteps = PATHWAYS[key].steps.filter((s) => !have.has(s.key)).map((s) => ({ key: s.key }));
+    // A doctor who already saw the patient has done this pathway's doctor step too.
+    const seen = visit.doctorSeenAt ? { doneAt: visit.doctorSeenAt, byName: visit.doctorSeenByName || 'Seen by doctor' } : {};
+    const newSteps = PATHWAYS[key].steps.filter((s) => !have.has(s.key)).map((s) => ({ key: s.key, ...(s.key === 'doctor' ? seen : {}) }));
     const updated = await this.visits
       .findOneAndUpdate(
         // Two starts at once: only one finds no running entry.
@@ -375,6 +392,7 @@ export class ErTriageService {
         {
           $set: {
             doctorSeenAt: now,
+            doctorSeenByName: actor.name,
             // A patient already waiting for a bed stays waiting for it.
             ...(visit.status === 'waiting-doctor' ? { status: 'in-treatment' } : {}),
             'steps.$[d].doneAt': now,

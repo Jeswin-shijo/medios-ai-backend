@@ -131,6 +131,16 @@ export class ErBaysService {
     await this.bays.updateMany({ visit: new Types.ObjectId(visitId) }, { $unset: { visit: 1 } }).exec();
   }
 
+  /** Frees bays still held by a visit that has left (a leave that stopped before its bay was freed). Returns how many. */
+  async freeLeftVisits(): Promise<number> {
+    const held = await this.bays.find({ visit: { $exists: true, $ne: null } }).select('visit').lean().exec();
+    if (!held.length) return 0;
+    const gone = await this.visits.find({ _id: { $in: held.map((b) => b.visit) }, status: 'left' }).select('_id').lean().exec();
+    if (!gone.length) return 0;
+    const res = await this.bays.updateMany({ visit: { $in: gone.map((v) => v._id) } }, { $unset: { visit: 1 } }).exec();
+    return res.modifiedCount;
+  }
+
   /** Replaces the list. Bays are matched by id; the list order becomes the bay order. Admin only. */
   async save(actor: Actor, input: ErBayInput[]): Promise<ErBayView[]> {
     if (actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only an admin can change the ER bays.');

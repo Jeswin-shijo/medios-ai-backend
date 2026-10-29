@@ -14,8 +14,8 @@ export const untilNextSnapshot = (now: number): number => HOUR_MS - (now % HOUR_
 
 /**
  * The ER agent's time-based work: default bays and a first snapshot at start-up, then every minute
- * it expires old expected arrivals and resends lost arrival and departure messages, and it takes an
- * hourly snapshot. Every step logs its own failure and never stops the others.
+ * it expires old expected arrivals and runs the reconcile pass (lost messages, stuck visits and
+ * bays), and it takes an hourly snapshot. Every step logs its own failure and never stops the others.
  */
 @Injectable()
 export class ErScheduler implements OnApplicationBootstrap, OnModuleDestroy {
@@ -70,7 +70,7 @@ export class ErScheduler implements OnApplicationBootstrap, OnModuleDestroy {
     try {
       // expectedAt is on the clinic clock, so "now" must be too.
       await this.step('Expire expected arrivals', () => this.visits.expireExpected(clinicNow()));
-      await this.step('Resend lost announcements', () => this.visits.reannounce());
+      await this.step('Reconcile ER visits', () => this.visits.reconcile());
     } finally {
       this.running = false;
     }

@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
+import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AiService } from '../ai/ai.service';
 import { AiProviderName, AiResult, StructuredTask } from '../ai/ai-types';
@@ -27,11 +28,13 @@ import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration, erOnTimePct } from './er-coordinator.registration';
+import { ErTargetsService } from './er-targets.service';
 import { ErVisitsService } from './er-visits.service';
 
 const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
 const DOCTOR: Actor = { id: 'user-doctor', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 const MIN = 60_000;
+const NOTHING = { arrived: 0, triaged: 0, admitted: 0, bays: 0, left: 0 };
 
 function fakeAi() {
   return {
@@ -104,7 +107,7 @@ describe('ErCoordinatorRegistration', () => {
     await bays.ensureDefaults();
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
-    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
     new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
 
     const bedEvents = new BedEvents();
@@ -319,7 +322,7 @@ describe('ErCoordinatorRegistration', () => {
     };
   };
 
-  test('a lost er.left is sent again by reannounce, and the case closes', async () => {
+  test('a lost er.left is sent again by reconcile, and the case closes', async () => {
     const { v } = await arrive();
     await triaged(v.id);
     failNextLeft();
@@ -327,11 +330,11 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'left');
     assert.equal((await sent('er.left')).length, 0);
     assert.equal(await clocks.countRunning(), 1);
-    assert.deepEqual(await visits.reannounce(), { arrived: 0, left: 1 });
+    assert.deepEqual(await visits.reconcile(), { ...NOTHING, left: 1 });
     assert.equal((await sent('er.left')).length, 1);
     assert.equal(await clocks.countRunning(), 0);
     assert.equal(await caseState(v.caseId), 'closed');
-    assert.deepEqual(await visits.reannounce(), { arrived: 0, left: 0 });
+    assert.deepEqual(await visits.reconcile(), NOTHING);
     // Announced: a repeat is a 409 again.
     await assert.rejects(() => visits.dispose(DOCTOR, v.id, 'home', ''), { status: 409 });
   });
@@ -364,12 +367,98 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal((await sent('er.left')).length, 1);
   });
 
-  test('reannounce sends er.arrived for an open visit that was never announced', async () => {
-    const { v } = await arrive();
+  test('reconcile announces an untriaged arrival, and only marks an unannounced visit that is already triaged', async () => {
+    const a = await arrive();
+    const b = await arrive();
+    await triaged(b.v.id);
+    await set(b.v.id, { triageAnnouncedAt: new Date() });
+    // Neither arrival reached the Coordinator.
     await m.AgentMessage.deleteMany({ type: 'er.arrived' });
-    await m.ErVisit.updateOne({ _id: v.id }, { $unset: { announcedAt: 1 } });
-    assert.deepEqual(await visits.reannounce(), { arrived: 1, left: 0 });
-    assert.equal((await sent('er.arrived')).length, 1);
+    await m.Clock.deleteMany({ def: 'er-triage' });
+    await m.ErVisit.updateMany({}, { $unset: { announcedAt: 1 } });
+
+    assert.deepEqual(await visits.reconcile(), { ...NOTHING, arrived: 1 });
+    const arrived = await sent('er.arrived');
+    assert.equal(arrived.length, 1);
+    assert.equal(arrived[0].payload.visitId, a.v.id);
+    const triageClocks = await m.Clock.find({ def: 'er-triage', state: 'running' }).lean();
+    assert.deepEqual(triageClocks.map((c: any) => String(c.case)), [a.v.caseId], 'no triage clock for the visit already triaged');
+    for (const id of [a.v.id, b.v.id]) assert.ok(((await m.ErVisit.findById(id).lean()) as any).announcedAt instanceof Date);
+    assert.deepEqual(await visits.reconcile(), NOTHING);
+  });
+
+  test('reconcile resends a lost er.triaged once, with the doctor due time worked out again', async () => {
+    const { v } = await arrive();
+    await triaged(v.id); // orange, with no er.triaged in the log
+    await set(v.id, { pathways: [{ key: 'chest-pain', startedBy: 'rules' }], steps: [{ key: 'ecg' }, { key: 'doctor' }] });
+    const created = (((await m.ErVisit.findById(v.id).lean()) as any).createdAt as Date).getTime();
+
+    assert.deepEqual(await visits.reconcile(), { ...NOTHING, triaged: 1 });
+    const [msg] = await sent('er.triaged');
+    assert.equal(String(msg.case), v.caseId);
+    assert.deepEqual(Object.keys(msg.payload).sort(), ['colour', 'doctorDueAt', 'visitId']);
+    assert.equal(msg.payload.colour, 'orange');
+    // The chest-pain doctor step (15 minutes) beats orange (30).
+    assert.equal(new Date(msg.payload.doctorDueAt).getTime(), created + 15 * MIN);
+    assert.match(msg.summary, /^ER-0001 triaged orange/);
+    assert.ok(!JSON.stringify(msg).includes('Ravi Kumar'));
+    const clock: any = await m.Clock.findOne({ def: 'er-doctor', case: v.caseId, state: 'running' }).lean();
+    assert.equal(clock.dueAt.getTime(), created + 15 * MIN);
+    assert.ok(((await m.ErVisit.findById(v.id).lean()) as any).triageAnnouncedAt instanceof Date);
+
+    assert.deepEqual(await visits.reconcile(), NOTHING);
+    assert.equal((await sent('er.triaged')).length, 1);
+  });
+
+  test('reconcile only marks a triage the log already has, or one a doctor has since seen', async () => {
+    const a = await arrive();
+    await triaged(a.v.id);
+    await messages.send({ case: a.v.caseId, from: 'er', to: ['coordinator'], type: 'er.triaged', priority: 'high', summary: 'ER-0001 triaged orange: Chest pain', payload: { visitId: a.v.id, colour: 'orange', doctorDueAt: new Date(Date.now() + 30 * MIN) } });
+    const b = await arrive();
+    await triaged(b.v.id);
+    await set(b.v.id, { status: 'in-treatment', doctorSeenAt: new Date() });
+
+    assert.deepEqual(await visits.reconcile(), NOTHING);
+    assert.equal((await sent('er.triaged')).length, 1);
+    assert.equal(await m.Clock.countDocuments({ def: 'er-doctor', case: b.v.caseId }), 0, 'no doctor clock that nothing would stop');
+    for (const id of [a.v.id, b.v.id]) assert.ok(((await m.ErVisit.findById(id).lean()) as any).triageAnnouncedAt instanceof Date);
+  });
+
+  test('reconcile lets a waiting-bed visit leave when its bed was already assigned', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await set(v.id, { triageAnnouncedAt: new Date() });
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    // The bed came first and the admit's own check was lost: the visit still waits.
+    await set(v.id, { status: 'waiting-bed', disposition: { kind: 'admit', byName: 'Dr. Shajin', at: new Date(), notes: '' } });
+
+    assert.deepEqual(await visits.reconcile(), { ...NOTHING, admitted: 1 });
+    const visit: any = await m.ErVisit.findById(v.id).lean();
+    assert.equal(visit.status, 'left');
+    assert.equal(visit.leftReason, 'admitted');
+    assert.equal(await m.ErBay.countDocuments({ visit: { $exists: true } }), 0);
+    const left = await sent('er.left');
+    assert.equal(left.length, 1);
+    assert.deepEqual(left[0].payload, { visitId: v.id, reason: 'admitted' });
+    assert.deepEqual(await visits.reconcile(), NOTHING);
+  });
+
+  test('reconcile frees a bay still held by a visit that left, and keeps an open visit\'s bay', async () => {
+    const a = await arrive();
+    const b = await arrive();
+    await bays.assign(DOCTOR, a.v.id, await bayId('Bay 3'));
+    await bays.assign(DOCTOR, b.v.id, await bayId('Bay 4'));
+    await visits.dispose(DOCTOR, a.v.id, 'home', '');
+    // A leave that stopped before freeing its bay.
+    await m.ErBay.updateOne({ name: 'Bay 3' }, { visit: a.v.id });
+
+    assert.deepEqual(await visits.reconcile(), { ...NOTHING, bays: 1 });
+    assert.equal(((await m.ErBay.findOne({ name: 'Bay 3' }).lean()) as any).visit, undefined);
+    assert.equal(String(((await m.ErBay.findOne({ name: 'Bay 4' }).lean()) as any).visit), b.v.id);
+    assert.deepEqual(await visits.reconcile(), NOTHING);
   });
 
   const handlerOf = (agent: 'er' | 'bed', type: string) => registry.get(agent)!.handles!.find((h) => h.type === type)!.handler;
@@ -445,6 +534,7 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal((await sent('bed.assigned')).length, 0);
     assert.equal(await clocks.countRunning(), 0);
     assert.equal(await caseState(v.caseId), 'closed');
+    assert.equal(await m.Case.countDocuments(), 1, 'no second case for the cancel');
 
     // A redelivered er.left cancels nothing more.
     const [left] = await sent('er.left');
@@ -486,6 +576,7 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal(await m.Admission.countDocuments({ patient: p.id }), 0);
     assert.equal(await clocks.countRunning(), 0);
     assert.equal(await caseState(v.caseId), 'closed');
+    assert.equal(await m.Case.countDocuments(), 1, 'no second case for the cancel');
     for (const msg of await m.AgentMessage.find().lean()) assert.ok(!JSON.stringify(msg).includes(p.name));
   });
 
@@ -552,30 +643,35 @@ describe('ErCoordinatorRegistration', () => {
     assert.deepEqual(await status(), { open: 0, capacity: 20, onTimePct: null });
     const a = await arrive();
     const b = await arrive();
-    await arrive();
+    const c = await arrive();
     await visits.dispose(DOCTOR, b.v.id, 'home', '');
     await m.ErBay.updateOne({ name: 'Stretcher 1' }, { outOfUse: true });
     assert.deepEqual(await status(), { open: 2, capacity: 19, onTimePct: null });
 
+    // a and c were seen by a doctor; b left without being seen, so its review clock was closed by er.left.
     const now = Date.now();
-    const clock = (due: number, stopped: number | null, def = 'er-doctor') => ({
+    for (const x of [a, b, c]) await m.ErVisit.collection.updateOne({ _id: new Types.ObjectId(x.v.id) }, { $set: { createdAt: new Date(now - 4 * 60 * MIN) } });
+    await set(a.v.id, { doctorSeenAt: new Date() });
+    await set(c.v.id, { doctorSeenAt: new Date() });
+    const clock = (x: typeof a, due: number, stopped: number | null, def = 'er-doctor') => ({
       def,
-      case: a.v.caseId,
-      startedBy: new (require('mongoose').Types.ObjectId)(),
+      case: new Types.ObjectId(x.v.caseId),
+      startedBy: new Types.ObjectId(),
       startedAt: new Date(now - 3 * 60 * MIN),
       dueAt: new Date(due),
       state: stopped ? 'met' : 'running',
       ...(stopped ? { stoppedAt: new Date(stopped) } : {}),
     });
     await m.Clock.collection.insertMany([
-      clock(now - 60 * MIN, now - 90 * MIN),
-      clock(now - 60 * MIN, now - 30 * MIN),
-      clock(now - 60 * MIN, now - 25 * 60 * MIN), // older than a day: not counted
-      clock(now + 60 * MIN, null),
-      clock(now - 60 * MIN, now - 10 * MIN, 'er-triage'),
+      clock(a, now - 60 * MIN, now - 90 * MIN), // on time
+      clock(c, now - 60 * MIN, now - 30 * MIN), // late
+      clock(b, now - 60 * MIN, now - 10 * MIN), // closed by the patient leaving: not a review
+      clock(a, now - 60 * MIN, now - 25 * 60 * MIN), // older than a day: not counted
+      clock(a, now + 60 * MIN, null),
+      clock(a, now - 60 * MIN, now - 10 * MIN, 'er-triage'),
     ] as any[]);
     assert.equal((await status()).onTimePct, 50);
-    assert.equal(await erOnTimePct(m.Clock, new Date(now - 26 * 60 * MIN)), 67);
-    assert.equal(await erOnTimePct(m.Clock, new Date(now + MIN)), null);
+    assert.equal(await erOnTimePct(m.Clock, m.ErVisit, new Date(now - 26 * 60 * MIN)), 67);
+    assert.equal(await erOnTimePct(m.Clock, m.ErVisit, new Date(now + MIN)), null);
   });
 });

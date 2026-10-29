@@ -43,14 +43,14 @@ export class StepParam extends IdParam {
   step: string;
 }
 
-/** Vital signs as the triage form sends them; every reading is optional. */
+/** Vital signs as the triage form sends them; every reading is optional. Wide bounds: an ER patient can be very sick. */
 export class VitalsDto {
-  @ApiPropertyOptional({ example: 96 }) @IsOptional() @IsNumber() @Min(50) @Max(100) spo2?: number;
-  @ApiPropertyOptional({ example: 120 }) @IsOptional() @IsNumber() @Min(40) @Max(300) bpSystolic?: number;
-  @ApiPropertyOptional({ example: 80 }) @IsOptional() @IsNumber() @Min(20) @Max(200) bpDiastolic?: number;
-  @ApiPropertyOptional({ example: 80 }) @IsOptional() @IsNumber() @Min(20) @Max(250) heartRate?: number;
-  @ApiPropertyOptional({ example: 16 }) @IsOptional() @IsNumber() @Min(4) @Max(80) respiratoryRate?: number;
-  @ApiPropertyOptional({ example: 37 }) @IsOptional() @IsNumber() @Min(30) @Max(45) temperature?: number;
+  @ApiPropertyOptional({ example: 96 }) @IsOptional() @IsNumber() @Min(0) @Max(100) spo2?: number;
+  @ApiPropertyOptional({ example: 120 }) @IsOptional() @IsNumber() @Min(0) @Max(300) bpSystolic?: number;
+  @ApiPropertyOptional({ example: 80 }) @IsOptional() @IsNumber() @Min(0) @Max(200) bpDiastolic?: number;
+  @ApiPropertyOptional({ example: 80 }) @IsOptional() @IsNumber() @Min(0) @Max(300) heartRate?: number;
+  @ApiPropertyOptional({ example: 16 }) @IsOptional() @IsNumber() @Min(0) @Max(80) respiratoryRate?: number;
+  @ApiPropertyOptional({ example: 37 }) @IsOptional() @IsNumber() @Min(25) @Max(45) temperature?: number;
 }
 
 export class EmergencyDto {

@@ -10,8 +10,9 @@ import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { PatientsService } from '../patients/patients.service';
 import { PatientCardsService } from '../queue/patient-cards.service';
-import { BED_PRIORITY, COLOUR_RANK, COMPLAINTS, PATHWAYS, ComplaintKey, PathwayKey, StepKey, TriageColour } from './er-rules';
+import { BED_PRIORITY, COLOUR_RANK, COMPLAINTS, PATHWAYS, ComplaintKey, PathwayKey, StepKey, TriageColour, doctorDueMinutes } from './er-rules';
 import { ErBaysService } from './er-bays.service';
+import { ErTargetsService } from './er-targets.service';
 import { ErExpected, ErExpectedDocument } from './schemas/er-expected.schema';
 import { ER_DISPOSITIONS, ER_MODES, ErDispositionKind, ErMode, ErStatus, ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
 
@@ -196,6 +197,13 @@ const toExpectedView = (e: any): ErExpectedView => ({
   state: e.state,
 });
 
+/** A pathway is running while its latest entry is not cancelled. */
+const runningPathways = (visit: any): PathwayKey[] => {
+  const latest = new Map<string, any>();
+  for (const p of visit.pathways ?? []) latest.set(p.key, p);
+  return [...latest.values()].filter((p) => !p.cancelled).map((p) => p.key as PathwayKey);
+};
+
 /** Untriaged first, then red to green, then the earlier arrival. */
 const boardOrder = (a: any, b: any) => {
   const rank = (v: any) => (v.triage?.colour ? COLOUR_RANK[v.triage.colour as TriageColour] : -1);
@@ -218,6 +226,7 @@ export class ErVisitsService {
     private readonly messages: MessagesService,
     private readonly bays: ErBaysService,
     @InjectModel(Clock.name) private readonly clockModel: Model<ClockDocument>,
+    private readonly erTargets: ErTargetsService,
   ) {}
 
   /**
@@ -419,8 +428,9 @@ export class ErVisitsService {
       to: ['coordinator'],
       type: 'er.expected',
       priority: 'medium',
-      summary: `Expected in about ${input.etaMinutes} min: ${complaint} (${input.mode})`,
-      payload: { expectedId: String(doc._id), complaint },
+      // Staff free text stays on the card: the message has only the time and the mode.
+      summary: `Expected in about ${input.etaMinutes} min (${input.mode})`,
+      payload: { expectedId: String(doc._id) },
     });
     return toExpectedView(doc);
   }
@@ -520,7 +530,7 @@ export class ErVisitsService {
 
   /**
    * The one place a visit leaves: a guarded update to `left` (null when it already had), its bays freed,
-   * then `before` and er.left. `leftAnnouncedAt` is set once er.left was sent; `reannounce` repeats a lost one.
+   * then `before` and er.left. `leftAnnouncedAt` is set once er.left was sent; `reconcile` repeats a lost one.
    */
   private async leave(
     filter: Record<string, unknown>,
@@ -549,31 +559,85 @@ export class ErVisitsService {
   }
 
   /**
-   * Sends the arrivals and departures the Coordinator has not heard about (a send that failed).
-   * The scheduler calls it every minute; the message dedupe makes it safe against a send still in flight.
+   * One pass that puts right what a failed send or a stopped API left behind. The scheduler calls it
+   * every minute; each step logs its own failures and the message dedupe covers a send still in flight.
+   * - `arrived`: er.arrived for a visit still waiting for triage that was never announced. An unannounced
+   *   visit that is already triaged is only marked (an arrival now would start a stray triage clock).
+   * - `triaged`: er.triaged again for a triaged visit still here whose triage never reached the
+   *   Coordinator, with the doctor due time worked out again. Only marked when the log already has
+   *   it, or when a doctor has seen the patient (its doctor clock would have nothing to stop it).
+   * - `admitted`: a visit waiting for a bed whose bed was already assigned leaves as admitted.
+   * - `bays`: bays still held by a visit that left are freed.
+   * - `left`: er.left again for a visit that left unannounced.
    */
-  async reannounce(): Promise<{ arrived: number; left: number }> {
-    let arrived = 0;
-    let left = 0;
-    const unheard = await this.visits.find({ status: { $in: [...OPEN_ER_STATUSES] }, announcedAt: { $exists: false } }).exec();
-    for (const v of unheard) {
-      try {
-        await this.announce(v);
-        arrived += 1;
-      } catch (e) {
-        this.logger.error(`Could not announce ${v.number}: ${(e as Error).message}`);
+  async reconcile(): Promise<{ arrived: number; triaged: number; admitted: number; bays: number; left: number }> {
+    const counts = { arrived: 0, triaged: 0, admitted: 0, bays: 0, left: 0 };
+    const each = async (what: string, visits: ErVisitDocument[], work: (v: ErVisitDocument) => Promise<boolean>) => {
+      for (const v of visits) {
+        try {
+          if (await work(v)) counts[what as keyof typeof counts] += 1;
+        } catch (e) {
+          this.logger.error(`Reconcile (${what}) failed for ${v.number}: ${(e as Error).message}`);
+        }
       }
-    }
-    const gone = await this.visits.find({ status: 'left', leftAnnouncedAt: { $exists: false } }).exec();
-    for (const v of gone) {
-      try {
-        await this.announceLeft(v);
-        left += 1;
-      } catch (e) {
-        this.logger.error(`Could not announce that ${v.number} left: ${(e as Error).message}`);
+    };
+
+    await each('arrived', await this.visits.find({ status: { $in: [...OPEN_ER_STATUSES] }, announcedAt: { $exists: false } }).exec(), async (v) => {
+      if (v.status !== 'waiting-triage') {
+        await this.visits.updateOne({ _id: v._id, announcedAt: { $exists: false } }, { announcedAt: new Date() }).exec();
+        return false;
       }
+      await this.announce(v);
+      return true;
+    });
+
+    await each(
+      'triaged',
+      await this.visits.find({ status: { $in: [...OPEN_ER_STATUSES] }, 'triage.colour': { $exists: true }, triageAnnouncedAt: { $exists: false } }).exec(),
+      (v) => this.reannounceTriage(v),
+    );
+
+    await each('admitted', await this.visits.find({ status: 'waiting-bed' }).exec(), async (v) => {
+      if (!(await this.bedAlreadyAssigned(v))) return false;
+      return !!(await this.leave({ _id: v._id, status: 'waiting-bed' }, 'admitted'));
+    });
+
+    try {
+      counts.bays = await this.bays.freeLeftVisits();
+    } catch (e) {
+      this.logger.error(`Reconcile (bays) failed: ${(e as Error).message}`);
     }
-    return { arrived, left };
+
+    await each('left', await this.visits.find({ status: 'left', leftAnnouncedAt: { $exists: false } }).exec(), async (v) => {
+      await this.announceLeft(v);
+      return true;
+    });
+    return counts;
+  }
+
+  /** Sends er.triaged for a triage the Coordinator never heard about, then marks it. False when it only marked it. */
+  private async reannounceTriage(visit: ErVisitDocument): Promise<boolean> {
+    const visitId = String(visit._id);
+    const mark = () => this.visits.updateOne({ _id: visit._id }, { triageAnnouncedAt: new Date() }).exec();
+    if (visit.doctorSeenAt || (await this.messages.findOne('er.triaged', { visitId }))) {
+      await mark();
+      return false;
+    }
+    const colour = visit.triage!.colour as TriageColour;
+    const createdAt = (visit as ErVisitDocument & { createdAt: Date }).createdAt;
+    const doctorDueAt = new Date(new Date(createdAt).getTime() + doctorDueMinutes(colour, runningPathways(visit), await this.erTargets.getTargets()) * MIN_MS);
+    const label = COMPLAINTS.find((c) => c.key === visit.complaint)?.label ?? visit.complaint;
+    await this.messages.send({
+      case: String(visit.case),
+      from: 'er',
+      to: ['coordinator'],
+      type: 'er.triaged',
+      priority: BED_PRIORITY[colour],
+      summary: `${visit.number} triaged ${colour}: ${label}`,
+      payload: { visitId, colour, doctorDueAt },
+    });
+    await mark();
+    return true;
   }
 
   /**

@@ -10,10 +10,12 @@ import { MessagesService } from '../coordinator/messages.service';
 import { PatientsService } from '../patients/patients.service';
 import { PatientCardsService } from '../queue/patient-cards.service';
 import { QueueService } from '../queue/queue.service';
+import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration } from './er-coordinator.registration';
+import { ErTargetsService } from './er-targets.service';
 import { ErVisitsService } from './er-visits.service';
 import { PATHWAYS } from './er-rules';
 
@@ -52,7 +54,7 @@ describe('ErVisitsService', () => {
     // A card lookup never issues a queue token, so the queue service is not needed here.
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
-    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
+    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock, new ErTargetsService(new SettingsService(m.HospitalSettings)));
     new ErCoordinatorRegistration(registry, service, bays, messages, m.ErVisit, m.Clock).onModuleInit();
   });
 
@@ -185,6 +187,10 @@ describe('ErVisitsService', () => {
     const exp = await sent('er.expected');
     assert.equal(exp.length, 2);
     assert.equal(exp[0].case, null);
+    // No staff free text in a message: only the time and the mode.
+    assert.deepEqual(exp.map((x) => x.payload), [{ expectedId: picked.id }, { expectedId: stale.id }]);
+    assert.deepEqual(exp.map((x) => x.summary), ['Expected in about 10 min (ambulance)', 'Expected in about 30 min (referred)']);
+    assert.deepEqual(registry.messageType('er.expected')!.payload, { expectedId: 'string' });
   });
 
   test('the board lists open visits, untriaged first, then by colour and arrival', async () => {

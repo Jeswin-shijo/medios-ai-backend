@@ -54,9 +54,21 @@ describe('TriageDto', () => {
   test('rejects a bad complaint', async () => bad(TriageDto, { ...body, complaint: 'nope' }));
   test('rejects pain 11', async () => bad(TriageDto, { ...body, painScore: 11 }));
   test('rejects SpO2 120', async () => bad(TriageDto, { ...body, vitals: { spo2: 120 } }));
-  test('rejects a heart rate of 10 and a temperature of 50', async () => {
-    await bad(TriageDto, { ...body, vitals: { heartRate: 10 } });
+  test('rejects a heart rate of 301 and a temperature of 50', async () => {
+    await bad(TriageDto, { ...body, vitals: { heartRate: 301 } });
     await bad(TriageDto, { ...body, vitals: { temperature: 50 } });
+  });
+  test('accepts the extremes a sick patient can have, and rejects what no one can', async () => {
+    // Lowest and highest accepted for each reading.
+    const edges = { spo2: [0, 100], heartRate: [0, 300], bpSystolic: [0, 300], bpDiastolic: [0, 200], respiratoryRate: [0, 80], temperature: [25, 45] } as const;
+    for (const [key, [low, high]] of Object.entries(edges)) {
+      await ok(TriageDto, { ...body, vitals: { [key]: low } });
+      await ok(TriageDto, { ...body, vitals: { [key]: high } });
+      await bad(TriageDto, { ...body, vitals: { [key]: low - 1 } });
+      await bad(TriageDto, { ...body, vitals: { [key]: high + 1 } });
+    }
+    // An arrest, a very low saturation and a cold patient are real readings.
+    await ok(TriageDto, { ...body, vitals: { heartRate: 10, spo2: 40, bpSystolic: 30, respiratoryRate: 2, temperature: 28 } });
   });
   test('limits the lower-colour reason to 300 characters', async () => {
     await ok(TriageDto, { ...body, reason: 'x'.repeat(300) });
@@ -67,7 +79,7 @@ describe('TriageDto', () => {
 describe('TriageSuggestDto', () => {
   test('takes no reasons, only complaint and readings', async () => {
     await ok(TriageSuggestDto, { complaint: 'fever', vitals: { temperature: 39 } });
-    await bad(TriageSuggestDto, { complaint: 'fever', vitals: { respiratoryRate: 3 } });
+    await bad(TriageSuggestDto, { complaint: 'fever', vitals: { respiratoryRate: 81 } });
   });
 });
 

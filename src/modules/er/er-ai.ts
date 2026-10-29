@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { StructuredTask } from '../ai/ai-types';
@@ -91,6 +91,8 @@ export function explainTemplate(colour: TriageColour, reasons: string[]): string
 /** The AI explains a triage suggestion and drafts the handover. The rules decide; people edit. Any failure gives the template. */
 @Injectable()
 export class ErAiService {
+  private readonly logger = new Logger(ErAiService.name);
+
   constructor(
     private readonly ai: AiService,
     @InjectModel(ErVisit.name) private readonly visits: Model<ErVisitDocument>,
@@ -186,8 +188,9 @@ export class ErAiService {
         const value = textValidator(max)(res.value);
         if (value) return { text: value.text, sample: res.sample };
       }
-    } catch {
-      // fall through to the template
+    } catch (e) {
+      // Only the kind of failure: the message could carry what was sent. The template follows.
+      this.logger.warn(`ER AI request failed (${e instanceof Error ? e.name : typeof e}); using the template`);
     }
     return { text: template, sample: false };
   }

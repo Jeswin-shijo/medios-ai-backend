@@ -119,7 +119,7 @@ export class ErOverviewService {
         .select('arrivedAt triage.at triage.colour doctorSeenAt leftAt status')
         .lean<any[]>()
         .exec(),
-      erOnTimePct(this.clocks, midnight),
+      erOnTimePct(this.clocks, this.visits, midnight),
     ]);
     // `triage.at` is the first triage: a re-triage only adds to the history.
     const avgTriageMin = mean(today.filter((v) => v.triage?.at).map((v) => minutesBetween(v.arrivedAt, v.triage.at)));

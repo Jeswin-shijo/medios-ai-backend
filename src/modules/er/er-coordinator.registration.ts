@@ -21,7 +21,7 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
 });
 
 const MESSAGE_TYPES: MessageTypeDef[] = [
-  type('er.expected', 'A patient is on the way to the ER', { expectedId: 'string', complaint: 'string' }),
+  type('er.expected', 'A patient is on the way to the ER', { expectedId: 'string' }),
   type('er.arrived', 'A patient arrived in the ER', { visitId: 'string', visitNumber: 'string', complaint: 'string' }),
   type('er.triaged', 'Triage was confirmed', { visitId: 'string', colour: 'string', doctorDueAt: 'date' }),
   type('er.retriaged', 'The triage colour was changed', { visitId: 'string', colour: 'string', doctorDueAt: 'date' }),
@@ -74,17 +74,33 @@ const doctorDue = (payload: Record<string, unknown>): Date | null => {
 
 /**
  * The share of doctor reviews done by their due time, among those finished since `since` (a real
- * time, not the clinic clock). A review closed by the patient leaving counts too. Null when none.
+ * time, not the clinic clock). Only reviews a doctor did count: an er-doctor clock is stopped by
+ * er.doctor-seen or by er.left, and the clock does not record which, so a clock counts when its
+ * visit has `doctorSeenAt` (Seen by doctor is refused once the patient has left, so that stop came
+ * first). `doctorSeenAt` is on the clinic clock, so it is never compared with the clock's real times.
+ * The visit is the latest one on the clock's case that began before the clock. Null when none.
  */
-export async function erOnTimePct(clocks: Model<ClockDocument>, since: Date): Promise<number | null> {
+export async function erOnTimePct(clocks: Model<ClockDocument>, visits: Model<ErVisitDocument>, since: Date): Promise<number | null> {
   const done = await clocks
     .find({ def: 'er-doctor', stoppedAt: { $gte: since } })
-    .select('dueAt stoppedAt')
-    .lean<{ dueAt: Date; stoppedAt: Date }[]>()
+    .select('case startedAt dueAt stoppedAt')
+    .lean<{ case: unknown; startedAt: Date; dueAt: Date; stoppedAt: Date }[]>()
     .exec();
   if (!done.length) return null;
-  const onTime = done.filter((c) => c.stoppedAt.getTime() <= c.dueAt.getTime()).length;
-  return Math.round((onTime / done.length) * 100);
+  const onCases = await visits
+    .find({ case: { $in: [...new Set(done.map((c) => String(c.case)))] } })
+    .select('case createdAt doctorSeenAt')
+    .lean<{ case: unknown; createdAt: Date; doctorSeenAt?: Date }[]>()
+    .exec();
+  const seen = done.filter((c) => {
+    const visit = onCases
+      .filter((v) => String(v.case) === String(c.case) && new Date(v.createdAt).getTime() <= new Date(c.startedAt).getTime())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    return !!visit?.doctorSeenAt;
+  });
+  if (!seen.length) return null;
+  const onTime = seen.filter((c) => c.stoppedAt.getTime() <= c.dueAt.getTime()).length;
+  return Math.round((onTime / seen.length) * 100);
 }
 
 /** Tells the Coordinator what the ER agent sends, and the clocks and rule it brings. */
@@ -171,7 +187,7 @@ export class ErCoordinatorRegistration implements OnModuleInit {
     const [open, capacity, onTimePct] = await Promise.all([
       this.visits.countDocuments({ status: { $in: [...OPEN_ER_STATUSES] } }).exec(),
       this.bays.countInUse(),
-      erOnTimePct(this.clocks, new Date(Date.now() - DAY_MS)),
+      erOnTimePct(this.clocks, this.visits, new Date(Date.now() - DAY_MS)),
     ]);
     return { open, capacity, onTimePct };
   }

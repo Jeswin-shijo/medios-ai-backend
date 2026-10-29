@@ -102,6 +102,8 @@ export class ErVisit {
   @Prop({ type: [ErPathway], default: [] }) pathways: { key: PathwayKey; startedBy: 'rules' | 'staff'; startedByName?: string; cancelled?: ErCancelled }[];
   @Prop({ type: [ErStep], default: [] }) steps: { key: StepKey; doneAt?: Date; byName?: string }[];
   @Prop() doctorSeenAt?: Date;
+  /** Who marked Seen by doctor, for a pathway's doctor step started later. */
+  @Prop() doctorSeenByName?: string;
   @Prop({ type: ErDisposition }) disposition?: ErDisposition;
   /** Clinic clock. The admit's bed request was cancelled, so the visit went back to in-treatment. */
   @Prop() admitCancelledAt?: Date;
@@ -112,6 +114,8 @@ export class ErVisit {
   @Prop() handoverNote?: string;
   /** Set once er.arrived reached the Coordinator; a visit without it is announced again on the next arrival. */
   @Prop() announcedAt?: Date;
+  /** Set once er.triaged reached the Coordinator; a triaged visit without it is sent again by the reconcile pass. */
+  @Prop() triageAnnouncedAt?: Date;
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Case', required: true }) case: Types.ObjectId;
 }
 

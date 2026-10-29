@@ -46,6 +46,8 @@ const CLOSE_REASON = 'ER visit finished';
 /** Marks the patients this seed made up, so a rerun removes exactly those. */
 const MARKER = 'ER demo patient';
 const BED_REQUESTER = 'ER Seed';
+/** The department of every patient the seed gives an ER visit. */
+const ER_DEPARTMENT = 'General Medicine';
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 } as const;
 type Priority = keyof typeof PRIORITY_RANK;
 
@@ -277,7 +279,11 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
     ...(await cases.find({ state: 'open' }).select('patient').lean<any[]>()).map((c) => String(c.patient)),
     ...(await requests.find({ open: true }).select('patient').lean<any[]>()).map((r) => String(r.patient)),
   ]);
-  const demoFree = (await patients.find().sort({ uhid: 1 }).lean<any[]>()).filter((p) => !admitted.has(String(p._id)) && !busy.has(String(p._id)) && !p.detailsPending).slice(0, 6);
+  // General Medicine patients only: the admit form starts from the patient's department, and an
+  // Obstetrics or Paediatrics one would not fit an adult ER admission.
+  const demoFree = (await patients.find().sort({ uhid: 1 }).lean<any[]>())
+    .filter((p) => !admitted.has(String(p._id)) && !busy.has(String(p._id)) && !p.detailsPending && (p.department ?? ER_DEPARTMENT) === ER_DEPARTMENT)
+    .slice(0, 6);
 
   const needPerson = specs.filter((s) => !s.reuse && !s.placeholder);
   const extrasNeeded = Math.max(0, needPerson.length - demoFree.length);
@@ -288,7 +294,7 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
   const nextUhid = () => `${prefix}${String(++serial).padStart(5, '0')}`;
   const stamp = { createdAt: new Date(nowMs), updatedAt: new Date(nowMs) };
   const made = await patients.insertMany([
-    ...EXTRA_PEOPLE.slice(0, extrasNeeded).map((p, i) => ({ uhid: nextUhid(), name: p.name, age: p.age, gender: p.gender, phone: `90000092${String(i).padStart(2, '0')}`, address: MARKER, doctor: 'Dr. Shajin', ...stamp })),
+    ...EXTRA_PEOPLE.slice(0, extrasNeeded).map((p, i) => ({ uhid: nextUhid(), name: p.name, age: p.age, gender: p.gender, phone: `90000092${String(i).padStart(2, '0')}`, address: MARKER, doctor: 'Dr. Shajin', department: ER_DEPARTMENT, ...stamp })),
     ...OPEN_SPECS.concat(LEFT_SPECS)
       .filter((s) => s.placeholder)
       .map((s) => ({
@@ -298,6 +304,7 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
         gender: s.placeholder!.gender,
         phone: '',
         detailsPending: true,
+        department: ER_DEPARTMENT,
         ...stamp,
       })),
   ]);
@@ -601,10 +608,11 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
       status,
       pathways: started.map((key) => ({ key, startedBy: 'rules' })),
       steps,
-      ...(seenAt ? { doctorSeenAt: clinicAfter(spec.seen!) } : {}),
+      ...(seenAt ? { doctorSeenAt: clinicAfter(spec.seen!), doctorSeenByName: doctor } : {}),
       ...(spec.disposition ? { disposition: { kind: spec.disposition.kind, byName: doctor, at: clinicAfter(spec.disposition.min), notes: '' } } : {}),
       ...(isLeft ? { leftAt: clinicAfter(spec.disposition!.min), leftReason: spec.disposition!.kind, leftAnnouncedAt: leftReal } : {}),
       announcedAt,
+      ...(triageAt ? { triageAnnouncedAt: triageAt } : {}),
       case: caseId,
       createdAt,
       updatedAt: new Date(touched),
@@ -735,8 +743,8 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
     from: 'er',
     type: 'er.expected',
     priority: 'medium',
-    summary: 'Expected in about 6 min: Chest pain with sweating (ambulance)',
-    payload: { expectedId: String(expectedCard._id), complaint: 'Chest pain with sweating' },
+    summary: 'Expected in about 6 min (ambulance)',
+    payload: { expectedId: String(expectedCard._id) },
   });
 
   // ---- Write everything --------------------------------------------------------------------
@@ -755,7 +763,7 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
   const today = visitDocs.filter((v) => v.createdAt.getTime() >= midnight.getTime());
   const open = visitDocs.filter((v) => v.status !== 'left');
   const avgTriageNow = mean(today.filter((v) => v.triage).map((v) => (v.triage.at.getTime() - v.arrivedAt.getTime()) / MIN));
-  const onTimeNow = await erOnTimePct(clocks as any, midnight);
+  const onTimeNow = await erOnTimePct(clocks as any, visits as any, midnight);
   const r = rng(26092026);
   const last = hourOf(new Date(nowMs)).getTime();
   const points = Array.from({ length: 168 }, (_, k) => {

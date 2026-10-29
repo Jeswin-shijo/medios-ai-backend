@@ -2,7 +2,13 @@ import * as assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { clinicNow } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
+import { AgentRegistry } from '../modules/coordinator/agent-registry';
+import { CoordinatorEvents } from '../modules/coordinator/coordinator-events';
+import { MessagesService } from '../modules/coordinator/messages.service';
+import { ErBaysService } from '../modules/er/er-bays.service';
+import { ErTargetsService } from '../modules/er/er-targets.service';
 import { ErVisitsService } from '../modules/er/er-visits.service';
+import { SettingsService } from '../modules/settings/settings.service';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../test/test-db';
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
@@ -45,7 +51,8 @@ describe('seedEr', () => {
       { uhid: 'MHK202500327', name: 'James Wilson', age: 62, gender: 'Male', phone: '9000000327' },
       { uhid: 'MHK202500401', name: 'Priya Natarajan', age: 34, gender: 'Female', phone: '9000000401' },
       { uhid: 'MHK202500402', name: 'Suresh Kandasamy', age: 58, gender: 'Male', phone: '9000000402' },
-      { uhid: 'MHK202500403', name: 'Meena Bhaskar', age: 29, gender: 'Female', phone: '9000000403' },
+      // A department that does not fit an ER admission: the seed must not give her an ER visit.
+      { uhid: 'MHK202500403', name: 'Meena Bhaskar', age: 29, gender: 'Female', phone: '9000000403', department: 'Obstetrics' },
       { uhid: 'MHK202500404', name: 'Anwar Hussain', age: 71, gender: 'Male', phone: '9000000404' },
     ]);
     await m.User.create({ email: 'admin@medios.ai', passwordHash: 'x', name: 'Hospital Admin', role: 'admin' });
@@ -201,12 +208,22 @@ describe('seedEr', () => {
     }
   });
 
-  test('reannounce() finds nothing to resend after seeding', async () => {
+  test('reconcile() finds nothing to do after seeding', async () => {
     const sent: unknown[] = [];
-    const stub = { send: async (x: unknown) => void sent.push(x) } as any;
-    const service = new ErVisitsService(m.ErVisit as any, m.ErExpected as any, m.CoordinatorCounter as any, m.Patient as any, null as any, null as any, null as any, stub, null as any, m.Clock as any);
-    assert.deepEqual(await service.reannounce(), { arrived: 0, left: 0 });
+    // The real message log for the lookups; sends are only recorded.
+    const messages = new MessagesService(m.AgentMessage, new AgentRegistry(), new CoordinatorEvents());
+    messages.send = async (x: unknown) => {
+      sent.push(x);
+      return null;
+    };
+    const bays = new ErBaysService(m.ErBay, m.ErVisit);
+    const targets = new ErTargetsService(new SettingsService(m.HospitalSettings));
+    const service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, null as any, null as any, null as any, messages, bays, m.Clock, targets);
+    const before = await m.ErVisit.find().lean().exec();
+    assert.deepEqual(await service.reconcile(), { arrived: 0, triaged: 0, admitted: 0, bays: 0, left: 0 });
     assert.equal(sent.length, 0);
+    assert.deepEqual(await m.ErVisit.find().lean().exec(), before, 'nothing on a visit changed');
+    for (const v of before.filter((x) => x.triage)) assert.ok(v.triageAnnouncedAt instanceof Date, `${v.number} triageAnnouncedAt`);
     // Each visit has the messages its state implies.
     for (const v of await m.ErVisit.find().lean().exec()) {
       const types = new Set((await m.AgentMessage.find({ case: v.case, 'payload.visitId': String(v._id) }).lean().exec()).map((x) => x.type));
@@ -218,6 +235,20 @@ describe('seedEr', () => {
       assert.equal(types.has('er.pathway-started'), v.pathways.length > 0);
       assert.equal(types.has('er.step-done'), v.steps.some((s) => s.key !== 'doctor' && s.doneAt));
     }
+  });
+
+  test('every ER visit\'s patient is in General Medicine, so the admit form fits', async () => {
+    for (const v of await m.ErVisit.find().lean().exec()) {
+      const p = (await m.Patient.findById(v.patient).lean().exec())!;
+      assert.equal(p.department, 'General Medicine', `${v.number} (${p.uhid})`);
+    }
+  });
+
+  test('the seeded er.expected carries no free text', async () => {
+    const [msg] = await m.AgentMessage.find({ type: 'er.expected' }).lean().exec();
+    const [card] = await m.ErExpected.find().lean().exec();
+    assert.deepEqual(msg.payload, { expectedId: String(card._id) });
+    assert.equal(msg.summary, `Expected in about ${card.etaMinutes} min (${card.mode})`);
   });
 
   test('no patient name in any seeded ER message', async () => {
