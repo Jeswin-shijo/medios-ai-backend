@@ -217,6 +217,27 @@ describe('LabOrdersService.reconcile', () => {
     assert.equal(((await m.Escalation.findById(esc._id).lean()) as any).state, 'acknowledged');
   });
 
+  test('(f) never resends a stale acknowledgement once an amendment has replaced the acknowledged version', async () => {
+    const { lineId } = await releaseCritical();
+    await m.LabLine.collection.updateOne({ _id: new Types.ObjectId(lineId) }, { $set: { 'critical.ackAt': new Date(), 'critical.ackBy': 'Dr. Shajin', 'critical.ackById': DOC.id } });
+    await settle(lineId);
+    // The race: between (f) reading the line and sending, an amendment moves it to version 2 with a new, unacknowledged critical.
+    const findById = m.LabRequest.findById;
+    (m.LabRequest as any).findById = (...args: any[]) => ({
+      exec: async () => {
+        await m.LabLine.collection.updateOne({ _id: new Types.ObjectId(lineId) }, { $inc: { version: 1 }, $unset: { 'critical.ackAt': '', 'critical.ackBy': '', 'critical.ackById': '' } });
+        return (findById as any).apply(m.LabRequest, args).exec();
+      },
+    });
+    try {
+      assert.deepEqual(await results.reconcileCriticals(), { critical: 0, acked: 0 });
+    } finally {
+      (m.LabRequest as any).findById = findById;
+    }
+    assert.equal((await criticalClocks(lineId))[0].state, 'running', 'the new critical keeps its clock');
+    assert.equal(await m.AgentMessage.countDocuments({ type: 'lab.critical-acked' }), 0);
+  });
+
   test('one broken item never stops the pass: the other items and branches still run', async () => {
     // (a): one request whose case id is unusable, one fine.
     const bad = await order(['crp']);

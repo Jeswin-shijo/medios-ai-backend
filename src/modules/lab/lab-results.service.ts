@@ -247,6 +247,8 @@ export class LabResultsService {
       const sent = await item(`resending the acknowledgement of lab line ${line._id}`, async () => {
         const request = await this.requests.findById(line.request).exec();
         if (!request) return false;
+        // Re-check right before sending: an amendment since the read has its own critical, which a stale acknowledgement must never meet.
+        if (!(await this.lines.exists({ _id: line._id, version: line.version, 'critical.ackAt': { $exists: true } }).exec())) return false;
         await this.sendAcked(request, line);
         return true;
       });
