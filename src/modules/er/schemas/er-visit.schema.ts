@@ -78,6 +78,8 @@ export class ErVisit {
   @Prop() leftAt?: Date;
   @Prop() leftReason?: string;
   @Prop() handoverNote?: string;
+  /** Set once er.arrived reached the Coordinator; a visit without it is announced again on the next arrival. */
+  @Prop() announcedAt?: Date;
   @Prop({ type: Types.ObjectId, ref: 'Case', required: true }) case: Types.ObjectId;
 }
 

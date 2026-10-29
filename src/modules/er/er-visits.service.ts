@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId, mongo } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -141,6 +141,8 @@ const boardOrder = (a: any, b: any) => {
 /** ER visits: arrival, the placeholder patient for an unknown person, and the expected-arrivals list. */
 @Injectable()
 export class ErVisitsService {
+  private readonly logger = new Logger(ErVisitsService.name);
+
   constructor(
     @InjectModel(ErVisit.name) private readonly visits: Model<ErVisitDocument>,
     @InjectModel(ErExpected.name) private readonly expected: Model<ErExpectedDocument>,
@@ -182,6 +184,7 @@ export class ErVisitsService {
       const description = (e.description ?? '').trim();
       if (!description) throw new BadRequestException('Describe the patient so staff can recognise them');
       // The placeholder's name carries the visit number, so the number comes first.
+      // A lost race or a failure can skip a number, as cases do.
       number = await this.nextNumber();
       patient = await this.patients.create({
         name: `Unknown ${PLACEHOLDER_WORD[e.gender]}, ${number}`,
@@ -195,7 +198,7 @@ export class ErVisitsService {
     } else {
       patient = await this.resolve(input);
       const open = await this.openVisit(patient._id);
-      if (open) return toVisitView(open);
+      if (open) return toVisitView(await this.announce(open, input.expectedId));
       number = await this.nextNumber();
     }
 
@@ -223,27 +226,44 @@ export class ErVisitsService {
         case: theCase._id,
       });
     } catch (err) {
-      if (err instanceof mongo.MongoServerError && err.code === DUPLICATE_KEY) {
-        // The same patient arrived at the same moment: the other call made the visit and sent er.arrived.
+      if (err instanceof mongo.MongoServerError && err.code === DUPLICATE_KEY && 'patient' in (err.keyPattern ?? {})) {
+        // The same patient arrived at the same moment: the other call made the visit.
         const open = await this.openVisit(patient._id);
-        if (open) return toVisitView(open);
+        if (open) return toVisitView(await this.announce(open, input.expectedId));
       }
       throw err;
     }
+    return toVisitView(await this.announce(visit, input.expectedId));
+  }
 
-    if (input.expectedId) {
-      await this.expected.updateOne({ _id: input.expectedId, state: 'waiting' }, { state: 'arrived' }).exec();
+  /**
+   * Sends er.arrived for a visit the Coordinator has not heard about yet, then records that it did.
+   * A retry after a failed send comes through here again; the message dedupe covers two at once.
+   */
+  private async announce(visit: ErVisitDocument, expectedId?: string): Promise<ErVisitDocument> {
+    if (!visit.announcedAt) {
+      const label = COMPLAINTS.find((c) => c.key === visit.complaint)?.label ?? visit.complaint;
+      await this.messages.send({
+        case: String(visit.case),
+        from: 'er',
+        to: ['coordinator'],
+        type: 'er.arrived',
+        priority: 'medium',
+        summary: `${visit.number} arrived: ${label} (${visit.mode})`,
+        payload: { visitId: String(visit._id), visitNumber: visit.number, complaint: label },
+      });
+      visit.announcedAt = new Date();
+      await this.visits.updateOne({ _id: visit._id }, { announcedAt: visit.announcedAt }).exec();
     }
-    await this.messages.send({
-      case: String(theCase._id),
-      from: 'er',
-      to: ['coordinator'],
-      type: 'er.arrived',
-      priority: 'medium',
-      summary: `${number} arrived: ${complaint.label} (${input.mode})`,
-      payload: { visitId: String(visit._id), visitNumber: number, complaint: complaint.label },
-    });
-    return toVisitView(visit);
+    if (expectedId) {
+      // Bookkeeping: it must never block the message.
+      try {
+        await this.expected.updateOne({ _id: expectedId, state: 'waiting' }, { state: 'arrived' }).exec();
+      } catch (e) {
+        this.logger.error(`Could not mark expected arrival ${expectedId} as arrived: ${(e as Error).message}`);
+      }
+    }
+    return visit;
   }
 
   private async resolve(input: ArriveInput): Promise<PatientDocument> {

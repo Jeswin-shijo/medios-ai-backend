@@ -17,6 +17,8 @@ export function normalizeCardId(raw: string): string {
   return id;
 }
 
+const CARD_NOT_REGISTERED = 'This card is not registered. Please go to the front desk.';
+
 /** "…B2C3": enough to tell cards apart on screen. */
 export const cardHint = (cardId: string) => `…${cardId.slice(-4)}`;
 
@@ -70,7 +72,7 @@ export class PatientCardsService {
   /** The UHID a card is linked to. Reads only: no token, and `lastUsedAt` is left alone. */
   async findUhid(rawCardId: string): Promise<string> {
     const card = await this.cards.findOne({ cardId: normalizeCardId(rawCardId) }).exec();
-    if (!card) throw new NotFoundException('This card is not registered. Please go to the front desk.');
+    if (!card) throw new NotFoundException(CARD_NOT_REGISTERED);
     return card.uhid;
   }
 
@@ -81,7 +83,7 @@ export class PatientCardsService {
   async tap(rawCardId: string, actor: string, source: 'front-desk' | 'kiosk') {
     const cardId = normalizeCardId(rawCardId);
     const card = await this.cards.findOneAndUpdate({ cardId }, { $set: { lastUsedAt: new Date() } }, { new: true }).exec();
-    if (!card) throw new NotFoundException('This card is not registered. Please go to the front desk.');
+    if (!card) throw new NotFoundException(CARD_NOT_REGISTERED);
     const issued = await this.queue.issue({ uhid: card.uhid }, actor, source);
     return { ...issued, cardId };
   }

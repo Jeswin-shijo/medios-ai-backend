@@ -199,4 +199,28 @@ describe('ErVisitsService', () => {
     assert.equal((await service.board()).visits[0].id, vd.id, 'untriaged first');
     assert.equal((await service.get(vd.id)).id, vd.id);
   });
+
+  test('a failed er.arrived send is repeated on the next arrival for the same patient', async () => {
+    const p = await patient();
+    const real = messages.send.bind(messages);
+    let failures = 1;
+    (messages as any).send = async (input: any) => {
+      if (input.type === 'er.arrived' && failures-- > 0) throw new Error('boom');
+      return real(input);
+    };
+    await assert.rejects(service.arrive(NURSE, { uhid: p.uhid, mode: 'walk-in', complaint: 'chest-pain' }), /boom/);
+    assert.equal((await sent('er.arrived')).length, 0);
+    const visit: any = await m.ErVisit.findOne().lean();
+    assert.equal(visit.announcedAt, undefined);
+
+    const again = await service.arrive(NURSE, { uhid: p.uhid, mode: 'walk-in', complaint: 'chest-pain' });
+    assert.equal(again.id, String(visit._id));
+    const arrived = await sent('er.arrived');
+    assert.equal(arrived.length, 1);
+    assert.equal(arrived[0].payload.visitId, String(visit._id));
+    assert.ok(((await m.ErVisit.findById(visit._id).lean()) as any).announcedAt);
+    // Announced now: a further arrival sends nothing.
+    await service.arrive(NURSE, { uhid: p.uhid, mode: 'walk-in', complaint: 'chest-pain' });
+    assert.equal((await sent('er.arrived')).length, 1);
+  });
 });
