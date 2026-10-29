@@ -6,6 +6,7 @@ import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
 
 const HOUR = 3_600_000;
+const MINUTE = 60_000;
 const DAY = '2026-09-26';
 
 describe('seedCoordinator', () => {
@@ -202,6 +203,41 @@ describe('seedCoordinator', () => {
     assert.equal(await m.TaskAlertItem.countDocuments().exec(), before.alerts);
     assert.equal(await m.TimelineEvent.countDocuments().exec(), before.timeline);
   });
+
+  for (const hour of [6, 23]) {
+    test(`seeded messages keep the bridge's order when seeded at ${hour}:00`, async () => {
+      const fake = new Date();
+      fake.setHours(hour, 0, 0, 0);
+      const real = console.log;
+      console.log = () => undefined;
+      try {
+        await seedCoordinator(DAY, fake.getTime());
+      } finally {
+        console.log = real;
+      }
+      const msgs = await m.AgentMessage.find().lean().exec();
+      assert.ok(msgs.length > 0);
+      assert.ok(msgs.every((x) => x.createdAt.getTime() <= fake.getTime()), 'nothing after now');
+      for (const c of await m.Case.find().lean().exec()) {
+        const mine = msgs.filter((x) => String(x.case) === String(c._id)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || String(a._id).localeCompare(String(b._id)));
+        assert.equal(mine[0].type, 'case.opened');
+        assert.equal(mine[1].type, 'bed.request');
+        assert.ok(mine[1].createdAt.getTime() > mine[0].createdAt.getTime());
+        for (const r of mine.filter((x) => x.resolves)) {
+          const opened = msgs.find((x) => String(x._id) === String(r.resolves))!;
+          assert.ok(r.createdAt.getTime() > opened.createdAt.getTime(), `${r.type} comes after its bed.request`);
+          assert.ok(opened.resolvedAt && opened.resolvedAt.getTime() >= opened.createdAt.getTime() && opened.resolvedAt.getTime() <= fake.getTime());
+          assert.equal(opened.resolvedAt!.getTime(), r.createdAt.getTime());
+        }
+        const closed = mine.find((x) => x.type === 'case.closed');
+        if (closed) assert.equal(mine[mine.length - 1], closed);
+      }
+      // The clock and escalation keep their gaps, and the escalation is still the latest-but-recent thing.
+      const clock = (await m.Clock.find().lean().exec())[0];
+      assert.equal(clock.dueAt.getTime() - clock.startedAt.getTime(), 60 * MINUTE);
+      assert.ok(clock.dueAt.getTime() <= fake.getTime());
+    });
+  }
 
   test('a seed that cannot run leaves the coordinator data as it was', async () => {
     const before = await m.Case.countDocuments().exec();

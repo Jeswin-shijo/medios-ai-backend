@@ -1,5 +1,5 @@
 import mongoose, { Model, Schema, Types } from 'mongoose';
-import { displayDate, displayTime, clinicNow } from '../common/utils/clinic-time';
+import { displayDate, displayTime } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
 import { Admission, AdmissionSchema } from '../modules/beds/schemas/admission.schema';
 import { BedRequest, BedRequestSchema } from '../modules/beds/schemas/bed-request.schema';
@@ -23,6 +23,14 @@ import { User, UserRole, UserSchema } from '../modules/users/schemas/user.schema
 const model = (cls: { name: string }, schema: Schema): Model<any> => mongoose.models[cls.name] ?? mongoose.model(cls.name, schema);
 
 const MIN = 60_000;
+
+/** The clinic moment for the real moment `nowMs`: the clinic day, at the real time of day. */
+function clinicAt(day: string, nowMs: number): number {
+  const d = new Date(nowMs);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (m) d.setFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.getTime();
+}
 const HOUR = 60 * MIN;
 const CLOSE_REASON = 'Admission discharged or request cancelled';
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 } as const;
@@ -64,9 +72,11 @@ interface Req {
  * bridge would have written for the seeded bed requests, one open approval, one expired bed-wait
  * clock with its escalation, and a week of hourly snapshots. Run after seedBeds. Case times use the
  * clinic clock (`clinicDay`); messages, clocks, escalations and snapshots use the real clock,
- * placed so their order and spacing match the bed history.
+ * placed so their order and spacing match the bed history. If any of them would fall after now,
+ * the whole real-clock history moves back together, so order and spacing are kept.
+ * `nowMs` is for tests.
  */
-export async function seedCoordinator(clinicDay: string): Promise<void> {
+export async function seedCoordinator(clinicDay: string, nowMs: number = Date.now()): Promise<void> {
   const cases = model(Case, CaseSchema);
   const messages = model(AgentMessage, AgentMessageSchema);
   const alerts = model(TaskAlertItem, TaskAlertItemSchema);
@@ -111,8 +121,8 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
   await model(Ladder, LadderSchema).insertMany(DEFAULT_LADDERS);
 
   // Clock mapping: a bed event at clinic time T happened at real time (now - (clinicNow - T)).
-  const now = Date.now();
-  const clinicMs = clinicNow(clinicDay).getTime();
+  const now = nowMs;
+  const clinicMs = clinicAt(clinicDay, now);
   const real = (clinicTime: Date | number): Date => new Date(now - (clinicMs - new Date(clinicTime).getTime()));
   const clinicAgo = (minutes: number): Date => new Date(clinicMs - minutes * MIN);
 
@@ -200,36 +210,11 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
   plans.sort((a, b) => a.reqs[0].requestedAt.getTime() - b.reqs[0].requestedAt.getTime());
   plans.forEach((p, i) => (p.number = `CASE-${String(i + 1).padStart(4, '0')}`));
 
-  await cases.insertMany(
-    plans.map((p) => {
-      const first = p.reqs[0];
-      const rank = (r: Req) => PRIORITY_RANK[r.priority];
-      const top = p.reqs.reduce((a, b) => (rank(b) < rank(a) ? b : a));
-      const admissionId = [...p.reqs].reverse().find((r) => r.admission)?.admission;
-      return {
-        _id: p.id,
-        number: p.number,
-        patient: first.patient,
-        patientUhid: first.patientUhid,
-        patientName: first.patientName,
-        kind: 'ipd',
-        priority: top.priority,
-        state: p.closed ? 'closed' : 'open',
-        openedAt: first.requestedAt,
-        ...(p.closed ? { closedAt: p.closedAt, closedReason: CLOSE_REASON } : {}),
-        agents: ['bed'],
-        refs: { bedRequestIds: p.reqs.map((r) => String(r._id)), ...(admissionId ? { admissionId: String(admissionId) } : {}) },
-        openedBy: 'bed',
-        createdAt: real(first.requestedAt),
-        updatedAt: real(p.closedAt ?? first.requestedAt),
-      };
-    }),
-  );
-  await model(CoordinatorCounter, CoordinatorCounterSchema).create({ key: 'case', last: plans.length });
 
   // Messages, written the way the Bed bridge writes them. Summaries carry the UHID and bed label, never a name.
   const docs: Record<string, unknown>[] = [];
   let waitMessageId: Types.ObjectId | undefined;
+  let shift = 0;
   const push = (caseId: Types.ObjectId, at: Date, m: Record<string, unknown>): Types.ObjectId => {
     const _id = new Types.ObjectId();
     const key = `${m.type}:${caseId}:${String((m.payload as any)?.requestId ?? docs.length)}`;
@@ -245,7 +230,7 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
       attempts: 0,
       state: 'delivered',
       dedupeKey: key,
-      createdAt: new Date(Math.min(at.getTime(), now)),
+      createdAt: at,
       ...m,
     });
     return _id;
@@ -312,6 +297,43 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
     }
   }
 
+  // Real-clock times come from the clinic clock, so some may fall after now (a request's later steps, or +1s
+  // offsets). Move the whole history back together by the overshoot: order and spacing stay as they were.
+  const latest = Math.max(...docs.map((d) => Math.max((d.createdAt as Date).getTime(), (d.resolvedAt as Date | undefined)?.getTime() ?? 0)));
+  shift = Math.max(0, latest - now);
+  if (shift) {
+    for (const d of docs) {
+      d.createdAt = new Date((d.createdAt as Date).getTime() - shift);
+      if (d.resolvedAt) d.resolvedAt = new Date((d.resolvedAt as Date).getTime() - shift);
+    }
+  }
+  await cases.insertMany(
+    plans.map((p) => {
+      const first = p.reqs[0];
+      const rank = (r: Req) => PRIORITY_RANK[r.priority];
+      const top = p.reqs.reduce((a, b) => (rank(b) < rank(a) ? b : a));
+      const admissionId = [...p.reqs].reverse().find((r) => r.admission)?.admission;
+      return {
+        _id: p.id,
+        number: p.number,
+        patient: first.patient,
+        patientUhid: first.patientUhid,
+        patientName: first.patientName,
+        kind: 'ipd',
+        priority: top.priority,
+        state: p.closed ? 'closed' : 'open',
+        openedAt: first.requestedAt,
+        ...(p.closed ? { closedAt: p.closedAt, closedReason: CLOSE_REASON } : {}),
+        agents: ['bed'],
+        refs: { bedRequestIds: p.reqs.map((r) => String(r._id)), ...(admissionId ? { admissionId: String(admissionId) } : {}) },
+        openedBy: 'bed',
+        createdAt: new Date(real(first.requestedAt).getTime() - shift),
+        updatedAt: new Date(real(p.closedAt ?? first.requestedAt).getTime() - shift),
+      };
+    }),
+  );
+  await model(CoordinatorCounter, CoordinatorCounterSchema).create({ key: 'case', last: plans.length });
+
   // The open approval: the attention request.
   const attentionPlan = plans.find((p) => p.reqs.some((r) => String(r._id) === attentionId))!;
   const attentionUhid = attentionPlan.reqs[0].patientUhid;
@@ -324,12 +346,12 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
     primary: { kind: 'open', label: 'Open' },
     source: { kind: 'bed-request', id: attentionId },
     state: 'open',
-    createdAt: real(clinicAgo(19)),
+    createdAt: new Date(real(clinicAgo(19)).getTime() - shift),
   });
 
   // The escalation: the waiting request's bed-wait clock ran out about five minutes ago.
   const waitingPlan = plans.find((p) => p.reqs.some((r) => String(r._id) === waitingId))!;
-  const expiredAt = new Date(now - 5 * MIN);
+  const expiredAt = new Date(now - 5 * MIN - shift);
   const clockId = new Types.ObjectId();
   const escalationId = new Types.ObjectId();
   const alertId = new Types.ObjectId();
@@ -341,11 +363,11 @@ export async function seedCoordinator(clinicDay: string): Promise<void> {
     def: 'bed-wait',
     case: waitingPlan.id,
     startedBy: waitMessageId,
-    startedAt: real(clinicAgo(65)),
+    startedAt: new Date(real(clinicAgo(65)).getTime() - shift),
     dueAt: expiredAt,
     state: 'expired',
     escalation: escalationId,
-    createdAt: real(clinicAgo(65)),
+    createdAt: new Date(real(clinicAgo(65)).getTime() - shift),
   });
   await alerts.create({
     _id: alertId,
