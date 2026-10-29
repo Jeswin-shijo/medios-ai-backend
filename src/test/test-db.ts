@@ -18,6 +18,7 @@ import { Escalation, EscalationDocument, EscalationSchema } from '../modules/coo
 import { Clock, ClockDocument, ClockSchema } from '../modules/coordinator/schemas/clock.schema';
 import { Approval, ApprovalDocument, ApprovalSchema } from '../modules/coordinator/schemas/approval.schema';
 import { CoordinatorSnapshot, CoordinatorSnapshotDocument, CoordinatorSnapshotSchema } from '../modules/coordinator/schemas/coordinator-snapshot.schema';
+import { ChatLog, ChatLogDocument, ChatLogSchema } from '../modules/coordinator/schemas/chat-log.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -61,6 +62,7 @@ export function models() {
     Clock: model(Clock, ClockSchema) as Model<ClockDocument>,
     Approval: model(Approval, ApprovalSchema) as Model<ApprovalDocument>,
     CoordinatorSnapshot: model(CoordinatorSnapshot, CoordinatorSnapshotSchema) as Model<CoordinatorSnapshotDocument>,
+    ChatLog: model(ChatLog, ChatLogSchema) as Model<ChatLogDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };

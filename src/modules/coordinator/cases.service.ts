@@ -166,6 +166,13 @@ export class CasesService {
     return this.model.findOne({ number }).exec();
   }
 
+  /** The patient's open case, else their most recent one. */
+  async forPatient(patientId: string): Promise<CaseDocument | null> {
+    if (!Types.ObjectId.isValid(patientId)) return null;
+    const patient = new Types.ObjectId(patientId);
+    return (await this.model.findOne({ patient, ...isOpen }).exec()) ?? this.model.findOne({ patient }).sort({ openedAt: -1, _id: -1 }).exec();
+  }
+
   async list(q: CaseQuery = {}): Promise<CaseDocument[]> {
     const match: Record<string, unknown> = {};
     if (q.state) match.state = q.state;

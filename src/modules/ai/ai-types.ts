@@ -1,5 +1,5 @@
 export type AiProviderName = 'none' | 'sample' | 'claude';
-export type AiFeature = 'bedSuggestions';
+export type AiFeature = 'bedSuggestions' | 'coordinatorChat';
 export type AiFailure = 'off' | 'timeout' | 'invalid' | 'provider_error';
 
 /** One structured question for the AI; each feature builds its own. */
