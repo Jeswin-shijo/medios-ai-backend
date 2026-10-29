@@ -24,7 +24,15 @@ import { AgentCall, AgentCallSchema } from '../modules/calls/schemas/agent-call.
 import { QueueToken, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
+import { Department, DepartmentSchema } from '../modules/opd/schemas/department.schema';
+import { OpDoctor, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
+import { OpVisit, OpVisitSchema } from '../modules/reception/schemas/op-visit.schema';
+import { OpSequence, OpSequenceSchema } from '../modules/reception/schemas/op-sequence.schema';
+import { ReceptionSession, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
+import { OtpChallenge, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
+import { formatTokenLabel, newSecret } from '../modules/reception/format';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
+import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -68,6 +76,34 @@ async function replace(label: string, target: Model<any>, records: any[]) {
   console.log(`✅ ${records.length} ${label}`);
 }
 
+/**
+ * Drops a collection (a missing one is fine) and rebuilds the model's indexes, so a
+ * reseed never depends on the API's start-up index migration and old unique indexes
+ * (date_1_number_1, date_1, phone10_1) cannot survive.
+ */
+async function recreate(target: Model<any>) {
+  try {
+    await target.collection.drop();
+  } catch (err: any) {
+    if (err?.codeName !== 'NamespaceNotFound' && err?.code !== 26 && !/ns not found/i.test(String(err?.message))) throw err;
+  }
+  await target.syncIndexes();
+}
+
+/** Departments and OP doctors for the reception kiosk; returns the doctors with their ids. */
+async function seedOpd(doctorUserId: string) {
+  const departments = buildDepartments();
+  const doctors = buildDoctors(departments);
+  await recreate(model(Department, DepartmentSchema));
+  await recreate(model(OpDoctor, OpDoctorSchema));
+  await model(Department, DepartmentSchema).insertMany(departments);
+  const saved = await model(OpDoctor, OpDoctorSchema).insertMany(
+    doctors.map((d) => ({ ...d, ...(d.name === 'Dr. Shajin' && { userId: doctorUserId }) })),
+  );
+  console.log(`✅ ${departments.length} departments, ${saved.length} OP doctors (rooms ${doctors.map((d) => d.room).join(', ')})`);
+  return { doctors: saved.map((d: any) => d.toObject()), counters: buildCounters(doctors) };
+}
+
 const MINUTE = 60_000;
 const DEMO_CARDS = [
   { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
@@ -79,10 +115,20 @@ const DEMO_CARDS = [
  * The demo day's token queue, in step with its appointments: everyone who has
  * arrived holds a token, numbered in the order they came. Display links are kept.
  */
-async function seedQueue() {
+async function seedQueue(shajin: { _id: any; name: string; room: string; tokenPrefix: string; departmentName: string }) {
   const tokens = model(QueueToken, QueueTokenSchema);
-  await tokens.deleteMany({});
-  await model(QueueSequence, QueueSequenceSchema).deleteMany({});
+  // Dropped, not emptied, so the new indexes replace the old unique ones.
+  await recreate(tokens);
+  await recreate(model(QueueSequence, QueueSequenceSchema));
+  for (const [cls, schema] of [
+    [OpVisit, OpVisitSchema],
+    [OpSequence, OpSequenceSchema],
+    [ReceptionSession, ReceptionSessionSchema],
+    [OtpChallenge, OtpChallengeSchema],
+  ] as const) {
+    await recreate(model(cls, schema as Schema));
+  }
+  const doctorId = String(shajin._id);
 
   const arrived = await model(Appointment, AppointmentSchema)
     .find({ date: DEMO_DAY, status: { $in: ['Completed', 'In Consultation', 'Checked In', 'Waiting'] } })
@@ -101,7 +147,13 @@ async function seedQueue() {
     return {
       date: DEMO_DAY,
       number: i + 1,
-      label: String(i + 1),
+      label: formatTokenLabel(shajin.tokenPrefix, i + 1),
+      series: doctorId,
+      doctorId,
+      doctorName: shajin.name,
+      department: shajin.departmentName,
+      room: shajin.room,
+      trackCode: newSecret(16),
       status: a.status === 'Completed' ? 'completed' : a.status === 'In Consultation' ? 'called' : 'waiting',
       uhid: a.uhid,
       patientName: a.patientName,
@@ -109,7 +161,7 @@ async function seedQueue() {
       appointmentTime: a.time,
       source: 'front-desk',
       issuedBy: 'Front Desk',
-      ...(seen && { counter: 'Consultation Room', calledAt, firstCalledAt: calledAt, calledBy: 'Dr. Shajin' }),
+      ...(seen && { counter: shajin.room, calledAt, firstCalledAt: calledAt, calledBy: 'Dr. Shajin' }),
       ...(a.status === 'Completed' && { completedAt: new Date(calledAt.getTime() + 15 * MINUTE) }),
       ...(a.status !== 'Completed' && { activeKey: `${DEMO_DAY}:${a.uhid}` }),
       createdAt: issuedAt,
@@ -117,7 +169,7 @@ async function seedQueue() {
     };
   });
   await tokens.insertMany(records);
-  await model(QueueSequence, QueueSequenceSchema).create({ date: DEMO_DAY, last: records.length });
+  await model(QueueSequence, QueueSequenceSchema).create({ date: DEMO_DAY, series: doctorId, last: records.length });
   console.log(`✅ ${records.length} queue tokens`);
 
   // Demo cards for patients not checked in yet, so the kiosk can be tried without
@@ -178,10 +230,17 @@ async function seed() {
   await replace('vitals records', model(VitalsRecord, VitalsRecordSchema), fixture('vitals'));
   await replace('tasks and alerts', model(TaskAlertItem, TaskAlertItemSchema), fixture('tasks-alerts'));
   await replace('message threads', model(MessageThread, MessageThreadSchema), fixture('messages'));
-  await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
+  const doctorUser = await model(User, UserSchema).findOne({ email: DEMO_EMAIL }).lean<any>();
+  const opd = await seedOpd(String(doctorUser._id));
+  const shajin = opd.doctors.find((d: any) => d.name === 'Dr. Shajin');
+  const settings = fixture('settings');
+  settings.queue = { ...settings.queue, counters: opd.counters };
+  settings.reception = { ...settings.reception, defaultDoctorId: String(shajin._id) };
+  await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [settings]);
   // The call log refers to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
-  await seedQueue();
+  const departmentName = buildDepartments().find((d) => d.code === shajin.departmentCode)!.name;
+  await seedQueue({ _id: shajin._id, name: shajin.name, room: shajin.room, tokenPrefix: shajin.tokenPrefix, departmentName });
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,
