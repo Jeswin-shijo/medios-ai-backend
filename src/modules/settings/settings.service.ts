@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { isDeepStrictEqual } from 'node:util';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 import { DEFAULT_CALL_AGENT_SETTINGS } from '../calls/call-agent-settings';
@@ -105,6 +106,13 @@ export class SettingsService {
     const storedAutoAllocate = settings.get('ai')?.bedAutoAllocate ?? DEFAULT_SETTINGS.ai.bedAutoAllocate;
     if (by?.role !== UserRole.ADMIN && autoAllocate !== undefined && autoAllocate !== storedAutoAllocate) {
       throw new ForbiddenException('Only an admin can change automatic bed allocation.');
+    }
+    const coordinatorPatch = (updates as any)?.coordinator;
+    if (by?.role !== UserRole.ADMIN && coordinatorPatch && typeof coordinatorPatch === 'object') {
+      const stored = settings.get('coordinator')?.rules ?? {};
+      if (coordinatorPatch.rules !== undefined && !isDeepStrictEqual(coordinatorPatch.rules, stored)) {
+        throw new ForbiddenException('Only an admin can change coordination rules.');
+      }
     }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];

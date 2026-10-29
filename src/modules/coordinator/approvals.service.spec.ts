@@ -143,4 +143,10 @@ describe('ApprovalsService', () => {
     assert.equal(list.length, 1);
     assert.equal(typeof list[0].id, 'string');
   });
+
+  test('an approval whose type is no longer registered cannot be decided', async () => {
+    const doc = await Approval.create({ type: 'gone.type', agent: 'bed', summary: 's', roles: [UserRole.DOCTOR], primary: { kind: 'approve', label: 'OK' }, state: 'open' });
+    await assert.rejects(() => service.act(actor('Dr', UserRole.DOCTOR), String(doc._id), 'approved'), (e: unknown) => e instanceof ConflictException && e.message === 'This approval type is no longer available.');
+    assert.equal(((await Approval.findById(doc._id).lean()) as any).state, 'open');
+  });
 });

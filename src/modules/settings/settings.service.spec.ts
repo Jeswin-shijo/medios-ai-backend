@@ -58,4 +58,16 @@ describe('SettingsService', () => {
     assert.equal(ai.bedSuggestions, true);
     assert.equal(ai.bedAutoAllocate, false);
   });
+
+  test('only an admin can change coordination rules; other saves still work', async () => {
+    await assert.rejects(
+      () => settings.updateSettings({ coordinator: { rules: { x: true } } } as any, DOCTOR),
+      (err: unknown) => err instanceof ForbiddenException && err.message === 'Only an admin can change coordination rules.',
+    );
+    assert.deepEqual((await settings.getSettings() as any).coordinator.rules, {});
+    await settings.updateSettings({ profile: { name: 'Dr. Shajin' } }, DOCTOR);
+    await settings.updateSettings({ coordinator: { rules: {} } } as any, DOCTOR);
+    await settings.updateSettings({ coordinator: { rules: { x: true } } } as any, ADMIN);
+    assert.deepEqual((await settings.getSettings() as any).coordinator.rules, { x: true });
+  });
 });

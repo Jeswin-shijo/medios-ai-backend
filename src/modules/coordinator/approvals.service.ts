@@ -110,12 +110,13 @@ export class ApprovalsService {
     if (!actor || !a.roles.includes(actor.role)) throw new ForbiddenException('Your role cannot decide this approval.');
     if (a.primary.kind === 'open') throw new ConflictException('This approval is handled on its own screen.');
     if (a.state !== 'open') throw new ConflictException(ALREADY);
+    if (!def) throw new ConflictException('This approval type is no longer available.');
     const claimed = await this.model
       .findOneAndUpdate({ _id: a._id, state: 'open' }, { $set: { state: decision, decidedByName: actor.name, decidedAt: new Date() } }, { new: true })
       .exec();
     if (!claimed) throw new ConflictException(ALREADY);
     try {
-      await def?.onDecision?.(String(a._id), decision, actor);
+      await def.onDecision?.(String(a._id), decision, actor);
     } catch (err) {
       await this.model.updateOne({ _id: a._id }, { $set: { state: 'open' }, $unset: { decidedByName: '', decidedAt: '' } }).exec();
       throw err;
