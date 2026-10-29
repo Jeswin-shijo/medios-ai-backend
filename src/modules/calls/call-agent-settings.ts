@@ -25,6 +25,13 @@ export interface CallAgentSettings {
   slotMinutes: number;
   closedDays: string[];
   simulatedResponse: SimulatedResponse;
+  /** Inbound calls: callers may book, move, confirm and cancel; off means the agent takes a message instead. */
+  inboundChanges: boolean;
+  /**
+   * The API's public address (e.g. https://medios.example.com), used only to show
+   * the full webhook and tool URLs to paste into SnapServe.
+   */
+  publicApiUrl: string;
 }
 
 export const DEFAULT_CALL_AGENT_SETTINGS: CallAgentSettings = {
@@ -40,6 +47,8 @@ export const DEFAULT_CALL_AGENT_SETTINGS: CallAgentSettings = {
   slotMinutes: 30,
   closedDays: [],
   simulatedResponse: 'random',
+  inboundChanges: true,
+  publicApiUrl: '',
 };
 
 const HH_MM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
@@ -87,6 +96,8 @@ export function resolveCallAgentSettings(raw: unknown): CallAgentSettings {
     slotMinutes: int(s.slotMinutes, d.slotMinutes, 10, 120),
     closedDays: Array.isArray(s.closedDays) ? s.closedDays.filter((day) => WEEKDAYS.includes(String(day))).map(String) : d.closedDays,
     simulatedResponse: SIMULATED_RESPONSES.includes(s.simulatedResponse as SimulatedResponse) ? (s.simulatedResponse as SimulatedResponse) : d.simulatedResponse,
+    inboundChanges: s.inboundChanges !== false,
+    publicApiUrl: /^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(String(s.publicApiUrl ?? '').trim()) ? String(s.publicApiUrl).trim().replace(/\/+$/, '') : '',
   };
 }
 

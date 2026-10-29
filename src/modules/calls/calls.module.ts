@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AgentCall, AgentCallSchema } from './schemas/agent-call.schema';
+import { InboundSession, InboundSessionSchema } from './schemas/inbound-session.schema';
+import { CallerLookup, CallerLookupSchema } from './schemas/caller-lookup.schema';
+import { InboundService } from './inbound.service';
 import { CallsController } from './calls.controller';
 import { CallsService } from './calls.service';
 import { CallSchedulerService } from './call-scheduler.service';
@@ -17,7 +20,11 @@ import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([{ name: AgentCall.name, schema: AgentCallSchema }]),
+    MongooseModule.forFeature([
+      { name: AgentCall.name, schema: AgentCallSchema },
+      { name: InboundSession.name, schema: InboundSessionSchema },
+      { name: CallerLookup.name, schema: CallerLookupSchema },
+    ]),
     AppointmentsModule,
     PatientsModule,
     FollowUpsModule,
@@ -27,6 +34,7 @@ import { SettingsModule } from '../settings/settings.module';
   controllers: [CallsController],
   providers: [
     CallsService,
+    InboundService,
     CallSchedulerService,
     SlotsService,
     {

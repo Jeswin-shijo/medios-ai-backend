@@ -21,6 +21,8 @@ import { TaskAlertItem, TaskAlertItemSchema } from '../modules/tasks-alerts/sche
 import { MessageThread, MessageThreadSchema } from '../modules/messages/schemas/message.schema';
 import { HospitalSettings, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 import { AgentCall, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
+import { InboundSession, InboundSessionSchema } from '../modules/calls/schemas/inbound-session.schema';
+import { CallerLookup, CallerLookupSchema } from '../modules/calls/schemas/caller-lookup.schema';
 import { QueueToken, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
@@ -182,8 +184,10 @@ async function seed() {
   await replace('tasks and alerts', model(TaskAlertItem, TaskAlertItemSchema), fixture('tasks-alerts'));
   await replace('message threads', model(MessageThread, MessageThreadSchema), fixture('messages'));
   await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
-  // The call log refers to the appointments just replaced.
+  // The call log and inbound callers' sessions refer to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
+  await model(InboundSession, InboundSessionSchema).deleteMany({});
+  await model(CallerLookup, CallerLookupSchema).deleteMany({});
   await seedQueue();
   // Wards, beds and the two real admissions (the patients come first); also clears admissions and bed suggestions.
   // Their times fall on the clinic day: the seed does not read .env, so CLINIC_DATE may be unset.

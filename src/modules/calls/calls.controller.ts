@@ -1,18 +1,55 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, NotFoundException, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, HttpStatus, NotFoundException, Param, Post, Query, RawBodyRequest, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { createHash, timingSafeEqual } from 'crypto';
 import { CallsService } from './calls.service';
-import { AGENT_SCRIPTS } from './agent-scripts';
+import { InboundService, ToolContext } from './inbound.service';
 import { BookingCallDto, ConfirmationCallDto, ListCallsQueryDto, SlotsQueryDto } from './dto/call-requests.dto';
-import { parseSnapServeResult } from './providers/snapserve.provider';
+import { parseSnapServeResult, validSnapServeSignature } from './providers/snapserve.provider';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../users/schemas/user.schema';
 
 const MINUTE = 60_000;
+
+/**
+ * A mid-call tool request's arguments. SnapServe sends the arguments the language
+ * model chose; they may arrive at the top level or wrapped (args, arguments,
+ * parameters), possibly as a JSON string.
+ */
+function toolArgs(body: unknown): Record<string, unknown> {
+  const b = body && typeof body === 'object' ? (body as Record<string, any>) : {};
+  for (const name of ['args', 'arguments', 'parameters', 'input']) {
+    const v = b[name];
+    if (v && typeof v === 'object') return v;
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch {
+        // Not JSON: fall through to the top level.
+      }
+    }
+  }
+  return b;
+}
+
+/** The call a tool request belongs to and the caller's number, when SnapServe includes them. */
+function toolContext(body: unknown, headers: Record<string, unknown>): ToolContext {
+  const b = body && typeof body === 'object' ? (body as Record<string, any>) : {};
+  const call = b.call ?? b.context ?? b.metadata ?? {};
+  const pick = (...values: unknown[]) => {
+    const v = values.find((x) => typeof x === 'string' || typeof x === 'number');
+    return v === undefined ? undefined : String(v);
+  };
+  return {
+    providerCallId: pick(b.callId, b.call_id, call.id, call.callId, headers['x-snapserve-call-id']),
+    callerNumber: pick(b.fromNumber, b.from_number, b.callerNumber, b.caller_number, call.fromNumber, call.from, headers['x-snapserve-from']),
+  };
+}
 
 /** Constant-time comparison of a presented secret with the configured one. */
 const sameSecret = (presented: string, expected: string) => {
@@ -26,6 +63,7 @@ const sameSecret = (presented: string, expected: string) => {
 export class CallsController {
   constructor(
     private readonly calls: CallsService,
+    private readonly inbound: InboundService,
     private readonly config: ConfigService,
   ) {}
 
@@ -44,13 +82,33 @@ export class CallsController {
   @Get('config')
   @ApiOperation({ summary: 'Which voice provider is active and the effective agent settings' })
   async getConfig() {
-    return { ...this.calls.providerInfo, settings: await this.calls.agentSettings() };
+    return {
+      ...this.calls.providerInfo,
+      settings: await this.calls.agentSettings(),
+      // What is set up on the server (never the secrets themselves).
+      setup: {
+        webhookSecret: !!this.config.get<string>('callAgent.webhookSecret'),
+        signingSecret: !!this.config.get<string>('callAgent.snapserve.signingSecret'),
+        inboundTools: !!this.config.get<string>('callAgent.toolsSecret'),
+        inboundAgent: !!this.config.get<string>('callAgent.snapserve.inboundAgentId'),
+        testNumbers: (this.config.get<string[]>('callAgent.allowedNumbers') ?? []).length,
+      },
+    };
   }
 
   @Get('scripts')
-  @ApiOperation({ summary: "The voice agents' scripts, outcomes and data fields (to set up the provider's agents)" })
+  @ApiOperation({ summary: "The voice agents' scripts, outcomes, data fields and inbound tools (to set up the provider's agents)" })
   scripts() {
-    return Object.values(AGENT_SCRIPTS);
+    return this.calls.scripts();
+  }
+
+  @Post('provider-check')
+  @Roles(UserRole.ADMIN, UserRole.DOCTOR)
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: MINUTE } })
+  @ApiOperation({ summary: "Check the voice provider's API key, agents and balance without placing a call" })
+  checkProvider() {
+    return this.calls.checkProvider();
   }
 
   @Get('slots')
@@ -97,12 +155,45 @@ export class CallsController {
   @Post('webhook/:provider')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Voice provider post-call webhook (authenticated by ?token=)' })
-  async webhook(@Param('provider') provider: string, @Query('token') token: string, @Body() body: unknown) {
+  async webhook(
+    @Param('provider') provider: string,
+    @Query('token') token: string,
+    @Body() body: unknown,
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-snapserve-signature') signature?: string,
+    @Headers('x-snapserve-timestamp') timestamp?: string,
+  ) {
     if (provider !== 'snapserve' || this.calls.providerInfo.provider !== 'snapserve') throw new NotFoundException();
     if (!sameSecret(String(token ?? ''), this.config.get<string>('callAgent.webhookSecret') ?? '')) {
       throw new UnauthorizedException('Invalid webhook token');
     }
+    const signingSecret = this.config.get<string>('callAgent.snapserve.signingSecret');
+    if (signingSecret && !validSnapServeSignature(req.rawBody, signature, timestamp, signingSecret)) {
+      throw new UnauthorizedException('Invalid webhook signature');
+    }
     return this.calls.recordResult(parseSnapServeResult(body));
+  }
+
+  /**
+   * The inbound agent's mid-call tools (find_patient, find_free_slots, book_appointment…).
+   * Server-to-server: SnapServe sends CALL_TOOLS_SECRET as X-Webhook-Secret. The
+   * answer goes to the voice agent's language model as plain JSON (not wrapped).
+   */
+  @Public()
+  @Post('tools/:tool')
+  @Throttle({ default: { limit: 120, ttl: MINUTE } })
+  @ApiOperation({ summary: 'Inbound agent mid-call tool (authenticated by X-Webhook-Secret)' })
+  async tool(
+    @Param('tool') tool: string,
+    @Headers('x-webhook-secret') secret: string | undefined,
+    @Headers() headers: Record<string, unknown>,
+    @Body() body: unknown,
+    @Res() res: Response,
+  ) {
+    const expected = this.config.get<string>('callAgent.toolsSecret');
+    if (!expected) throw new NotFoundException('Inbound tools are not enabled (CALL_TOOLS_SECRET is not set).');
+    if (!sameSecret(String(secret ?? ''), expected)) throw new UnauthorizedException('Invalid tool secret');
+    res.status(HttpStatus.OK).json(await this.inbound.run(tool, toolArgs(body), toolContext(body, headers)));
   }
 
   @Get(':id')
