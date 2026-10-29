@@ -33,8 +33,35 @@ describe('ClocksService', () => {
       messageTypes: [
         { type: 'test.wait', agent: 'er', description: 'waiting', payload: {} },
         { type: 'test.done', agent: 'er', description: 'done', payload: {} },
+        { type: 'test.due', agent: 'er', description: 'due from payload', payload: {} },
+        { type: 'test.move', agent: 'er', description: 'moves the due time', payload: {} },
+        { type: 'test.scoped', agent: 'er', description: 'matched by payload', payload: {} },
+        { type: 'test.scoped.done', agent: 'er', description: 'matched stop', payload: {} },
       ],
-      clocks: [{ key: 'test-wait', agent: 'er', label: 'Test wait', startOn: 'test.wait', stopOn: ['test.done'], minutes: 10, ladder: 'default' }],
+      clocks: [
+        { key: 'test-wait', agent: 'er', label: 'Test wait', startOn: 'test.wait', stopOn: ['test.done'], minutes: 10, ladder: 'default' },
+        {
+          key: 'test-due',
+          agent: 'er',
+          label: 'Test due',
+          startOn: 'test.due',
+          stopOn: [],
+          minutes: 10,
+          ladder: 'default',
+          dueFrom: (p) => (typeof p.at === 'string' ? new Date(p.at) : null),
+          updateOn: ['test.move'],
+        },
+        {
+          key: 'test-scoped',
+          agent: 'er',
+          label: 'Test scoped',
+          startOn: 'test.scoped',
+          stopOn: ['test.scoped.done'],
+          minutes: 10,
+          ladder: 'default',
+          match: (_t, p) => p.step === 'ecg',
+        },
+      ],
       status,
     });
     messages = new MessagesService(AgentMessage, registry, new CoordinatorEvents());
@@ -65,6 +92,63 @@ describe('ClocksService', () => {
 
     await send('test.wait'); // no case: its own clock
     assert.equal(await service.countRunning(), 2);
+  });
+
+  const sendWith = (type: string, payload: Record<string, unknown>, caseId: string | null = null) =>
+    messages.send({ case: caseId, from: 'er', to: ['coordinator'], type, priority: 'medium', summary: type, payload });
+
+  test("a clock's due time can come from the start message", async () => {
+    const caseId = String(new Types.ObjectId());
+    const at = new Date(Date.now() + 25 * MIN);
+    await sendWith('test.due', { at: at.toISOString() }, caseId);
+    const clock: any = await Clock.findOne({ def: 'test-due' }).lean();
+    assert.equal(new Date(clock.dueAt).getTime(), at.getTime());
+    // No usable date: falls back to the minutes.
+    const other = String(new Types.ObjectId());
+    await sendWith('test.due', {}, other);
+    const fallback: any = await Clock.findOne({ def: 'test-due', case: new Types.ObjectId(other) }).lean();
+    assert.equal(new Date(fallback.dueAt).getTime() - new Date(fallback.startedAt).getTime(), 10 * MIN);
+    const bad = String(new Types.ObjectId());
+    await sendWith('test.due', { at: 'not a date' }, bad);
+    const invalid: any = await Clock.findOne({ def: 'test-due', case: new Types.ObjectId(bad) }).lean();
+    assert.equal(new Date(invalid.dueAt).getTime() - new Date(invalid.startedAt).getTime(), 10 * MIN);
+  });
+
+  test('an update message moves a running clock and a past due time expires on the next check', async () => {
+    const caseId = String(new Types.ObjectId());
+    const other = String(new Types.ObjectId());
+    const first = new Date(Date.now() + 25 * MIN);
+    await sendWith('test.due', { at: first.toISOString() }, caseId);
+    await sendWith('test.due', { at: first.toISOString() }, other);
+    const later = new Date(Date.now() + 40 * MIN);
+    await sendWith('test.move', { at: later.toISOString() }, caseId);
+    const moved: any = await Clock.findOne({ def: 'test-due', case: new Types.ObjectId(caseId) }).lean();
+    const untouched: any = await Clock.findOne({ def: 'test-due', case: new Types.ObjectId(other) }).lean();
+    assert.equal(new Date(moved.dueAt).getTime(), later.getTime());
+    assert.equal(new Date(untouched.dueAt).getTime(), first.getTime());
+
+    // A due time already past: the next check expires it.
+    await sendWith('test.move', { at: new Date(Date.now() - MIN).toISOString() }, caseId);
+    assert.equal(await service.checkDue(new Date()), 1);
+    const expired: any = await Clock.findOne({ _id: moved._id }).lean();
+    assert.equal(expired.state, 'expired');
+    // An expired clock is never moved back.
+    await sendWith('test.move', { at: new Date(Date.now() + 60 * MIN).toISOString() }, caseId);
+    const still: any = await Clock.findOne({ _id: moved._id }).lean();
+    assert.equal(still.state, 'expired');
+    assert.equal(new Date(still.dueAt).getTime(), new Date(expired.dueAt).getTime());
+  });
+
+  test('match filters start and stop by payload', async () => {
+    const caseId = String(new Types.ObjectId());
+    await sendWith('test.scoped', { step: 'ct' }, caseId);
+    assert.equal(await Clock.countDocuments({ def: 'test-scoped' }), 0);
+    await sendWith('test.scoped', { step: 'ecg' }, caseId);
+    assert.equal(await Clock.countDocuments({ def: 'test-scoped', state: 'running' }), 1);
+    await sendWith('test.scoped.done', { step: 'ct' }, caseId);
+    assert.equal(await Clock.countDocuments({ def: 'test-scoped', state: 'running' }), 1);
+    await sendWith('test.scoped.done', { step: 'ecg' }, caseId);
+    assert.equal(await Clock.countDocuments({ def: 'test-scoped', state: 'met' }), 1);
   });
 
   test('a stop message meets the clock and records the minutes', async () => {

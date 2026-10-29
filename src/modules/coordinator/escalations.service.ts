@@ -32,6 +32,15 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
     label: 'Bed wait',
     steps: [{ title: 'duty-administrator', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
+  {
+    key: 'er',
+    label: 'ER',
+    steps: [
+      { title: 'er-nurse-in-charge', waitMinutes: 10 },
+      { title: 'er-consultant', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
 ];
 
 export interface DutyTitleView {

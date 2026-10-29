@@ -15,7 +15,7 @@ describe('CasesService', () => {
   let registry: AgentRegistry;
   let messages: MessagesService;
   let service: CasesService;
-  let checks: { a: boolean; b: boolean };
+  let checks: { a: boolean | 'n/a'; b: boolean | 'n/a' };
   const patientId = String(new Types.ObjectId());
 
   before(async () => {
@@ -106,6 +106,27 @@ describe('CasesService', () => {
     // A new open case may start for the same patient once the old one is closed.
     const next = await service.openOrJoin(input());
     assert.equal(next.opened, true);
+  });
+
+  test('a case closes when no check fails and at least one passes; n/a checks are ignored', async () => {
+    const { case: c } = await service.openOrJoin(input());
+    const id = String(c._id);
+    checks.a = 'n/a';
+    checks.b = true;
+    assert.equal(await service.evaluateClose(id), true);
+    const closed = (await service.get(id))!;
+    assert.equal(closed.state, 'closed');
+    assert.equal(closed.closedReason, 'Bed cleaned');
+  });
+
+  test('a case whose checks are all n/a stays open', async () => {
+    const { case: c } = await service.openOrJoin(input());
+    checks.a = 'n/a';
+    checks.b = 'n/a';
+    assert.equal(await service.evaluateClose(String(c._id)), false);
+    assert.equal((await service.get(String(c._id)))!.state, 'open');
+    checks.b = false; // a fail beats an n/a
+    assert.equal(await service.evaluateClose(String(c._id)), false);
   });
 
   test('evaluateOpenCases counts closed cases, and a listener closes on a stored message', async () => {

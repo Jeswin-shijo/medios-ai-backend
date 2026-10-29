@@ -155,7 +155,7 @@ describe('seedCoordinator', () => {
     const held = titles.filter((t) => t.holders.length).map((t) => t.key).sort();
     assert.deepEqual(held, ['duty-administrator', 'medical-superintendent']);
     assert.ok(titles.filter((t) => t.holders.length).every((t) => t.holders.map(String).join() === adminId));
-    assert.deepEqual((await m.Ladder.find().lean().exec()).map((l) => l.key).sort(), ['bed-wait', 'default']);
+    assert.deepEqual((await m.Ladder.find().lean().exec()).map((l) => l.key).sort(), ['bed-wait', 'default', 'er']);
   });
 
   test('history has 168 hourly points', async () => {

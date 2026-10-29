@@ -357,6 +357,14 @@ describe('BedCoordinatorBridge', () => {
     await noNames();
   });
 
+  test('the bed check is n/a for a case with no bed refs', async () => {
+    const p = await patient();
+    const { case: c } = await cases.openOrJoin({
+      patientId: p.id, patientUhid: p.uhid, patientName: 'x', kind: 'er', priority: 'medium', openedBy: 'er',
+    });
+    assert.equal(await (bridge as any).closeCheck(String(c._id)), 'n/a');
+  });
+
   test('a close check between assignment and the bridge catching up keeps the case open', async () => {
     const p = await patient();
     const id = await ask({ patientId: p.id });

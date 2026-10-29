@@ -104,6 +104,10 @@ export class AgentRegistry {
     return this.allClocks().filter((c) => c.stopOn.includes(type));
   }
 
+  clocksUpdatingOn(type: string): ClockDef[] {
+    return this.allClocks().filter((c) => c.updateOn?.includes(type));
+  }
+
   clock(key: string): ClockDef | undefined {
     return this.allClocks().find((c) => c.key === key);
   }

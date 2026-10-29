@@ -6,7 +6,7 @@ import { clinicNow } from '../../common/utils/clinic-time';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { ApprovalsService } from '../coordinator/approvals.service';
 import { CasesService } from '../coordinator/cases.service';
-import { AgentDefinition, MessageTypeDef, Priority } from '../coordinator/coordinator-types';
+import { AgentDefinition, CloseCheckResult, MessageTypeDef, Priority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { BedChange, BedEvents, BedRequestEvent } from './bed-events';
@@ -117,20 +117,20 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
   /**
    * With an admission: it is discharged. Without: every bed request on the case was cancelled and
    * the patient has no active admission (an assigned request, or a staff placement that beat it,
-   * means the admission ref is on its way). No refs at all: not done.
+   * means the admission ref is on its way). No refs at all: 'n/a', the Bed Agent has no say.
    */
-  private async closeCheck(caseId: string): Promise<boolean> {
+  private async closeCheck(caseId: string): Promise<CloseCheckResult> {
     const c = await this.cases.get(caseId);
-    if (!c) return false;
+    if (!c) return 'fail';
     const { admissionId, bedRequestIds } = c.refs;
     if (admissionId) {
       const admission = await this.admissions.findById(admissionId).select('status').lean<{ status: string }>().exec();
-      return admission?.status === 'discharged';
+      return admission?.status === 'discharged' ? 'pass' : 'fail';
     }
-    if (!bedRequestIds?.length) return false;
+    if (!bedRequestIds?.length) return 'n/a';
     const notCancelled = await this.requestModel.countDocuments({ _id: { $in: bedRequestIds }, state: { $ne: 'cancelled' } }).exec();
-    if (notCancelled > 0) return false;
-    return !(await this.admissions.exists({ patient: c.patient, status: 'active' }).exec());
+    if (notCancelled > 0) return 'fail';
+    return (await this.admissions.exists({ patient: c.patient, status: 'active' }).exec()) ? 'fail' : 'pass';
   }
 
   private async status() {

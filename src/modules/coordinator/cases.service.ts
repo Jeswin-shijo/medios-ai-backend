@@ -129,9 +129,17 @@ export class CasesService {
     if (!current || current.state === 'closed') return false;
     const checks = this.registry.closeChecks();
     if (!checks.length) return false;
-    for (const c of checks) if (!(await c.check(caseId))) return false;
+    const passed: string[] = [];
+    for (const c of checks) {
+      const raw = await c.check(caseId);
+      const result = raw === true ? 'pass' : raw === false ? 'fail' : raw;
+      if (result === 'fail') return false;
+      if (result === 'pass') passed.push(c.label);
+    }
+    // Every check abstained: nobody has vouched for the case yet.
+    if (!passed.length) return false;
 
-    const closedReason = checks.map((c) => c.label).join('; ');
+    const closedReason = passed.join('; ');
     const closed = await this.model
       .findOneAndUpdate({ _id: caseId, ...isOpen }, { $set: { state: 'closed', closedAt: clinicNow(), closedReason } }, { new: true })
       .exec();

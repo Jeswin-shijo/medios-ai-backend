@@ -63,6 +63,12 @@ export interface ClockDef {
   stopOn: string[];
   minutes: number;
   ladder: string;
+  /** A clock starts, stops or moves only for messages this accepts; absent means all. */
+  match?: (type: string, payload: Record<string, unknown>) => boolean;
+  /** The start message sets the due time; null (or an invalid date) falls back to `minutes`. */
+  dueFrom?: (payload: Record<string, unknown>) => Date | null;
+  /** Messages that move a running clock's due time to `dueFrom(payload)`. */
+  updateOn?: string[];
 }
 
 export interface ApprovalTypeDef {
@@ -83,10 +89,14 @@ export interface RuleDef {
   settingPath?: string;
 }
 
+/** 'n/a': this agent has nothing to say about the case, so it neither blocks nor closes it. */
+export type CloseCheckResult = 'pass' | 'fail' | 'n/a';
+
 export interface CloseCheck {
   agent: AgentKey;
   label: string;
-  check: (caseId: string) => Promise<boolean>;
+  /** true = pass, false = fail (for existing callers). */
+  check: (caseId: string) => Promise<CloseCheckResult | boolean>;
 }
 
 export interface AgentStatusReport {

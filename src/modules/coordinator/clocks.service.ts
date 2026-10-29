@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import type { ClockDef } from './coordinator-types';
 import { AgentRegistry } from './agent-registry';
 import { EscalationsService } from './escalations.service';
 import { MessagesService } from './messages.service';
@@ -55,31 +56,65 @@ export class ClocksService {
   }
 
   private async onMessage(m: MessageDocument): Promise<void> {
-    for (const def of this.registry.clocksStartingOn(m.type)) {
+    const payload = ((m.payload as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+    const accepts = (def: ClockDef) => {
       try {
-        await this.start(def.key, def.minutes, m);
+        return !def.match || def.match(m.type, payload);
+      } catch (e) {
+        this.logger.error(`Matching clock ${def.key} failed: ${(e as Error).message}`);
+        return false;
+      }
+    };
+    for (const def of this.registry.clocksStartingOn(m.type).filter(accepts)) {
+      try {
+        await this.start(def, m, payload);
       } catch (e) {
         this.logger.error(`Starting clock ${def.key} failed: ${(e as Error).message}`);
       }
     }
-    for (const def of this.registry.clocksStoppingOn(m.type)) {
+    for (const def of this.registry.clocksStoppingOn(m.type).filter(accepts)) {
       try {
         await this.stop(def.key, m);
       } catch (e) {
         this.logger.error(`Stopping clock ${def.key} failed: ${(e as Error).message}`);
       }
     }
+    for (const def of this.registry.clocksUpdatingOn(m.type).filter(accepts)) {
+      try {
+        const dueAt = this.dueFrom(def, payload);
+        if (!dueAt) continue;
+        // Only the running clock for this case moves; met and expired ones stay as they are.
+        await this.model.updateOne({ def: def.key, case: m.case ?? null, state: 'running' }, { $set: { dueAt } }).exec();
+      } catch (e) {
+        this.logger.error(`Moving clock ${def.key} failed: ${(e as Error).message}`);
+      }
+    }
   }
 
-  private async start(defKey: string, minutes: number, m: MessageDocument): Promise<void> {
+  /** The due time the definition reads from a payload, or null when it has none or it is unusable. */
+  private dueFrom(def: ClockDef, payload: Record<string, unknown>): Date | null {
+    if (!def.dueFrom) return null;
+    try {
+      const d = def.dueFrom(payload);
+      return d instanceof Date && !isNaN(d.getTime()) ? d : null;
+    } catch (e) {
+      if (!this.unknownLogged.has(`dueFrom:${def.key}`)) {
+        this.unknownLogged.add(`dueFrom:${def.key}`);
+        this.logger.error(`dueFrom of clock ${def.key} failed, using its minutes: ${(e as Error).message}`);
+      }
+      return null;
+    }
+  }
+
+  private async start(def: ClockDef, m: MessageDocument, payload: Record<string, unknown>): Promise<void> {
     const startedAt = m.createdAt ? new Date(m.createdAt) : new Date();
     try {
       await this.model.create({
-        def: defKey,
+        def: def.key,
         case: m.case ?? null,
         startedBy: m._id,
         startedAt,
-        dueAt: new Date(startedAt.getTime() + minutes * MINUTE_MS),
+        dueAt: this.dueFrom(def, payload) ?? new Date(startedAt.getTime() + def.minutes * MINUTE_MS),
         state: 'running',
       });
     } catch (e) {
