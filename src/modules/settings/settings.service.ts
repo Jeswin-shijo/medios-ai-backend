@@ -115,6 +115,13 @@ export class SettingsService {
         throw new ForbiddenException('Only an admin can change coordination rules.');
       }
     }
+    const erPatch = (updates as any)?.er;
+    if (by?.role !== UserRole.ADMIN && erPatch && typeof erPatch === 'object') {
+      const stored = settings.get('er')?.targets ?? {};
+      if (erPatch.targets !== undefined && !isDeepStrictEqual(erPatch.targets, stored)) {
+        throw new ForbiddenException('Only an admin can change pathway targets.');
+      }
+    }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];
       if (patch && typeof patch === 'object') {

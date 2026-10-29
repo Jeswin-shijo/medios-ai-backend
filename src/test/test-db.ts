@@ -22,6 +22,7 @@ import { ChatLog, ChatLogDocument, ChatLogSchema } from '../modules/coordinator/
 import { ErVisit, ErVisitDocument, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { ErBay, ErBayDocument, ErBaySchema } from '../modules/er/schemas/er-bay.schema';
 import { ErExpected, ErExpectedDocument, ErExpectedSchema } from '../modules/er/schemas/er-expected.schema';
+import { ErSnapshot, ErSnapshotDocument, ErSnapshotSchema } from '../modules/er/schemas/er-snapshot.schema';
 import { VitalsRecord, VitalsRecordDocument, VitalsRecordSchema } from '../modules/vitals/schemas/vitals.schema';
 import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
@@ -69,6 +70,7 @@ export function models() {
     CoordinatorSnapshot: model(CoordinatorSnapshot, CoordinatorSnapshotSchema) as Model<CoordinatorSnapshotDocument>,
     ChatLog: model(ChatLog, ChatLogSchema) as Model<ChatLogDocument>,
     ErVisit: model(ErVisit, ErVisitSchema) as Model<ErVisitDocument>,
+    ErSnapshot: model(ErSnapshot, ErSnapshotSchema) as Model<ErSnapshotDocument>,
     VitalsRecord: model(VitalsRecord, VitalsRecordSchema) as Model<VitalsRecordDocument>,
     ErBay: model(ErBay, ErBaySchema) as Model<ErBayDocument>,
     ErExpected: model(ErExpected, ErExpectedSchema) as Model<ErExpectedDocument>,

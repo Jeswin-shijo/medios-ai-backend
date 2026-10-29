@@ -6,7 +6,6 @@ import type { Actor } from '../beds/actor';
 import { CasesService } from '../coordinator/cases.service';
 import { MessagesService } from '../coordinator/messages.service';
 import { RulesService } from '../coordinator/rules.service';
-import { SettingsService } from '../settings/settings.service';
 import { VitalsService } from '../vitals/vitals.service';
 import {
   BED_PRIORITY,
@@ -19,10 +18,10 @@ import {
   TriageColour,
   TriageVitals,
   doctorDueMinutes,
-  pathwayTargets,
   pathwaysFor,
   suggestTriage,
 } from './er-rules';
+import { ErTargetsService } from './er-targets.service';
 import { ErVisitView, toVisitView } from './er-visits.service';
 import { ErVisit, ErVisitDocument } from './schemas/er-visit.schema';
 
@@ -66,7 +65,7 @@ export class ErTriageService {
     private readonly rules: RulesService,
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
-    private readonly settings: SettingsService,
+    private readonly erTargets: ErTargetsService,
   ) {}
 
   /** The suggestion only: nothing is saved. */
@@ -76,7 +75,7 @@ export class ErTriageService {
   }
 
   private async targets(): Promise<Record<string, number>> {
-    return pathwayTargets((await this.settings.getSettings()).er?.targets);
+    return this.erTargets.getTargets();
   }
 
   private async load(id: string): Promise<ErVisitDocument> {

@@ -19,10 +19,12 @@ import { UserRole } from '../users/schemas/user.schema';
 import { VitalsService } from '../vitals/vitals.service';
 import { ErBaysService } from './er-bays.service';
 import { ErCoordinatorRegistration } from './er-coordinator.registration';
+import { ErTargetsService } from './er-targets.service';
 import { ErTriageService, TriageInput } from './er-triage.service';
 import { ErVisitsService } from './er-visits.service';
 
 const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
+const ADMIN: Actor = { id: 'user-admin', name: 'Admin', role: UserRole.ADMIN };
 const MIN = 60_000;
 const CALM = { bpSystolic: 130, bpDiastolic: 80, heartRate: 80, spo2: 98, respiratoryRate: 16, temperature: 37 };
 
@@ -56,7 +58,7 @@ describe('ErTriageService', () => {
     visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
     new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
     const settings = new SettingsService(m.HospitalSettings);
-    service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, settings);
+    service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings));
   });
 
   const arrive = async (complaint: any = 'chest-pain') => {
@@ -163,6 +165,15 @@ describe('ErTriageService', () => {
     const esc: any[] = await m.Escalation.find().lean();
     assert.equal(esc.length, 1);
     assert.equal(esc[0].state, 'open');
+  });
+
+  test('the doctor clock uses a saved stroke.doctor override', async () => {
+    const settings = new SettingsService(m.HospitalSettings);
+    await new ErTargetsService(settings).saveTargets(ADMIN, { 'stroke.doctor': 5 });
+    const v = await arrive('stroke-signs');
+    await service.triage(NURSE, v.id, input({ complaint: 'stroke-signs', colour: 'orange' }));
+    const clock = await clockOf('er-doctor', v.caseId);
+    assert.equal(new Date(clock.dueAt).getTime(), (await created(v.id)) + 5 * MIN);
   });
 
   test('with the auto-start rule off, no pathway starts by itself', async () => {
