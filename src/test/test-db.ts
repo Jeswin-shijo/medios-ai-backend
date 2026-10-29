@@ -15,6 +15,7 @@ import { HospitalSettings, HospitalSettingsDocument, HospitalSettingsSchema } fr
 import { DutyTitle, DutyTitleDocument, DutyTitleSchema } from '../modules/coordinator/schemas/duty-title.schema';
 import { Ladder, LadderDocument, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
 import { Escalation, EscalationDocument, EscalationSchema } from '../modules/coordinator/schemas/escalation.schema';
+import { Clock, ClockDocument, ClockSchema } from '../modules/coordinator/schemas/clock.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -55,6 +56,7 @@ export function models() {
     DutyTitle: model(DutyTitle, DutyTitleSchema) as Model<DutyTitleDocument>,
     Ladder: model(Ladder, LadderSchema) as Model<LadderDocument>,
     Escalation: model(Escalation, EscalationSchema) as Model<EscalationDocument>,
+    Clock: model(Clock, ClockSchema) as Model<ClockDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };
