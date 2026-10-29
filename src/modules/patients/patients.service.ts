@@ -5,6 +5,12 @@ import { Patient, PatientDocument } from './schemas/patient.schema';
 import { CreatePatientDto } from './dto/create-patient.dto';
 import { escapeRegex } from '../../common/utils/escape-regex';
 
+/** The name the ER agent gives an unknown patient: "Unknown male, ER-0012". */
+const PLACEHOLDER_NAME = /^Unknown (male|female|person), ER-\d+$/;
+
+/** A phone and a name that is no longer the ER placeholder. */
+const hasRealDetails = (p: { name?: string; phone?: string }) => !!p.phone?.trim() && !PLACEHOLDER_NAME.test((p.name ?? '').trim());
+
 @Injectable()
 export class PatientsService {
   constructor(
@@ -96,6 +102,9 @@ export class PatientsService {
   async update(idOrUhid: string, updates: Partial<Patient>): Promise<PatientDocument> {
     const patient = await this.findOne(idOrUhid);
     Object.assign(patient, updates);
+    // An unknown ER patient stops being a placeholder once it has a real name and a phone,
+    // unless the update says otherwise.
+    if (patient.detailsPending && updates.detailsPending === undefined && hasRealDetails(patient)) patient.detailsPending = false;
     return patient.save();
   }
 

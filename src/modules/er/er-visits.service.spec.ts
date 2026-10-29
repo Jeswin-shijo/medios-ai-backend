@@ -248,6 +248,25 @@ describe('ErVisitsService', () => {
     assert.equal(board[unknown.patientUhid].detailsPending, false);
   });
 
+  test('after staff fill in a placeholder\'s details, the board shows the new name; messages never carry it', async () => {
+    const unknown = await service.arrive(NURSE, { emergency: { gender: 'Male', approxAge: 45, description: 'Blue shirt' }, mode: 'ambulance', complaint: 'unresponsive' });
+    assert.equal(unknown.patientName, 'Unknown male, ER-0001');
+    await new PatientsService(m.Patient).update(unknown.patientId, { name: 'Murugan K', phone: '9100000123' });
+
+    const [onBoard] = (await service.board()).visits;
+    assert.equal(onBoard.patientName, 'Murugan K');
+    assert.equal(onBoard.patientUhid, unknown.patientUhid);
+    assert.equal(onBoard.detailsPending, false);
+    assert.equal((await service.get(unknown.id)).patientName, 'Murugan K');
+    // A visit whose patient record is gone falls back to the names kept on the visit.
+    await m.Patient.deleteOne({ _id: unknown.patientId });
+    assert.equal((await service.get(unknown.id)).patientName, 'Unknown male, ER-0001');
+
+    const left = await service.dispose({ ...NURSE, role: UserRole.DOCTOR }, unknown.id, 'home');
+    assert.equal(left.status, 'left');
+    for (const msg of await m.AgentMessage.find({ from: 'er' }).lean()) assert.ok(!JSON.stringify(msg).includes('Murugan'));
+  });
+
   test('board() makes one patient query and one clock query however many visits there are', async () => {
     for (let i = 0; i < 4; i++) await service.arrive(NURSE, { uhid: (await patient(`P${i}`)).uhid, mode: 'walk-in', complaint: 'fever' });
     const count = async () => {

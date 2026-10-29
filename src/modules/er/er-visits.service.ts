@@ -99,6 +99,9 @@ export interface ErClockView {
 }
 
 export interface ErVisitExtras {
+  /** From the live Patient; when absent, the copy kept on the visit is shown. */
+  patientName?: string;
+  patientUhid?: string;
   patientAge: number | null;
   patientGender: string | null;
   detailsPending: boolean;
@@ -225,7 +228,7 @@ export class ErVisitsService {
     if (!visits.length) return [];
     const open = visits.filter((v) => v.status !== 'left');
     const [patients, clocks] = await Promise.all([
-      this.patientModel.find({ _id: { $in: visits.map((v) => v.patient) } }).select('age gender detailsPending').lean().exec(),
+      this.patientModel.find({ _id: { $in: visits.map((v) => v.patient) } }).select('name uhid age gender detailsPending').lean().exec(),
       open.length
         ? this.clockModel
             .find({ case: { $in: open.map((v) => v.case) }, def: /^er-/, $or: [{ state: 'running' }, { state: 'expired', stoppedAt: { $exists: false } }] })
@@ -242,6 +245,9 @@ export class ErVisitsService {
       const p: any = byPatient.get(String(v.patient));
       const mine = v.status === 'left' ? [] : (byCase.get(String(v.case)) ?? []);
       return toVisitView(v, {
+        // The live record, so details filled in later show at once; the visit's copy if the patient is gone.
+        ...(p?.name ? { patientName: p.name } : {}),
+        ...(p?.uhid ? { patientUhid: p.uhid } : {}),
         patientAge: typeof p?.age === 'number' ? p.age : null,
         patientGender: p?.gender ?? null,
         detailsPending: p?.detailsPending === true,
