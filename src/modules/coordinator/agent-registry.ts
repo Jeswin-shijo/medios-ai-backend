@@ -28,6 +28,24 @@ const COORDINATOR_DEFINITION: AgentDefinition = {
     coordinatorType('approval.requested', 'An agent asked a person to approve', { approvalType: 'string' }),
     coordinatorType('approval.decided', 'A person approved or rejected', { approvalType: 'string', decision: 'string' }),
   ],
+  rules: [
+    {
+      key: 'emergency-first',
+      agent: 'coordinator',
+      label: 'Emergency-first routing',
+      description: 'Critical and ER work is handled and listed first.',
+      default: true,
+      locked: true,
+    },
+    {
+      key: 'escalate-overdue',
+      agent: 'coordinator',
+      label: 'Escalate overdue work',
+      description: 'Overdue work climbs its escalation ladder until someone acknowledges it.',
+      default: true,
+      locked: true,
+    },
+  ],
   status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
 };
 

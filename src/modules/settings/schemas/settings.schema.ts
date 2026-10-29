@@ -32,6 +32,10 @@ export class HospitalSettings {
   /** Token queue: rooms, token prefix, what the waiting-room display shows (see queue/queue-settings.ts). */
   @Prop({ type: Object, default: {} })
   queue: any;
+
+  /** Coordinator: on/off switches for coordination rules, by rule key (see coordinator/rules.service.ts). */
+  @Prop({ type: Object, default: {} })
+  coordinator: { rules?: Record<string, boolean> };
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);
