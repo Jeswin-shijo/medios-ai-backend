@@ -64,7 +64,7 @@ export class LabResultsService {
     const last = line.pendingAmendReason ? line.history[line.history.length - 1] : undefined;
     // A rejected amendment goes back to the released result; a first entry goes back to the bench.
     const update = last
-      ? { $set: { status: 'released', results: last.results, enteredBy: last.enteredBy, sentBack }, $unset: { pendingAmendReason: '' } }
+      ? { $set: { status: 'released', results: last.results, enteredBy: last.enteredBy, enteredAt: last.enteredAt }, $unset: { pendingAmendReason: '', sentBack: '' } }
       : { $set: { status: 'received', results: [], sentBack }, $unset: { enteredBy: '', enteredAt: '' } };
     const done = await this.lines.findOneAndUpdate({ _id: line._id, status: 'awaiting-validation' }, update).exec();
     if (!done) throw cannot();
@@ -85,13 +85,16 @@ export class LabResultsService {
     const releasedAt = clinicNow();
     const validatedBy = { id: actor.id, name: actor.name };
     const criticals = line.results.filter((r) => r.critical);
-    const entry: LabLine['history'][number] = { version, results: line.results, enteredBy: line.enteredBy, validatedBy, releasedAt };
+    const entry: LabLine['history'][number] = { version, results: line.results, enteredBy: line.enteredBy, enteredAt: line.enteredAt, validatedBy, releasedAt };
+    // An amendment to normal cannot drop a critical nobody has acknowledged yet.
+    const keepOpen = !criticals.length && !!line.critical?.active && !line.critical.ackAt;
+    const critical = keepOpen ? { active: true } : { active: criticals.length > 0 };
     if (line.pendingAmendReason) entry.amendReason = line.pendingAmendReason;
     const released = await this.lines
       .findOneAndUpdate(
         { _id: line._id, status: 'awaiting-validation', version: line.version ?? 0, 'enteredBy.id': line.enteredBy?.id },
         {
-          $set: { status: 'released', version, validatedBy, releasedAt, critical: { active: criticals.length > 0 } },
+          $set: { status: 'released', version, validatedBy, releasedAt, critical },
           $push: { history: entry },
           $unset: { pendingAmendReason: '', sentBack: '' },
         },
@@ -116,6 +119,10 @@ export class LabResultsService {
       dedupeKey: `lab.resulted:${line._id}:${version}`,
     });
 
+    if (keepOpen) {
+      const was = (line.history[line.history.length - 1]?.results ?? []).filter((r) => r.critical);
+      await this.amendAlert(request, line._id as Types.ObjectId, def, was, line.results);
+    }
     if (criticals.length) {
       for (const c of criticals) {
         await this.messages.send({
@@ -245,6 +252,18 @@ export class LabResultsService {
       report = await this.reports.create(fields);
       await this.lines.updateOne({ _id: line._id }, { $set: { reportId: report._id } }).exec();
     }
+  }
+
+  /** The earlier critical was amended to normal but is still unacknowledged: say so on its alert. */
+  private async amendAlert(request: LabRequestDocument, lineId: Types.ObjectId, def: LabTestDef, was: LabResultRow[], now: LabResultRow[]): Promise<void> {
+    const old = was.map((r) => `${r.param} ${r.value} ${r.unit}`.trim()).join(', ');
+    const nowText = now.map((r) => `${r.param} ${r.value}`).join(', ');
+    await this.alerts
+      .updateOne(
+        { link: `lab-line:${lineId}` },
+        { $set: { title: `Critical (amended): ${def.label} — acknowledge the correction`, subtitle: `Was ${old}; now ${nowText} · For ${request.orderedBy.name}`, status: 'Pending' } },
+      )
+      .exec();
   }
 
   /** One alert per line: an amendment to a new critical value reopens it. */

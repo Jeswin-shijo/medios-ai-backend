@@ -32,6 +32,7 @@ export class LabLine {
     version: number;
     results: LabResultRow[];
     enteredBy?: { id: string; name: string };
+    enteredAt?: Date;
     validatedBy?: { id: string; name: string };
     releasedAt?: Date;
     amendReason?: string;

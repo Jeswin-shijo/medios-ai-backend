@@ -278,6 +278,46 @@ describe('LabResultsService', () => {
     assert.deepEqual((await line(id)).critical, { active: true });
     assert.equal((await alerts())[0].status, 'Pending');
     assert.equal((await alerts()).length, 1);
+    // the first clock stayed stopped; a fresh one runs for the same line
+    const all = await clockOf('lab-critical', caseId);
+    assert.equal(all.length, 2);
+    assert.equal(all.filter((c) => c.state === 'running').length, 1);
+    assert.equal(all.filter((c) => c.state !== 'running').length, 1);
+    assert.ok(all.every((c) => c.ref === id));
+  });
+
+  test('amending a critical result down to normal still needs acknowledging', async () => {
+    const { r, lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    await results.enterResults(LAB, id, K);
+    await results.release(PATH, id);
+    await results.amend(LAB, id, NORMAL, 'Wrong sample value');
+    await results.release(PATH, id);
+    const l = await line(id);
+    assert.equal(l.critical.active, true);
+    assert.equal(l.critical.ackAt, undefined);
+    const [a] = await alerts();
+    assert.equal(a.status, 'Pending');
+    assert.equal(a.title, 'Critical (amended): Electrolytes \u2014 acknowledge the correction');
+    assert.ok(a.subtitle.startsWith('Was Potassium 6.4 mmol/L; now Sodium 140, Potassium 4.2'));
+    assert.ok(a.subtitle.endsWith('For Dr. Shajin'));
+    assert.equal((await clockOf('lab-critical', caseId))[0].state, 'running');
+    await results.acknowledge(DOC, id);
+    assert.equal((await clockOf('lab-critical', caseId))[0].state, 'met');
+    assert.equal((await alerts())[0].status, 'Completed');
+  });
+
+  test('amending an acknowledged critical to normal leaves nothing to acknowledge', async () => {
+    const { lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, K);
+    await results.release(PATH, id);
+    await results.acknowledge(DOC, id);
+    await results.amend(LAB, id, NORMAL, 'fix');
+    await results.release(PATH, id);
+    assert.equal((await line(id)).critical.active, false);
+    assert.equal((await alerts())[0].status, 'Completed');
   });
 
   test('sending back an amendment restores the released result', async () => {
@@ -292,6 +332,9 @@ describe('LabResultsService', () => {
     assert.equal(l.version, 1);
     assert.equal(l.results.find((x: any) => x.param === 'Potassium').value, 4.2);
     assert.equal(l.pendingAmendReason, undefined);
+    assert.equal(l.sentBack, undefined);
+    assert.equal(l.enteredBy.id, 'user-lab');
+    assert.equal(l.enteredAt.getTime(), l.history[0].enteredAt.getTime());
   });
 
   test('releasing the last open line sends lab.request-done and stops the turnaround clock', async () => {
