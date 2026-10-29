@@ -276,15 +276,15 @@ export class BedRequestsService {
     await this.requests.updateOne({ _id: id }, { $unset: { lockedUntil: '' } }).exec();
   }
 
-  /** Cancels an open request that the agent is not working on, in one atomic update. */
-  async cancel(actor: Actor, id: string): Promise<BedRequestDocument> {
+  /** Cancels an open request that the agent is not working on, in one atomic update. `reason` replaces "Cancelled by …". */
+  async cancel(actor: Actor, id: string, reason?: string): Promise<BedRequestDocument> {
     const now = new Date();
     const cancelled = await this.requests
       .findOneAndUpdate(
         { _id: id, open: true, ...unlocked(now) },
         {
           state: 'cancelled',
-          stateReason: `Cancelled by ${actor.name}.`,
+          stateReason: reason ?? `Cancelled by ${actor.name}.`,
           stateSince: clinicNow(),
           open: false,
           closedByName: actor.name,

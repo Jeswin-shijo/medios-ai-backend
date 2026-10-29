@@ -130,7 +130,10 @@ export class ErCoordinatorRegistration implements OnModuleInit {
         },
         ...STEP_CLOCKS,
       ],
-      handles: [{ type: 'bed.assigned', handler: (messageId) => this.onBedAssigned(messageId) }],
+      handles: [
+        { type: 'bed.assigned', handler: (messageId) => this.onBedAssigned(messageId) },
+        { type: 'bed.cancelled', handler: (messageId) => this.onBedCancelled(messageId) },
+      ],
       closeChecks: [{ agent: 'er', label: 'ER visit finished', check: (caseId) => this.closeCheck(caseId) }],
       rules: [
         {
@@ -149,6 +152,12 @@ export class ErCoordinatorRegistration implements OnModuleInit {
   private async onBedAssigned(messageId: string): Promise<void> {
     const message = await this.messages.get(messageId);
     if (message?.case) await this.visitsService.onBedAssigned(message.case);
+  }
+
+  /** A bed request on this message's case was cancelled: a visit waiting for that bed goes back to treatment. */
+  private async onBedCancelled(messageId: string): Promise<void> {
+    const message = await this.messages.get(messageId);
+    if (message?.case) await this.visitsService.onBedCancelled(message.case);
   }
 
   /** 'n/a' with no ER visit on the case; 'pass' when every one has left. */

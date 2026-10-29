@@ -138,7 +138,8 @@ describe('ErCoordinatorRegistration', () => {
     assert.ok(def.messageTypes.some((t) => t.type === 'er.left'));
     assert.ok(registry.clock('er-triage') && registry.clock('er-doctor'));
     assert.ok(registry.rules().some((r) => r.key === 'er-auto-pathways'));
-    assert.deepEqual(def.handles?.map((h) => h.type), ['bed.assigned']);
+    assert.deepEqual(def.handles?.map((h) => h.type), ['bed.assigned', 'bed.cancelled']);
+    assert.deepEqual(registry.get('bed')!.handles?.map((h) => h.type), ['er.left']);
     const check = registry.closeChecks().find((c) => c.agent === 'er')!;
     assert.equal(check.label, 'ER visit finished');
     // A case with no ER visit: the ER agent has no say.
@@ -369,6 +370,155 @@ describe('ErCoordinatorRegistration', () => {
     await m.ErVisit.updateOne({ _id: v.id }, { $unset: { announcedAt: 1 } });
     assert.deepEqual(await visits.reannounce(), { arrived: 1, left: 0 });
     assert.equal((await sent('er.arrived')).length, 1);
+  });
+
+  const handlerOf = (agent: 'er' | 'bed', type: string) => registry.get(agent)!.handles!.find((h) => h.type === type)!.handler;
+  /** The demo has free beds: block them all so the Bed Agent leaves the request waiting. */
+  const noBedFree = () => m.Bed.updateMany({}, { state: 'blocked' }).exec();
+
+  test('a cancelled bed request puts a waiting-bed visit back in treatment, with the bay kept', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    await noBedFree();
+    await visits.dispose(DOCTOR, v.id, 'admit', 'Needs a ward');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'waiting');
+    const erBefore = await m.AgentMessage.countDocuments({ from: 'er' });
+
+    await requests.cancel(DOCTOR, requestId);
+    await bridge.idle();
+    const out = await visits.get(v.id);
+    assert.equal(out.status, 'in-treatment');
+    assert.equal(out.disposition, null);
+    assert.ok(out.admitCancelledAt, 'the cancel time is recorded');
+    assert.equal(out.bayName, 'Bay 3', 'the bay is kept');
+    assert.equal(await m.ErBay.countDocuments({ visit: v.id }), 1);
+    assert.equal((await sent('bed.cancelled')).length, 1);
+    assert.equal(await m.AgentMessage.countDocuments({ from: 'er' }), erBefore, 'the ER sends nothing new');
+    assert.equal(await caseState(v.caseId), 'open');
+
+    // A redelivered bed.cancelled does nothing.
+    const [cancelled] = await sent('bed.cancelled');
+    const stored: any = await m.ErVisit.findById(v.id).lean();
+    await handlerOf('er', 'bed.cancelled')(String(cancelled._id));
+    const again: any = await m.ErVisit.findById(v.id).lean();
+    assert.equal(again.status, 'in-treatment');
+    assert.equal(again.admitCancelledAt.getTime(), stored.admitCancelledAt.getTime());
+
+    // The doctor can decide again.
+    assert.equal((await visits.dispose(DOCTOR, v.id, 'admit', '')).status, 'waiting-bed');
+  });
+
+  test('admitted with no bed free, then transferred: the bed request is cancelled, never placed, and the case closes', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await bays.assign(DOCTOR, v.id, await bayId('Bay 3'));
+    await noBedFree();
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'waiting');
+
+    const out = await visits.dispose(DOCTOR, v.id, 'transfer', 'Sent to a cardiac centre');
+    await bridge.idle();
+    assert.equal(out.status, 'left');
+    const request: any = await m.BedRequest.findById(requestId).lean();
+    assert.equal(request.state, 'cancelled');
+    assert.equal(request.open, false);
+    assert.equal(request.stateReason, 'Patient left the ER: transfer');
+    assert.equal(request.closedByName, 'ER Agent');
+    assert.equal((await sent('bed.cancelled')).length, 1);
+    assert.equal(((await m.ErVisit.findById(v.id).lean()) as any).status, 'left', 'bed.cancelled does not bring a left visit back');
+
+    // A bed frees up: the Bed Agent does not place a patient who has gone.
+    await m.Bed.updateMany({}, { state: 'free' }).exec();
+    await agent.retryWaiting();
+    await agent.process(requestId);
+    await agent.idle();
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'cancelled');
+    assert.equal(await m.Admission.countDocuments({ patient: p.id }), 0);
+    assert.equal((await sent('bed.assigned')).length, 0);
+    assert.equal(await clocks.countRunning(), 0);
+    assert.equal(await caseState(v.caseId), 'closed');
+
+    // A redelivered er.left cancels nothing more.
+    const [left] = await sent('er.left');
+    await handlerOf('bed', 'er.left')(String(left._id));
+    await bridge.idle();
+    assert.equal((await sent('bed.cancelled')).length, 1);
+  });
+
+  test('a seeded ICU request that never places is cancelled when the patient dies, and the case closes', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    // As the demo seed writes it: a waiting ICU request on the visit's case, with its messages.
+    const [r] = await m.BedRequest.insertMany([
+      {
+        type: 'admission', patient: p.id, patientName: p.name, patientUhid: p.uhid, patientAge: 52, patientGender: 'Male', stepDown: false,
+        roomClass: 'icu', needs: ['oxygen', 'monitor', 'ventilator'], notes: 'Breathless. Needs oxygen and a ventilator bed.', department: 'General Medicine',
+        doctor: 'Dr. Shajin', expectedStayDays: 3, priority: 'high', priorityRank: 1, state: 'waiting', stateReason: 'No free bed has what this patient needs yet.',
+        open: true, attempts: 0, requestedBy: 'ER Seed', requestedByName: 'Dr. Shajin', requestedAt: new Date(), stateSince: new Date(),
+      },
+    ]);
+    const requestId = String(r._id);
+    await m.Case.updateOne({ _id: v.caseId }, { $addToSet: { 'refs.bedRequestIds': requestId, agents: 'bed' } });
+    await messages.send({ case: v.caseId, from: 'bed', to: ['coordinator'], type: 'bed.request', priority: 'high', summary: `${p.uhid}: admission bed requested (high)`, payload: { requestId, requestType: 'admission', priority: 'high' }, opensWork: true });
+    await messages.send({ case: v.caseId, from: 'bed', to: ['coordinator'], type: 'bed.waiting', priority: 'high', summary: `${p.uhid} is waiting for a bed`, payload: { requestId } });
+
+    const out = await visits.dispose(DOCTOR, v.id, 'died', '');
+    await bridge.idle();
+    assert.equal(out.status, 'left');
+    const request: any = await m.BedRequest.findById(requestId).lean();
+    assert.equal(request.state, 'cancelled');
+    assert.equal(request.stateReason, 'Patient left the ER: died');
+    assert.equal((await messages.list({ case: v.caseId, openWork: true })).length, 0, 'the bed.request work is resolved');
+
+    await agent.retryWaiting();
+    await agent.process(requestId);
+    await agent.idle();
+    await bridge.idle();
+    assert.equal(await m.Admission.countDocuments({ patient: p.id }), 0);
+    assert.equal(await clocks.countRunning(), 0);
+    assert.equal(await caseState(v.caseId), 'closed');
+    for (const msg of await m.AgentMessage.find().lean()) assert.ok(!JSON.stringify(msg).includes(p.name));
+  });
+
+  test('a request an agent pass is holding is cancelled once the pass lets go', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await noBedFree();
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    // A pass holds the request for a moment.
+    await m.BedRequest.updateOne({ _id: requestId }, { lockedUntil: new Date(Date.now() + 60_000) });
+    const release = setTimeout(() => void m.BedRequest.updateOne({ _id: requestId }, { $unset: { lockedUntil: '' } }).exec(), 300);
+    await visits.dispose(DOCTOR, v.id, 'home', '');
+    clearTimeout(release);
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'cancelled');
+    assert.equal(await caseState(v.caseId), 'closed');
+  });
+
+  test('er.left for an admitted patient never cancels a bed request', async () => {
+    const { p, v } = await arrive();
+    await triaged(v.id);
+    await noBedFree();
+    await visits.dispose(DOCTOR, v.id, 'admit', '');
+    const requestId = await ask(p.id);
+    await agent.process(requestId);
+    await bridge.idle();
+    await messages.send({ case: v.caseId, from: 'er', to: ['coordinator'], type: 'er.left', priority: 'medium', summary: 'ER-0001 left the ER (admitted)', payload: { visitId: v.id, reason: 'admitted' } });
+    await bridge.idle();
+    assert.equal(((await m.BedRequest.findById(requestId).lean()) as any).state, 'waiting');
+    assert.equal((await sent('bed.cancelled')).length, 0);
   });
 
   test('a ward admission with no ER visit is left alone', async () => {

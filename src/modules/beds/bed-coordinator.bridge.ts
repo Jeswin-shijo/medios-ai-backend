@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Subscription } from 'rxjs';
@@ -9,6 +9,7 @@ import { CasesService } from '../coordinator/cases.service';
 import { AgentDefinition, CloseCheckResult, MessageTypeDef, Priority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { UserRole } from '../users/schemas/user.schema';
+import { Actor } from './actor';
 import { BedChange, BedEvents, BedRequestEvent } from './bed-events';
 import { BedRequestsService, BedRequestView } from './bed-requests.service';
 import { Admission, AdmissionDocument } from './schemas/admission.schema';
@@ -18,6 +19,11 @@ const CAPACITY = 20;
 const ON_TIME_MINUTES = 15;
 const DAY_MS = 24 * 60 * 60_000;
 const BED_WAIT_MINUTES = 60;
+/** Who cancels a bed request when the patient leaves the ER without being admitted. */
+const ER_ACTOR: Actor = { id: 'er-agent', name: 'ER Agent', role: UserRole.ADMIN };
+/** An agent pass holding a request is short: wait for it a few times before giving up. */
+const CANCEL_TRIES = 5;
+const CANCEL_WAIT_MS = 200;
 
 const type = (t: string, description: string, payload: MessageTypeDef['payload']): MessageTypeDef => ({
   type: t,
@@ -97,6 +103,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
           ladder: 'bed-wait',
         },
       ],
+      handles: [{ type: 'er.left', handler: (messageId) => this.onErLeft(messageId) }],
       approvalTypes: [{ type: 'bed.attention', agent: 'bed', roles: [UserRole.ADMIN, UserRole.DOCTOR], primary: { kind: 'open', label: 'Open' } }],
       closeChecks: [{ agent: 'bed', label: 'Admission discharged or request cancelled', check: (caseId) => this.closeCheck(caseId) }],
       requestTypes: [{ key: 'bed-request', label: 'Bed allocation request', agent: 'bed' }],
@@ -143,6 +150,46 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
       .exec();
     const onTime = recent.filter((r) => r.assignedAt && r.assignedAt.getTime() - r.requestedAt.getTime() <= ON_TIME_MINUTES * 60_000).length;
     return { open, capacity: CAPACITY, onTimePct: recent.length ? Math.round((onTime / recent.length) * 100) : null };
+  }
+
+  /**
+   * The patient left the ER without being admitted (home, transfer, against advice, died): every open
+   * bed request on the message's case is cancelled, so the Bed Agent never places someone who has gone.
+   * The case's refs find them; the patient's open admission request is included in case its ref is
+   * still on its way. A redelivery finds none open and does nothing. Never on 'admitted'.
+   */
+  private async onErLeft(messageId: string): Promise<void> {
+    const message = await this.messages.get(messageId);
+    const reason = typeof message?.payload.reason === 'string' ? message.payload.reason : '';
+    if (!message?.case || !reason || reason === 'admitted') return;
+    const c = await this.cases.get(message.case);
+    if (!c) return;
+    const open = await this.requestModel
+      .find({ open: true, $or: [{ _id: { $in: c.refs.bedRequestIds ?? [] } }, { patient: c.patient, type: 'admission' }] })
+      .select('_id')
+      .lean()
+      .exec();
+    for (const r of open) await this.cancelForLeft(String(r._id), `Patient left the ER: ${reason}`);
+  }
+
+  /** Cancels one request; an agent pass holding it is waited out a few times, then the error goes to the bus. */
+  private async cancelForLeft(id: string, reason: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.requests.cancel(ER_ACTOR, id, reason);
+        return;
+      } catch (e) {
+        if (!(e instanceof ConflictException)) throw e;
+        // Closed meanwhile (cancelled, or placed by a pass that was already running): nothing to cancel.
+        if (!(await this.requestModel.exists({ _id: id, open: true }).exec())) {
+          const r = await this.requestModel.findById(id).select('state').lean<{ state: string }>().exec();
+          if (r?.state === 'assigned') this.logger.warn(`Bed request ${id} was placed as its patient left the ER; staff should review it`);
+          return;
+        }
+        if (attempt >= CANCEL_TRIES) throw e;
+        await new Promise((resolve) => setTimeout(resolve, CANCEL_WAIT_MS));
+      }
+    }
   }
 
   /** The patient's open case, or null: used to log a bed change without opening a case for it. */

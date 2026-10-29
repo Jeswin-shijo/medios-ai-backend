@@ -73,6 +73,8 @@ export interface ErVisitView {
   steps: { key: StepKey; doneAt: string | null; byName: string | null }[];
   doctorSeenAt: string | null;
   disposition: { kind: ErDispositionKind; byName: string; at: string; notes: string } | null;
+  /** When the admit's bed request was last cancelled (the visit went back to in-treatment); null if never. */
+  admitCancelledAt: string | null;
   leftAt: string | null;
   leftReason: string | null;
   handoverNote: string | null;
@@ -169,6 +171,7 @@ export function toVisitView(v: any, extras: ErVisitExtras = NO_EXTRAS): ErVisitV
     steps: (v.steps ?? []).map((s: any) => ({ key: s.key, doneAt: iso(s.doneAt), byName: s.byName ?? null })),
     doctorSeenAt: iso(v.doctorSeenAt),
     disposition: v.disposition ? { kind: v.disposition.kind, byName: v.disposition.byName, at: iso(v.disposition.at)!, notes: v.disposition.notes ?? '' } : null,
+    admitCancelledAt: iso(v.admitCancelledAt),
     leftAt: iso(v.leftAt),
     leftReason: v.leftReason ?? null,
     handoverNote: v.handoverNote ?? null,
@@ -578,6 +581,18 @@ export class ErVisitsService {
     // A redelivery after a lost er.left sends it now.
     const unannounced = await this.visits.findOne({ case: caseId, status: 'left', leftReason: 'admitted', leftAnnouncedAt: { $exists: false } }).exec();
     if (unannounced) await this.announceLeft(unannounced);
+  }
+
+  /**
+   * The Bed Agent's request for this case was cancelled: a visit that waited for a bed goes back to
+   * in-treatment, keeping its bay, so the doctor can decide again. One guarded update, so a redelivery
+   * (the visit no longer waiting for a bed) does nothing. No ER message: bed.cancelled is already logged.
+   */
+  async onBedCancelled(caseId: string): Promise<void> {
+    if (!isValidObjectId(caseId)) return;
+    await this.visits
+      .updateOne({ case: caseId, status: 'waiting-bed' }, { $set: { status: 'in-treatment', admitCancelledAt: clinicNow() }, $unset: { disposition: 1 } })
+      .exec();
   }
 
   private async sendDisposition(visit: ErVisitDocument, kind: ErDispositionKind): Promise<void> {

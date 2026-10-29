@@ -103,6 +103,8 @@ export class ErVisit {
   @Prop({ type: [ErStep], default: [] }) steps: { key: StepKey; doneAt?: Date; byName?: string }[];
   @Prop() doctorSeenAt?: Date;
   @Prop({ type: ErDisposition }) disposition?: ErDisposition;
+  /** Clinic clock. The admit's bed request was cancelled, so the visit went back to in-treatment. */
+  @Prop() admitCancelledAt?: Date;
   @Prop() leftAt?: Date;
   @Prop() leftReason?: string;
   /** Set once er.left reached the Coordinator; a left visit without it is announced again. */
