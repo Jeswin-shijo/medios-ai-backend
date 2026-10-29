@@ -46,7 +46,7 @@ const DAY_MS = 86_400_000;
 /** The agent's verdicts that outrank whatever the call changed. */
 const PROVIDER_FIRST: CallOutcome[] = ['escalated', 'wrong_number', 'unverified'];
 
-// The replies to a failed check never say which detail was wrong.
+// The replies to a failed check never say which detail was wrong, or how many tries are left.
 const ASK_DOB = "Ask the caller for the patient's date of birth, then try again.";
 const NO_MATCH =
   "Those details do not match our records. Ask the caller to check the registered mobile number, the patient's full name and date of birth and try once more, or offer a call back from the front desk (request_callback). Never say which detail was wrong.";
@@ -214,21 +214,24 @@ export class InboundService {
     // Decided before the name is looked at, so this reply says nothing about who matched.
     if (!dob && (!fromRecordNumber || candidates.some((p) => p.birthDate))) throw new Refusal(ASK_DOB, { verified: false });
 
-    // Full name first, then the date of birth (ignored for a patient with none on file).
-    let matched = candidates.filter((p) => nameMatches(p.name, name) && (!p.birthDate || p.birthDate === dob));
-    const exact = matched.filter((p) => dob && p.birthDate === dob);
-    if (matched.length > 1 && exact.length === 1) matched = exact;
-    if (matched.length > 1) throw new Refusal(ASK_DOB, { verified: false });
-    if (!matched.length) {
-      const attemptsLeft = await this.recordFailure(phone);
-      if (attemptsLeft === 0) throw new Refusal(LOCKED_NOW, { verified: false, locked: true });
-      throw new Refusal(NO_MATCH, { verified: false, attempts_left: attemptsLeft });
+    // Full name first. With a date of birth given, a patient whose DOB on file matches it
+    // wins; if any name-matched patient has a DOB on file and none matches, that is a
+    // failed check. Only then do patients with no DOB on file count, so a wrong guess for
+    // one patient is never verified as a relative with no DOB.
+    const byName = candidates.filter((p) => nameMatches(p.name, name));
+    let matched = byName.filter((p) => !p.birthDate);
+    if (dob && byName.some((p) => p.birthDate)) matched = byName.filter((p) => p.birthDate === dob);
+    // Still several: without a DOB, ask for it; with one, it did not tell them apart.
+    if (matched.length > 1 && !dob) throw new Refusal(ASK_DOB, { verified: false });
+    if (matched.length !== 1) {
+      if ((await this.recordFailure(phone)) === 0) throw new Refusal(LOCKED_NOW, { verified: false, locked: true });
+      throw new Refusal(NO_MATCH, { verified: false });
     }
 
     const patient = matched[0];
     if (!fromRecordNumber && !patient.birthDate) {
       // Nothing on file to check from another number: staff call back the number on record.
-      throw new Refusal(NO_MATCH, { verified: false, attempts_left: this.attemptsLeft(lookup) });
+      throw new Refusal(NO_MATCH, { verified: false });
     }
     const session = await this.sessions.create({
       code: this.newCode(),
@@ -264,12 +267,6 @@ export class InboundService {
         if (p.dob && !birthDate) this.logger.warn(`Patient ${p.uhid}: the date of birth on file cannot be read, so it is ignored. Correct it in the patient record.`);
         return { ...p, birthDate };
       });
-  }
-
-  /** Attempts left before a lock, without counting one. */
-  private attemptsLeft(lookup: CallerLookupDocument | null): number {
-    const counting = lookup?.failuresUntil && lookup.failuresUntil > new Date();
-    return Math.max(MAX_FAILURES - (counting ? lookup.failures : 0), 0);
   }
 
   /**
@@ -587,10 +584,12 @@ export class InboundService {
   }
 
   /**
-   * The session a call's result belongs to: the one bound to its call id, else one
-   * from the caller's number that is not bound to another call, not yet logged, and
-   * opened during the call (start and end ± 2 minutes; the start is known from the
-   * call's length).
+   * The session a call's result belongs to: the one bound to its call id, else the one
+   * session from the caller's phone that is not bound to another call, not yet logged,
+   * and opened during the call (start and end ± 2 minutes; the start is known from the
+   * call's length). A session counts as from the caller's phone by its caller number, or
+   * by the number it claimed when it has no caller number. When more than one fits,
+   * none is attached: the call is logged as unverified rather than under a guess.
    */
   private async sessionOfCall(providerCallId: string | undefined, caller: string | undefined, started: Date | undefined, ended: Date) {
     const unlogged = { loggedAt: { $exists: false } };
@@ -600,15 +599,17 @@ export class InboundService {
     }
     if (!caller) return null;
     const from = started ? new Date(started.getTime() - MATCH_MARGIN_MS) : new Date(ended.getTime() - 2 * 3_600_000);
-    return this.sessions
-      .findOne({
-        $or: [{ callerNumber: caller }, { phone: caller }],
+    const fits = await this.sessions
+      .find({
+        $or: [{ callerNumber: caller }, { phone: caller, callerNumber: { $exists: false } }],
         providerCallId: providerCallId ? { $in: [null, providerCallId] } : null,
         createdAt: { $gte: from, $lte: new Date(ended.getTime() + MATCH_MARGIN_MS) },
         ...unlogged,
       })
-      .sort({ createdAt: -1 })
+      .limit(2)
       .exec();
+    if (fits.length > 1) this.logger.warn(`Inbound call ${providerCallId ?? ''}: several caller checks fit, so none is attached.`);
+    return fits.length === 1 ? fits[0] : null;
   }
 
   // ---------------------------------------------------------------- helpers
