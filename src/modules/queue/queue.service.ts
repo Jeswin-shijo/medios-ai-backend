@@ -10,6 +10,8 @@ import { QueueEvents } from './queue-events';
 import { AppointmentEvents, AppointmentStatusChange } from '../appointments/appointment-events';
 import { Subscription } from 'rxjs';
 import { displayName, QueueSettings, resolveQueueSettings } from './queue-settings';
+import { OpdService } from '../opd/opd.service';
+import { formatTokenLabel, newSecret } from '../reception/format';
 import { clinicNow, clockMinutes, displayTime, isoDate } from '../../common/utils/clinic-time';
 
 /** Appointment statuses a token can still check in. */
@@ -36,7 +38,17 @@ export interface IssueRequest {
   appointmentId?: string;
   priority?: boolean;
   note?: string;
+  /** The doctor's line to join; the default doctor when omitted. */
+  doctorId?: string;
+  /** Join the line without checking in the patient's appointment. */
+  skipAppointment?: boolean;
 }
+
+/** Match a series; old tokens and sequences have none, which counts as the hospital-wide '' line. */
+const seriesFilter = (series: string) => (series ? { series } : { series: { $in: ['', null] } });
+
+/** Ignore "no such index" and "no such collection" when dropping an old index. */
+const IGNORED_DROP_CODES = [26, 27];
 
 /** Appointment statuses that end the visit, and what they do to its token. */
 const ENDS_TOKEN: Record<string, { status: TokenStatus; from: TokenStatus[] }> = {
@@ -58,12 +70,24 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     private readonly settings: SettingsService,
     private readonly events: QueueEvents,
     private readonly appointmentEvents: AppointmentEvents,
+    private readonly opd: OpdService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     this.appointmentChanges = this.appointmentEvents.statusChanges$.subscribe((change) =>
       this.followAppointment(change).catch((err) => this.logger.warn(`Appointment ${change.id} → ${change.status}: ${(err as Error).message}`)),
     );
+    // Numbers now restart per doctor, so the hospital-wide unique keys must go.
+    await this.dropIndex(this.tokens, 'date_1_number_1');
+    await this.dropIndex(this.sequences, 'date_1');
+  }
+
+  private async dropIndex(model: Model<any>, name: string) {
+    try {
+      await model.collection.dropIndex(name);
+    } catch (err) {
+      if (!IGNORED_DROP_CODES.includes((err as { code?: number }).code ?? 0)) throw err;
+    }
   }
 
   onModuleDestroy() {
@@ -104,7 +128,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async board(date = this.today()): Promise<QueueBoard> {
     const [tokens, settings] = await Promise.all([this.tokens.find({ date }).sort({ number: 1 }).exec(), this.queueSettings()]);
     const waiting = tokens.filter((t) => t.status === 'waiting').sort(byServingOrder);
-    const position = new Map(waiting.map((t, i) => [String(t._id), i + 1]));
+    const place = new Map<string, number>(); // next place in line, per series
+    const position = new Map(
+      waiting.map((t) => {
+        const n = (place.get(t.series ?? '') ?? 0) + 1;
+        place.set(t.series ?? '', n);
+        return [String(t._id), n];
+      }),
+    );
 
     const waits = tokens.filter((t) => t.firstCalledAt).map((t) => t.firstCalledAt!.getTime() - (t as any).createdAt.getTime());
     const count = (status: TokenStatus) => tokens.filter((t) => t.status === status).length;
@@ -148,7 +179,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         .filter((t) => t.status === 'called')
         .sort((a, b) => b.calledAt!.getTime() - a.calledAt!.getTime())
         .map((t) => ({ label: t.label, counter: t.counter, calledAt: t.calledAt, recalls: t.recalls, name: name(t) })),
-      upcoming: waiting.slice(0, settings.upcomingOnDisplay).map((t) => ({ label: t.label, priority: t.priority, name: name(t) })),
+      upcoming: waiting.slice(0, settings.upcomingOnDisplay).map((t) => ({ label: t.label, priority: t.priority, room: t.room, name: name(t) })),
       waitingCount: waiting.length,
       serverTime: new Date().toISOString(),
     };
@@ -159,7 +190,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
    * people are ahead. No UHID and no full name, as anyone at the kiosk can see it.
    */
   async kioskView(token: QueueTokenDocument, existing: boolean) {
-    const waiting = token.status === 'waiting' ? await this.tokens.find({ date: token.date, status: 'waiting' }).select('number priority').exec() : [];
+    const waiting =
+      token.status === 'waiting'
+        ? await this.tokens.find({ date: token.date, status: 'waiting', ...seriesFilter(token.series ?? '') }).select('number priority').exec()
+        : [];
     return {
       label: token.label,
       name: displayName(token.patientName),
@@ -167,9 +201,33 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       existing,
       ahead: waiting.filter((t) => byServingOrder(t, token) < 0).length,
       counter: token.status === 'called' ? token.counter : undefined,
+      room: token.room,
+      doctorName: token.doctorName,
+      department: token.department,
+      trackCode: token.trackCode,
       appointmentTime: token.appointmentTime,
       issuedAt: (token as unknown as { createdAt: Date }).createdAt,
     };
+  }
+
+  async tokenById(id: string): Promise<QueueTokenDocument | null> {
+    return this.tokens.findById(id).exec().catch(() => null); // a malformed id is just "not found"
+  }
+
+  /** The token the patient holds today (waiting, called or skipped), if any. */
+  activeTokenFor(uhid: string): Promise<QueueTokenDocument | null> {
+    return this.tokens.findOne({ activeKey: activeKey(this.today(), uhid) }).exec();
+  }
+
+  /** Waiting tokens per series (doctor id; '' for the hospital-wide line) on a day. */
+  async waitingCountsBySeries(date = this.today()): Promise<Map<string, number>> {
+    const rows = await this.tokens
+      .aggregate<{ _id: string; count: number }>([
+        { $match: { date, status: 'waiting' } },
+        { $group: { _id: { $ifNull: ['$series', ''] }, count: { $sum: 1 } } },
+      ])
+      .exec();
+    return new Map(rows.map((r) => [r._id, r.count]));
   }
 
   // ---------------------------------------------------------------- issuing
@@ -182,25 +240,38 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async issue(req: IssueRequest, actor: string, source: 'front-desk' | 'kiosk' = 'front-desk') {
     if (!req.uhid && !req.appointmentId) throw new BadRequestException('Give the patient UHID or the appointment to check in');
     const date = this.today();
-    const appointment = await this.appointmentFor(req, date);
-    const uhid = req.uhid?.trim() || appointment!.uhid;
+    const doctor = await this.doctorFor(req.doctorId);
+    const found = await this.appointmentFor(req, date);
+    const uhid = req.uhid?.trim() || found!.uhid;
+    // Only the default doctor's line checks an appointment in.
+    const defaultDoctor = doctor ? await this.opd.defaultDoctor() : null;
+    const appointment = req.skipAppointment !== true && (!doctor || String(doctor._id) === String(defaultDoctor?._id)) ? found : null;
 
     const patient = await this.patients.findOne({ uhid }).exec();
-    if (!patient && !appointment) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
+    if (!patient && !found) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
 
     const held = await this.tokens.findOne({ activeKey: activeKey(date, uhid) }).exec();
     if (held) return { token: await this.reclaim(held), existing: true };
 
     const settings = await this.queueSettings();
-    const number = await this.nextNumber(date);
+    const series = doctor ? String(doctor._id) : '';
+    const number = await this.nextNumber(date, series);
     let token: QueueTokenDocument;
     try {
       token = await this.tokens.create({
         date,
         number,
-        label: `${settings.tokenPrefix}${number}`,
+        series,
+        label: doctor ? formatTokenLabel(doctor.tokenPrefix, number) : `${settings.tokenPrefix}${number}`,
+        ...(doctor && {
+          doctorId: series,
+          doctorName: doctor.name,
+          department: await this.departmentName(doctor.departmentCode),
+          room: doctor.room,
+        }),
+        trackCode: newSecret(16),
         uhid,
-        patientName: patient?.name ?? appointment!.patientName,
+        patientName: patient?.name ?? found!.patientName,
         appointmentId: appointment ? String(appointment._id) : undefined,
         appointmentTime: appointment?.time ?? '',
         priority: req.priority === true,
@@ -238,8 +309,24 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return today.sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time))[0] ?? null;
   }
 
-  private async nextNumber(date: string): Promise<number> {
-    const seq = await this.sequences.findOneAndUpdate({ date }, { $inc: { last: 1 } }, { upsert: true, new: true }).exec();
+  /** The asked-for doctor (must be active), else the default doctor; null when the hospital has no doctors (one hospital-wide line). */
+  private async doctorFor(doctorId?: string) {
+    if (doctorId) {
+      const doctor = await this.opd.getDoctor(doctorId);
+      if (!doctor.active) throw new ConflictException(`${doctor.name} is not seeing patients`);
+      return doctor;
+    }
+    return this.opd.defaultDoctor();
+  }
+
+  private async departmentName(code: string) {
+    return (await this.opd.listDepartments()).find((d) => d.code === code)?.name ?? code;
+  }
+
+  private async nextNumber(date: string, series: string): Promise<number> {
+    const seq = await this.sequences
+      .findOneAndUpdate({ date, ...seriesFilter(series) }, { $inc: { last: 1 }, $setOnInsert: { series } }, { upsert: true, new: true })
+      .exec();
     return seq!.last;
   }
 
@@ -279,14 +366,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
     const filter: FilterQuery<QueueTokenDocument> = tokenId
       ? { _id: tokenId, date, status: { $in: ['waiting', 'skipped'] } }
-      : { date, status: 'waiting' };
+      : { date, status: 'waiting', $or: [{ room: counter }, { room: { $exists: false } }, { room: '' }] };
     let called: QueueTokenDocument | null;
     try {
       called = await this.tokens
         .findOneAndUpdate(
           filter,
           { $set: { status: 'called', counter, calledAt: now, calledBy: actor, recalls: 0 }, $min: { firstCalledAt: now } },
-          { sort: { priority: -1, number: 1 }, new: true },
+          { sort: { priority: -1, createdAt: 1 }, new: true },
         )
         .exec();
     } catch (err) {

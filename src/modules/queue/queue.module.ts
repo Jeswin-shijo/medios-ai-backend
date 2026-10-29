@@ -11,6 +11,7 @@ import { QueueEvents } from './queue-events';
 import { PatientCardsService } from './patient-cards.service';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { PatientsModule } from '../patients/patients.module';
+import { OpdModule } from '../opd/opd.module';
 import { SettingsModule } from '../settings/settings.module';
 
 @Module({
@@ -24,6 +25,7 @@ import { SettingsModule } from '../settings/settings.module';
     AppointmentsModule,
     PatientsModule,
     SettingsModule,
+    OpdModule,
   ],
   controllers: [QueueController],
   providers: [QueueService, QueueDisplaysService, PatientCardsService, QueueEvents],

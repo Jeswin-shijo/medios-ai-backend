@@ -84,10 +84,34 @@ export class QueueToken {
   /** Set while the token is active, cleared when it ends: one live token per patient per day. */
   @Prop()
   activeKey?: string;
+
+  /** The doctor whose line this token is in; absent on tokens issued before doctor-wise lines. */
+  @Prop()
+  doctorId?: string;
+
+  @Prop()
+  doctorName?: string;
+
+  /** The department's name. */
+  @Prop()
+  department?: string;
+
+  /** The doctor's room; "next" in a room calls only tokens for it (or with no room). */
+  @Prop()
+  room?: string;
+
+  /** The doctor's id, or '' for the hospital-wide line. Numbers run separately per series. */
+  @Prop({ default: '' })
+  series: string;
+
+  /** Random code for the patient's tracking link. */
+  @Prop()
+  trackCode?: string;
 }
 
 export const QueueTokenSchema = SchemaFactory.createForClass(QueueToken);
-QueueTokenSchema.index({ date: 1, number: 1 }, { unique: true });
+QueueTokenSchema.index({ date: 1, series: 1, number: 1 }, { unique: true });
+QueueTokenSchema.index({ trackCode: 1 }, { unique: true, sparse: true });
 QueueTokenSchema.index({ activeKey: 1 }, { unique: true, partialFilterExpression: { activeKey: { $type: 'string' } } });
 // One called token per room: two "next" presses at once cannot both call someone.
 QueueTokenSchema.index({ date: 1, counter: 1 }, { unique: true, partialFilterExpression: { status: { $eq: 'called' } } });
