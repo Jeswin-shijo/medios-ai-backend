@@ -8,6 +8,9 @@ import { TaskAlertItem, TaskAlertDocument, TaskAlertItemSchema } from '../module
 import { Ward, WardDocument, WardSchema } from '../modules/beds/schemas/ward.schema';
 import { Patient, PatientDocument, PatientSchema } from '../modules/patients/schemas/patient.schema';
 import { AgentMessage, MessageDocument, AgentMessageSchema } from '../modules/coordinator/schemas/agent-message.schema';
+import { Case, CaseDocument, CaseSchema } from '../modules/coordinator/schemas/case.schema';
+import { CoordinatorCounter, CoordinatorCounterDocument, CoordinatorCounterSchema } from '../modules/coordinator/schemas/coordinator-counter.schema';
+import { TimelineEvent, TimelineEventDocument, TimelineEventSchema } from '../modules/timeline/schemas/timeline.schema';
 import { HospitalSettings, HospitalSettingsDocument, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -42,6 +45,9 @@ export function models() {
     BedSnapshot: model(BedSnapshot, BedSnapshotSchema) as Model<BedSnapshotDocument>,
     TaskAlertItem: model(TaskAlertItem, TaskAlertItemSchema) as Model<TaskAlertDocument>,
     AgentMessage: model(AgentMessage, AgentMessageSchema) as Model<MessageDocument>,
+    Case: model(Case, CaseSchema) as Model<CaseDocument>,
+    CoordinatorCounter: model(CoordinatorCounter, CoordinatorCounterSchema) as Model<CoordinatorCounterDocument>,
+    TimelineEvent: model(TimelineEvent, TimelineEventSchema) as Model<TimelineEventDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };
 }

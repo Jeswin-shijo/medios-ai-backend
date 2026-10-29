@@ -286,6 +286,13 @@ export class MessagesService {
     return rows.map(toView);
   }
 
+  /** One case's messages, oldest first (the timeline order). */
+  async forCase(caseId: string): Promise<MessageView[]> {
+    if (!Types.ObjectId.isValid(caseId)) throw new BadRequestException('"case" is not a valid id');
+    const rows = await this.model.find({ case: new Types.ObjectId(caseId) }).sort({ createdAt: 1, _id: 1 }).lean().exec();
+    return rows.map(toView);
+  }
+
   async get(id: string): Promise<MessageView | null> {
     if (!Types.ObjectId.isValid(id)) return null;
     const m = await this.model.findById(id).lean().exec();
