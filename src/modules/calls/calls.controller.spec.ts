@@ -68,6 +68,36 @@ describe('CallsController: inbound tools route', () => {
     await assert.rejects(() => ctrl.tool('find_patient', undefined, {}, body, response().res), UnauthorizedException);
   });
 
+  test('wrapped arguments: the call id and caller number come from the envelope around them', async () => {
+    const { ctrl, seen } = controller('snapserve');
+    const wrapped = { arguments: JSON.stringify({ patient_name: 'Rekha Suresh' }), callId: 'call-7', fromNumber: '+919876543210' };
+    await ctrl.tool('find_patient', TOOLS_SECRET, {}, wrapped, response().res);
+    assert.deepEqual(seen.tool, ['find_patient', { patient_name: 'Rekha Suresh' }, { providerCallId: 'call-7', callerNumber: '+919876543210' }]);
+  });
+
+  test("unwrapped arguments are the model's own: no call id or caller number is read from them", async () => {
+    const { ctrl, seen } = controller('snapserve');
+    const unwrapped = {
+      patient_name: 'Rekha Suresh',
+      caller_number: '+919876543210',
+      fromNumber: '+919876543210',
+      callId: 'call-8',
+      call: { id: 'call-8', fromNumber: '+919876543210' },
+      metadata: { from: '+919876543210' },
+    };
+    await ctrl.tool('find_patient', TOOLS_SECRET, {}, unwrapped, response().res);
+    const [, args, ctx] = seen.tool!;
+    assert.equal((args as any).patient_name, 'Rekha Suresh');
+    assert.deepEqual(ctx, { providerCallId: undefined, callerNumber: undefined });
+  });
+
+  test("the provider's headers carry the call id and caller number, whatever the body says", async () => {
+    const { ctrl, seen } = controller('snapserve');
+    const headers = { 'x-snapserve-call-id': 'call-9', 'x-snapserve-from': '+919876543210' };
+    await ctrl.tool('find_patient', TOOLS_SECRET, headers, { patient_name: 'Rekha Suresh', caller_number: '+919876543299' }, response().res);
+    assert.deepEqual(seen.tool![2], { providerCallId: 'call-9', callerNumber: '+919876543210' });
+  });
+
   test('the right secret runs the tool and answers plain JSON (snapserve, or simulated in development)', async () => {
     for (const provider of ['snapserve', 'simulated']) {
       const { ctrl, seen } = controller(provider);
@@ -113,9 +143,9 @@ describe('CallsController: one call', () => {
     }
   });
 
-  test('the call log and transcripts are for admin, doctor, nurse and front desk only', () => {
+  test('the call log, transcripts and placing or withdrawing calls are for admin, doctor, nurse and front desk only', () => {
     const staff = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
-    for (const route of ['list', 'findOne'] as const) {
+    for (const route of ['list', 'findOne', 'confirm', 'book', 'cancel'] as const) {
       assert.deepEqual(Reflect.getMetadata(ROLES_KEY, CallsController.prototype[route]), staff, route);
     }
   });

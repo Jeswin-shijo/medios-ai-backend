@@ -16,38 +16,43 @@ import { UserRole } from '../users/schemas/user.schema';
 const MINUTE = 60_000;
 
 /**
- * A mid-call tool request's arguments. SnapServe sends the arguments the language
- * model chose; they may arrive at the top level or wrapped (args, arguments,
- * parameters), possibly as a JSON string.
+ * A mid-call tool request: the arguments the language model chose, and the envelope
+ * SnapServe put around them when it wrapped them (args, arguments, parameters or
+ * input, possibly as a JSON string). Unwrapped, the whole body is the model's.
  */
-function toolArgs(body: unknown): Record<string, unknown> {
+function toolRequest(body: unknown): { args: Record<string, unknown>; envelope?: Record<string, any> } {
   const b = body && typeof body === 'object' ? (body as Record<string, any>) : {};
   for (const name of ['args', 'arguments', 'parameters', 'input']) {
     const v = b[name];
-    if (v && typeof v === 'object') return v;
+    if (v && typeof v === 'object') return { args: v, envelope: b };
     if (typeof v === 'string') {
       try {
         const parsed = JSON.parse(v);
-        if (parsed && typeof parsed === 'object') return parsed;
+        if (parsed && typeof parsed === 'object') return { args: parsed, envelope: b };
       } catch {
         // Not JSON: fall through to the top level.
       }
     }
   }
-  return b;
+  return { args: b };
 }
 
-/** The call a tool request belongs to and the caller's number, when SnapServe includes them. */
-function toolContext(body: unknown, headers: Record<string, unknown>): ToolContext {
-  const b = body && typeof body === 'object' ? (body as Record<string, any>) : {};
-  const call = b.call ?? b.context ?? b.metadata ?? {};
+/**
+ * The call a tool request belongs to and the caller's number, read only from what the
+ * provider sets: its headers, or the envelope around wrapped arguments. Never from the
+ * arguments themselves, which the language model (and so the caller) controls: a
+ * caller ID there would let anyone skip the date of birth. Absent, the DOB is required.
+ */
+function toolContext(envelope: Record<string, any> | undefined, headers: Record<string, unknown>): ToolContext {
+  const e = envelope ?? {};
+  const call = e.call ?? e.context ?? e.metadata ?? {};
   const pick = (...values: unknown[]) => {
     const v = values.find((x) => typeof x === 'string' || typeof x === 'number');
     return v === undefined ? undefined : String(v);
   };
   return {
-    providerCallId: pick(b.callId, b.call_id, call.id, call.callId, headers['x-snapserve-call-id']),
-    callerNumber: pick(b.fromNumber, b.from_number, b.callerNumber, b.caller_number, call.fromNumber, call.from, headers['x-snapserve-from']),
+    providerCallId: pick(headers['x-snapserve-call-id'], e.callId, e.call_id, call.id, call.callId),
+    callerNumber: pick(headers['x-snapserve-from'], e.fromNumber, e.from_number, e.callerNumber, e.caller_number, call.fromNumber, call.from),
   };
 }
 
@@ -57,7 +62,10 @@ const sameSecret = (presented: string, expected: string) => {
   return !!expected && timingSafeEqual(digest(presented), digest(expected));
 };
 
-/** Who may read the call log and transcripts: calls hold patients' own words, which pharmacy and lab don't need. */
+/**
+ * Who may read the call log and transcripts, and place or withdraw calls: calls hold
+ * patients' own words, which pharmacy and lab don't need.
+ */
 const CALL_LOG_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
 
 @ApiTags('AI Call Agent')
@@ -123,6 +131,7 @@ export class CallsController {
   }
 
   @Post('confirmation')
+  @Roles(...CALL_LOG_ROLES)
   @Throttle({ default: { limit: 30, ttl: MINUTE } })
   @ApiOperation({ summary: 'Call a patient to confirm a scheduled appointment (queued until calling hours if outside them)' })
   confirm(@Body() dto: ConfirmationCallDto, @CurrentUser('name') user: string) {
@@ -130,6 +139,7 @@ export class CallsController {
   }
 
   @Post('booking')
+  @Roles(...CALL_LOG_ROLES)
   @Throttle({ default: { limit: 30, ttl: MINUTE } })
   @ApiOperation({ summary: 'Call a patient to book an appointment in one of two free slots' })
   book(@Body() dto: BookingCallDto, @CurrentUser('name') user: string) {
@@ -202,7 +212,8 @@ export class CallsController {
     if (!expected) throw new NotFoundException('Inbound tools are not enabled (CALL_TOOLS_SECRET is not set).');
     if (!['snapserve', 'simulated'].includes(this.calls.providerInfo.provider)) throw new NotFoundException('Inbound tools are off: the call agent is not configured (CALL_PROVIDER).');
     if (!sameSecret(String(secret ?? ''), expected)) throw new UnauthorizedException('Invalid tool secret');
-    res.status(HttpStatus.OK).json(await this.inbound.run(tool, toolArgs(body), toolContext(body, headers)));
+    const { args, envelope } = toolRequest(body);
+    res.status(HttpStatus.OK).json(await this.inbound.run(tool, args, toolContext(envelope, headers)));
   }
 
   @Get(':id')
@@ -213,6 +224,7 @@ export class CallsController {
   }
 
   @Post(':id/cancel')
+  @Roles(...CALL_LOG_ROLES)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Withdraw a call that has not been placed yet' })
   cancel(@Param('id') id: string, @CurrentUser('name') user: string) {
