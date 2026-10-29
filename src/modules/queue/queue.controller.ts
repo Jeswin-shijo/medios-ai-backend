@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, HttpStatus, Logger, Param, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, HttpStatus, Logger, NotFoundException, Param, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
@@ -15,6 +15,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { UserRole } from '../users/schemas/user.schema';
 
 const MINUTE = 60_000;
+/** The shape of a tracking code; anything else is not a link we issued. */
+const TRACK_CODE = /^[A-Za-z0-9_-]{16,64}$/;
 /** Roles that run the front desk or call patients in. */
 const QUEUE_STAFF = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
 /** A display stream re-sends the queue this often even when nothing changed (keep-alive, other API instances). */
@@ -190,6 +192,16 @@ export class QueueController {
     const { token, existing } = await this.cards.tap(dto.cardId, `Kiosk: ${kiosk.name}`, 'kiosk');
     // The current setting, so switching printing on or off applies from the next tap.
     return { ...(await this.queue.kioskView(token, existing)), printSlips: kiosk.printSlips };
+  }
+
+  /** The page behind the QR on a patient's slip. The code is the only credential, so the answer holds no identity. */
+  @Public()
+  @Get('track/:code')
+  @Throttle({ default: { limit: 30, ttl: MINUTE } })
+  @ApiOperation({ summary: "A token's live status for the patient's phone (tracking code, no sign-in)" })
+  track(@Param('code') code: string) {
+    if (!TRACK_CODE.test(code)) throw new NotFoundException('This token link is not valid');
+    return this.queue.track(code);
   }
 
   /** For a display that cannot keep a stream open; it polls this instead. */

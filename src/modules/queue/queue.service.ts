@@ -33,6 +33,22 @@ export interface QueueBoard {
   stats: Record<'issued' | 'waiting' | 'called' | 'skipped' | 'completed' | 'cancelled', number> & { averageWaitMinutes: number | null };
 }
 
+/** The patient-facing view of one token. Never holds identity. */
+export interface TrackView {
+  hospitalName: string;
+  label: string;
+  status: 'waiting' | 'called' | 'done' | 'cancelled';
+  ahead: number;
+  doctorName: string;
+  department: string;
+  room: string;
+  calledAt?: string;
+  /** The label called in this token's room right now. */
+  nowServing?: string;
+  /** The token is from an earlier day. */
+  ended: boolean;
+}
+
 export interface IssueRequest {
   uhid?: string;
   appointmentId?: string;
@@ -193,16 +209,12 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
    * people are ahead. No UHID and no full name, as anyone at the kiosk can see it.
    */
   async kioskView(token: QueueTokenDocument, existing: boolean) {
-    const waiting =
-      token.status === 'waiting'
-        ? await this.tokens.find({ date: token.date, status: 'waiting', ...seriesFilter(token.series ?? '') }).select('number priority').exec()
-        : [];
     return {
       label: token.label,
       name: displayName(token.patientName),
       status: token.status,
       existing,
-      ahead: waiting.filter((t) => byServingOrder(t, token) < 0).length,
+      ahead: await this.aheadOf(token),
       counter: token.status === 'called' ? token.counter : undefined,
       room: token.room,
       doctorName: token.doctorName,
@@ -210,6 +222,40 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       trackCode: token.trackCode,
       appointmentTime: token.appointmentTime,
       issuedAt: (token as unknown as { createdAt: Date }).createdAt,
+    };
+  }
+
+  /** Waiting tokens in the same doctor's line that will be called before this one; 0 unless it is waiting. */
+  private async aheadOf(token: QueueTokenDocument): Promise<number> {
+    if (token.status !== 'waiting') return 0;
+    const waiting = await this.tokens.find({ date: token.date, status: 'waiting', ...seriesFilter(token.series ?? '') }).select('number priority').exec();
+    return waiting.filter((t) => byServingOrder(t, token) < 0).length;
+  }
+
+  /**
+   * What the patient's phone shows from the link on their slip. Looked up by the
+   * unguessable tracking code alone, so it carries no UHID, name or phone.
+   */
+  async track(code: string): Promise<TrackView> {
+    const token = await this.tokens.findOne({ trackCode: code }).exec();
+    if (!token) throw new NotFoundException('This token link is not valid');
+    const s = (await this.settings.getSettings()) as unknown as Record<string, any>;
+    const status = ({ skipped: 'called', completed: 'done' } as Record<string, TrackView['status']>)[token.status] ?? (token.status as TrackView['status']);
+    const serving =
+      token.room && token.date === this.today()
+        ? await this.tokens.findOne({ date: token.date, status: 'called', counter: token.room, _id: { $ne: token._id } }).select('label').exec()
+        : null;
+    return {
+      hospitalName: String(s.hospital?.name ?? ''),
+      label: token.label,
+      status,
+      ahead: await this.aheadOf(token),
+      doctorName: token.doctorName,
+      department: token.department,
+      room: token.room,
+      calledAt: token.calledAt && status === 'called' ? token.calledAt.toISOString() : undefined,
+      nowServing: serving?.label,
+      ended: token.date !== this.today(),
     };
   }
 
