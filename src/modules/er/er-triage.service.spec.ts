@@ -33,6 +33,7 @@ describe('ErTriageService', () => {
   let visits: ErVisitsService;
   let service: ErTriageService;
   let clocks: ClocksService;
+  let escalations: EscalationsService;
   let patientCount: number;
 
   before(async () => {
@@ -48,7 +49,7 @@ describe('ErTriageService', () => {
     const registry = new AgentRegistry();
     const events = new CoordinatorEvents();
     const messages = new MessagesService(m.AgentMessage, registry, events);
-    const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
+    escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
@@ -208,6 +209,24 @@ describe('ErTriageService', () => {
     const esc: any[] = await m.Escalation.find().lean();
     assert.equal(esc.length, 1);
     assert.equal(esc[0].state, 'open');
+  });
+
+  test('an ER escalation behaves as before: a plain reason, its own escalation alert, acknowledged directly', async () => {
+    const v = await arrive('chest-pain');
+    await service.triage(NURSE, v.id, input());
+    await m.Clock.updateOne({ def: 'er-step-ecg', case: v.caseId }, { $set: { dueAt: new Date(Date.now() - MIN) } });
+    assert.equal(await clocks.checkDue(new Date()), 1);
+    const esc: any = await m.Escalation.findOne().lean();
+    assert.equal(esc.reason, 'ECG done overdue');
+    assert.equal(esc.closesOnStop, undefined);
+    const alert: any = await m.TaskAlertItem.findById(esc.alert).lean();
+    assert.equal(alert.link, `escalation:${esc._id}`);
+    assert.equal(alert.title, 'Escalated to ER nurse in charge: ECG done overdue');
+    await service.tickStep(NURSE, v.id, 'ecg');
+    assert.equal(((await m.Escalation.findById(esc._id).lean()) as any).state, 'open', 'doing the step late leaves it open');
+    await escalations.acknowledge(ADMIN, String(esc._id));
+    assert.equal(((await m.Escalation.findById(esc._id).lean()) as any).state, 'acknowledged');
+    assert.equal(((await m.TaskAlertItem.findById(esc.alert).lean()) as any).status, 'Completed');
   });
 
   test('the doctor clock uses a saved stroke.doctor override', async () => {

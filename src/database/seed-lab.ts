@@ -13,6 +13,7 @@ import { Ladder, LadderSchema } from '../modules/coordinator/schemas/ladder.sche
 import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabTestReport, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { COLLECT_MINUTES, Priority, TUBE_LABEL, TubeKey, flagValue, groupIntoTubes, targetMinutes, testByKey } from '../modules/lab/lab-catalogue';
+import { LAB_CLOCKS } from '../modules/lab/lab-coordinator.registration';
 import { orderSummary } from '../modules/lab/lab-orders.service';
 import { writeLabReport } from '../modules/lab/lab-report-writer';
 import { LabLine, LabLineSchema, LabResultRow } from '../modules/lab/schemas/lab-line.schema';
@@ -323,9 +324,13 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
   };
   const addClock = (c: { def: string; case: Types.ObjectId; ref: string; startedBy: Types.ObjectId; startedAt: Date; dueAt: Date; stoppedAt?: Date }): void => {
     if (!c.stoppedAt && c.dueAt.getTime() <= nowMs) throw new Error(`Lab seed: the running ${c.def} clock is already overdue.`);
+    // The detail the live clock takes from its start message.
+    const start = messageDocs.find((x) => String(x._id) === String(c.startedBy));
+    const detail = LAB_CLOCKS.find((d) => d.key === c.def)?.detailFrom?.((start?.payload as Record<string, unknown>) ?? {});
     clockDocs.push({
       _id: new Types.ObjectId(),
       ...c,
+      ...(detail ? { detail } : {}),
       state: c.stoppedAt ? 'met' : 'running',
       ...(c.stoppedAt ? { metMinutes: Math.round((c.stoppedAt.getTime() - c.startedAt.getTime()) / MIN) } : {}),
       createdAt: c.startedAt,
@@ -550,7 +555,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
           const first = !seen.firstReceive;
           seen.firstReceive = true;
           const id = msg('lab.received', s.receivedMs! + 500, `${number}: ${s.doc.number} received (${TUBE_LABEL[s.doc.tube as TubeKey]})`, {
-            requestId: String(requestId), sampleId: String(s.doc._id), firstReceive: first, tatDueAt: earliestTat(openAt(s.receivedMs!)),
+            requestId: String(requestId), requestNumber: number, sampleId: String(s.doc._id), firstReceive: first, tests: openAt(s.receivedMs!).map((l) => l.spec.test), tatDueAt: earliestTat(openAt(s.receivedMs!)),
           }, { dedupeKey: `lab.received:${s.doc._id}` });
           if (first) seen.firstReceiveMsg = id;
         });
@@ -560,7 +565,8 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
         const rejectedAt = (s as any).rejectedAt as Date;
         defer(rejectedAt.getTime(), () => {
           const id = msg('lab.rejected', rejectedAt.getTime(), `${number}: ${s.doc.number} rejected (${s.doc.rejected.reason}), recollect as ${replacement.doc.number}`, {
-            requestId: String(requestId), sampleId: String(s.doc._id), newSampleId: String(replacement.doc._id), reason: s.doc.rejected.reason, recollectBy: (s as any).recollectBy,
+            requestId: String(requestId), requestNumber: number, sampleId: String(s.doc._id), newSampleId: String(replacement.doc._id), reason: s.doc.rejected.reason,
+            tests: s.tests.filter((t) => lineOf(t).spec.stage !== 'cancelled'), recollectBy: (s as any).recollectBy,
           }, { dedupeKey: `lab.rejected:${s.doc._id}` });
           rejectedMsgs.push({ id, at: rejectedAt, recollectBy: (s as any).recollectBy });
         });
@@ -598,7 +604,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
         for (const c of criticals) {
           criticalIds.push(
             msg('lab.critical', l.releasedMs! + 400, `${number}: ${def.label} critical (${c.param})`, {
-              requestId: String(requestId), lineId: String(l._id), test: s.test, parameter: c.param, value: String(c.value), unit: c.unit, version: 1,
+              requestId: String(requestId), requestNumber: number, lineId: String(l._id), test: s.test, parameter: c.param, value: String(c.value), unit: c.unit, version: 1,
             }, { priority: 'high', dedupeKey: `lab.critical:${l._id}:1:${c.param}` }),
           );
         }

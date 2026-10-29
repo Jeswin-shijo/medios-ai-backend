@@ -149,7 +149,7 @@ export class LabResultsService {
           type: 'lab.critical',
           priority: 'high',
           summary: cut(`${request.number}: ${def.label} critical (${c.param})`),
-          payload: { requestId: String(request._id), lineId: String(line._id), test: line.test, parameter: c.param, value: String(c.value), unit: c.unit, version },
+          payload: { requestId: String(request._id), requestNumber: request.number, lineId: String(line._id), test: line.test, parameter: c.param, value: String(c.value), unit: c.unit, version },
           dedupeKey: `lab.critical:${line._id}:${version}:${c.param}`,
         });
       }

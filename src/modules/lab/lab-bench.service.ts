@@ -149,7 +149,7 @@ export class LabBenchService {
     const request = await this.requests.findById(claimed.request).exec();
     if (!request) throw new NotFoundException('Lab request not found');
     const first = await this.requests.findOneAndUpdate({ _id: request._id, firstReceivedAt: { $exists: false } }, { $set: { firstReceivedAt: new Date() } }).exec();
-    const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).select('tatDueAt').lean<{ tatDueAt: Date }[]>().exec();
+    const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).sort({ _id: 1 }).select('test tatDueAt').lean<{ test: string; tatDueAt: Date }[]>().exec();
     const tatDueAt = open.length ? new Date(Math.min(...open.map((l) => l.tatDueAt.getTime()))) : new Date();
     await this.messages.send({
       case: String(request.case),
@@ -158,7 +158,7 @@ export class LabBenchService {
       type: 'lab.received',
       priority: CASE_PRIORITY[request.priority],
       summary: cut(`${request.number}: ${claimed.number} received (${TUBE_LABEL[claimed.tube]})`),
-      payload: { requestId: String(request._id), sampleId: String(claimed._id), firstReceive: !!first, tatDueAt },
+      payload: { requestId: String(request._id), requestNumber: request.number, sampleId: String(claimed._id), firstReceive: !!first, tests: open.map((l) => l.test), tatDueAt },
       dedupeKey: `lab.received:${claimed._id}`,
     });
   }
@@ -206,7 +206,15 @@ export class LabBenchService {
       type: 'lab.rejected',
       priority: CASE_PRIORITY[request.priority],
       summary: cut(`${request.number}: ${claimed.number} rejected (${reason}), recollect as ${replacement.number}`),
-      payload: { requestId: String(request._id), sampleId: String(claimed._id), newSampleId: String(replacement._id), reason, recollectBy },
+      payload: {
+        requestId: String(request._id),
+        requestNumber: request.number,
+        sampleId: String(claimed._id),
+        newSampleId: String(replacement._id),
+        reason,
+        tests: redo.map((l) => l.test),
+        recollectBy,
+      },
       dedupeKey: `lab.rejected:${claimed._id}`,
     });
   }

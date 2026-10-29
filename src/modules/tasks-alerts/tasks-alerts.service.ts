@@ -39,6 +39,8 @@ export class TasksAlertsService {
   }
 
   private refuseEscalation(task: TaskAlertDocument): void {
+    // A critical lab result has one acknowledgement path, the result itself: nobody, admin included, ticks it off here.
+    if (task.link?.startsWith('lab-line:')) throw new ConflictException('Acknowledge this critical result on the Lab page.');
     if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
   }
 

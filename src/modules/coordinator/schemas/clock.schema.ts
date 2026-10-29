@@ -20,6 +20,8 @@ export class Clock {
   @Prop({ type: Date }) stoppedAt?: Date;
   @Prop({ type: Number }) metMinutes?: number;
   @Prop({ type: MongooseSchema.Types.ObjectId }) escalation?: Types.ObjectId;
+  /** What the clock is about, from the definition's detailFrom (e.g. "LR-0019 · Troponin I"). Never a patient name. */
+  @Prop() detail?: string;
 }
 
 export const ClockSchema = SchemaFactory.createForClass(Clock);

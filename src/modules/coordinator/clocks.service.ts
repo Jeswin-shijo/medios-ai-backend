@@ -9,6 +9,8 @@ import { Clock, ClockDocument, ClockState } from './schemas/clock.schema';
 import type { MessageDocument } from './schemas/agent-message.schema';
 
 const MINUTE_MS = 60_000;
+/** Who closed an escalation whose work was done (resolveEscalationOnStop). */
+const RESOLVED_BY = 'Result acknowledged';
 
 export interface ClockView {
   id: string;
@@ -21,6 +23,7 @@ export interface ClockView {
   stoppedAt: string | null;
   metMinutes: number | null;
   escalation: string | null;
+  detail: string | null;
 }
 
 const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
@@ -37,6 +40,7 @@ function toView(c: any): ClockView {
     stoppedAt: iso(c.stoppedAt),
     metMinutes: c.metMinutes ?? null,
     escalation: c.escalation ? String(c.escalation) : null,
+    detail: c.detail ?? null,
   };
 }
 
@@ -106,7 +110,7 @@ export class ClocksService implements OnModuleInit {
     }
     for (const def of this.registry.clocksStoppingOn(m.type).filter(accepts)) {
       try {
-        await this.stop(def.key, m, this.refFrom(def, m.type, payload));
+        await this.stop(def, m, this.refFrom(def, m.type, payload));
       } catch (e) {
         this.logger.error(`Stopping clock ${def.key} failed: ${(e as Error).message}`);
       }
@@ -138,8 +142,24 @@ export class ClocksService implements OnModuleInit {
     }
   }
 
+  /** The definition's short detail for a start message, or null when it has none or it is unusable. */
+  private detailFrom(def: ClockDef, payload: Record<string, unknown>): string | null {
+    if (!def.detailFrom) return null;
+    try {
+      const d = def.detailFrom(payload);
+      return typeof d === 'string' && d.trim() ? d.trim().slice(0, 120) : null;
+    } catch (e) {
+      if (!this.unknownLogged.has(`detailFrom:${def.key}`)) {
+        this.unknownLogged.add(`detailFrom:${def.key}`);
+        this.logger.error(`detailFrom of clock ${def.key} failed, using no detail: ${(e as Error).message}`);
+      }
+      return null;
+    }
+  }
+
   private async start(def: ClockDef, m: MessageDocument, payload: Record<string, unknown>, ref: string | null): Promise<void> {
     const startedAt = m.createdAt ? new Date(m.createdAt) : new Date();
+    const detail = this.detailFrom(def, payload);
     try {
       await this.model.create({
         def: def.key,
@@ -149,6 +169,7 @@ export class ClocksService implements OnModuleInit {
         startedAt,
         dueAt: this.dueFrom(def, payload) ?? new Date(startedAt.getTime() + def.minutes * MINUTE_MS),
         state: 'running',
+        ...(detail ? { detail } : {}),
       });
     } catch (e) {
       // 11000: the partial unique index says one is already running, so a repeat changes nothing.
@@ -156,16 +177,27 @@ export class ClocksService implements OnModuleInit {
     }
   }
 
-  private async stop(defKey: string, m: MessageDocument, ref: string | null): Promise<void> {
+  private async stop(def: ClockDef, m: MessageDocument, ref: string | null): Promise<void> {
     const at = new Date();
-    const key = { def: defKey, case: m.case ?? null, ref };
+    const key = { def: def.key, case: m.case ?? null, ref };
     const metOf = (c: { startedAt: Date }) => Math.round((at.getTime() - new Date(c.startedAt).getTime()) / MINUTE_MS);
     const running = await this.model.findOne({ ...key, state: 'running' }).exec();
     if (running) {
       const met = await this.model
         .findOneAndUpdate({ _id: running._id, state: 'running' }, { $set: { state: 'met', stoppedAt: at, metMinutes: metOf(running) } })
         .exec();
-      if (met) return;
+      if (met && !def.resolveEscalationOnStop) return;
+    }
+    if (def.resolveEscalationOnStop) {
+      // The work is done: every expired clock for this item is finally met, and its escalation closes with it.
+      const expired = await this.model.find({ ...key, state: 'expired', stoppedAt: { $exists: false } }).exec();
+      for (const c of expired) {
+        const stopped = await this.model
+          .findOneAndUpdate({ _id: c._id, stoppedAt: { $exists: false } }, { $set: { stoppedAt: at, metMinutes: metOf(c) } }, { new: true })
+          .exec();
+        if (stopped?.escalation) await this.escalations.resolve(String(stopped.escalation), RESOLVED_BY);
+      }
+      return;
     }
     // Already expired: record when it was finally met, but leave the state and its escalation alone.
     const expired = await this.model.findOne({ ...key, state: 'expired', stoppedAt: { $exists: false } }).sort({ startedAt: -1 }).exec();
@@ -215,6 +247,8 @@ export class ClocksService implements OnModuleInit {
     const orphans = await this.model.find({ state: 'expired', escalation: { $exists: false } }).exec();
     for (const c of orphans) {
       try {
+        // Its work was done before the raise: nothing is left to escalate.
+        if (c.stoppedAt && this.registry.clock(c.def)?.resolveEscalationOnStop) continue;
         await this.escalate(c);
       } catch (e) {
         this.logger.error(`Escalating clock ${String(c._id)} failed: ${(e as Error).message}`);
@@ -229,17 +263,37 @@ export class ClocksService implements OnModuleInit {
     this.logger.warn(`Clock "${defKey}" is overdue but its definition is not registered; leaving it as it is`);
   }
 
+  /** The alert link the definition gives an item, or null when it has none or it is unusable. */
+  private alertLink(def: ClockDef, ref: string | null): string | null {
+    if (!def.alertLink) return null;
+    try {
+      const l = def.alertLink(ref);
+      return typeof l === 'string' && l ? l : null;
+    } catch (e) {
+      this.logger.error(`alertLink of clock ${def.key} failed, using the escalation's own alert: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
   /** Raises the definition's ladder for an expired clock (once per clock) and stores the escalation id. */
   private async escalate(c: ClockDocument): Promise<void> {
     const def = this.registry.clock(c.def);
     if (!def) return this.warnUnknown(c.def);
+    const link = this.alertLink(def, c.ref ?? null);
     const esc = await this.escalations.raise({
       ladder: def.ladder,
       case: c.case ? String(c.case) : null,
-      reason: `${def.label} overdue`,
+      reason: `${def.label} overdue${c.detail ? ` — ${c.detail}` : ''}`,
       source: { kind: 'clock', id: String(c._id) },
+      ...(link ? { alertLink: link } : {}),
+      ...(def.resolveEscalationOnStop ? { closesOnStop: true } : {}),
     });
     await this.model.updateOne({ _id: c._id }, { $set: { escalation: esc._id } }).exec();
+    if (def.resolveEscalationOnStop) {
+      // A stop that landed while the ladder was being raised found no escalation to close: close it now.
+      const now = await this.model.findById(c._id).select('stoppedAt').lean().exec();
+      if (now?.stoppedAt) await this.escalations.resolve(String(esc._id), RESOLVED_BY);
+    }
   }
 
   async list(q: { state?: string; case?: string; limit?: number } = {}): Promise<ClockView[]> {

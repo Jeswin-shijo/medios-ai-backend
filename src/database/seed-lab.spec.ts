@@ -145,6 +145,9 @@ describe('seedLab', () => {
     const inMin = (running[0].dueAt.getTime() - seededAt) / MINUTE;
     assert.ok(inMin > 8 && inMin < 12, `due in ${inMin} min`);
     assert.ok(running[0].startedAt.getTime() <= seededAt);
+    // The detail its escalation would show: request number and test, as the live clock stores it.
+    const openReq: any = await m.LabRequest.findById(open[0].request).lean().exec();
+    assert.equal(running[0].detail, `${openReq.number} · Electrolytes · Potassium`);
     for (const c of clocks.filter((x) => x.state !== 'running')) {
       assert.equal(c.state, 'met');
       assert.ok(c.stoppedAt);
@@ -277,6 +280,21 @@ describe('seedLab', () => {
     }
     // Each message names the request.
     for (const msg of msgs.filter((x) => x.from === 'lab')) assert.match(msg.summary, /^LR-\d{4}/);
+  });
+
+  test('every seeded lab message carries the payload its type declares, and every lab clock has a detail', async () => {
+    const { LAB_CLOCKS } = await import('../modules/lab/lab-coordinator.registration');
+    const { validatePayload } = await import('../modules/coordinator/coordinator-types');
+    const registry = new AgentRegistry();
+    const { LabCoordinatorRegistration } = await import('../modules/lab/lab-coordinator.registration');
+    new LabCoordinatorRegistration(registry, null as any, null as any, m.LabRequest, m.LabLine).onModuleInit();
+    for (const msg of await m.AgentMessage.find({ from: 'lab' }).lean<any[]>().exec()) {
+      const def = registry.messageType(msg.type)!;
+      assert.deepEqual(validatePayload(def, msg.payload), [], `${msg.type} ${msg.summary}`);
+    }
+    const clocks = await m.Clock.find({ def: { $in: LAB_CLOCKS.map((c) => c.key) } }).lean<any[]>().exec();
+    assert.ok(clocks.length > 0);
+    for (const c of clocks) assert.match(c.detail ?? '', /^LR-\d{4} · /, `${c.def} detail`);
   });
 
   test('reconcile finds nothing to send after seeding', async () => {

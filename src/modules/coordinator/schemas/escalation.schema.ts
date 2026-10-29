@@ -21,6 +21,10 @@ export class Escalation {
   @Prop() ackBy?: string;
   @Prop() ackByName?: string;
   @Prop({ type: Date }) ackAt?: Date;
+  /** Closed only when its source's work is done (a critical result acknowledged), never by Acknowledge. */
+  @Prop() closesOnStop?: boolean;
+  /** Its alert's link when it took over another alert (e.g. `lab-line:<id>`); absent means `escalation:<id>`. */
+  @Prop() alertLink?: string;
 }
 
 export const EscalationSchema = SchemaFactory.createForClass(Escalation);

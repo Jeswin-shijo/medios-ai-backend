@@ -71,6 +71,16 @@ export interface ClockDef {
   refFrom?: (type: string, payload: Record<string, unknown>) => string | null;
   /** Messages that move a running clock's due time to `dueFrom(payload)`. */
   updateOn?: string[];
+  /**
+   * The work itself closes the escalation: when a stop message arrives after the clock expired, its open
+   * escalation is closed ("Result acknowledged") and its alert completed. Such an escalation can't be
+   * acknowledged directly.
+   */
+  resolveEscalationOnStop?: boolean;
+  /** The link its escalation's alert carries (one alert per link). Null, absent or a failure keeps `escalation:<id>`. */
+  alertLink?: (ref: string | null) => string | null;
+  /** A short detail from the start message (a request number and test, never a patient name), stored on the clock and shown in its escalation. */
+  detailFrom?: (payload: Record<string, unknown>) => string | null;
 }
 
 export interface ApprovalTypeDef {

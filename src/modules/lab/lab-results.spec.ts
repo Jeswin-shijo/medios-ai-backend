@@ -35,6 +35,7 @@ describe('LabResultsService', () => {
   let messages: MessagesService;
   let cases: CasesService;
   let clocks: ClocksService;
+  let escalations: EscalationsService;
   let orders: LabOrdersService;
   let bench: LabBenchService;
   let results: LabResultsService;
@@ -61,7 +62,7 @@ describe('LabResultsService', () => {
     const registry = new AgentRegistry();
     const events = new CoordinatorEvents();
     messages = new MessagesService(m.AgentMessage, registry, events);
-    const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
+    escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
@@ -175,7 +176,7 @@ describe('LabResultsService', () => {
     const crit = await sent('lab.critical');
     assert.equal(crit.length, 2, 'one per critical parameter');
     const k = crit.find((c) => c.payload.parameter === 'Potassium');
-    assert.deepEqual(k.payload, { requestId: r.id, lineId: id, test: 'electrolytes', parameter: 'Potassium', value: '6.4', unit: 'mmol/L', version: 1 });
+    assert.deepEqual(k.payload, { requestId: r.id, requestNumber: r.number, lineId: id, test: 'electrolytes', parameter: 'Potassium', value: '6.4', unit: 'mmol/L', version: 1 });
     assert.ok(!k.summary.includes('Ravi'));
     const clocks1 = await clockOf('lab-critical', String((await m.LabRequest.findById(r.id).lean() as any).case));
     assert.equal(clocks1.length, 1, 'one clock for the line');
@@ -215,6 +216,60 @@ describe('LabResultsService', () => {
     assert.equal(await escalationsOn('lab-critical'), 1);
     const e = (await m.Escalation.findOne({ ladder: 'lab-critical' }).lean()) as any;
     assert.equal(e.step, 0);
+  });
+
+  test('an overdue critical escalates on its own alert with the result in the text; only acknowledging the result closes it', async () => {
+    const { r, lineId } = await received(['troponin']);
+    const id = lineId('troponin');
+    await results.enterResults(LAB, id, { 'Troponin I': 0.5 });
+    await results.release(PATH, id);
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    assert.equal((await clockOf('lab-critical', caseId))[0].detail, `${r.number} · Troponin I`);
+    await backdateClock('lab-critical', caseId, 1);
+    await clocks.checkDue(new Date());
+    const e = (await m.Escalation.findOne({ ladder: 'lab-critical' }).lean()) as any;
+    assert.equal(e.reason, `Critical result acknowledgement overdue — ${r.number} · Troponin I`);
+    assert.ok(!e.reason.includes('Ravi'));
+    // One alert for the line: the escalation takes over the critical result's alert.
+    const all = (await m.TaskAlertItem.find().lean()) as any[];
+    assert.equal(all.length, 1);
+    assert.equal(String(all[0]._id), String(e.alert));
+    assert.equal(all[0].link, `lab-line:${id}`);
+    assert.equal(all[0].title, `Escalated to Duty doctor: Critical result acknowledgement overdue — ${r.number} · Troponin I`);
+    assert.equal(all[0].escalation.id, String(e._id));
+    assert.equal(all[0].status, 'Pending');
+    // Acknowledging the escalation itself is refused, for an admin too.
+    await assert.rejects(() => escalations.acknowledge(ADMIN, String(e._id)), {
+      status: 409,
+      message: 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+    });
+    assert.equal(((await m.Escalation.findById(e._id).lean()) as any).state, 'open');
+    // Acknowledging the result closes the escalation and completes its alert.
+    await results.acknowledge(DOC, id, 'Seen');
+    const closed = (await m.Escalation.findById(e._id).lean()) as any;
+    assert.equal(closed.state, 'acknowledged');
+    assert.equal(closed.ackByName, 'Result acknowledged');
+    assert.equal(((await m.TaskAlertItem.findById(e.alert).lean()) as any).status, 'Completed');
+    const clock = (await clockOf('lab-critical', caseId))[0];
+    assert.equal(clock.state, 'expired');
+    assert.ok(clock.stoppedAt);
+  });
+
+  test('lab clocks carry a short detail: the request number and tests (and the critical parameter), never a name', async () => {
+    const { r, lineId } = await received(['cbc', 'rft'], 'urgent');
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    assert.equal((await clockOf('lab-collect', caseId))[0].detail, `${r.number} · Complete blood count, Kidney function`);
+    assert.equal((await clockOf('lab-tat', caseId))[0].detail, `${r.number} · Complete blood count, Kidney function`);
+    await results.enterResults(LAB, lineId('cbc'), { Haemoglobin: 6.1, WBC: 7, Platelets: 250 });
+    await results.release(PATH, lineId('cbc'));
+    assert.equal((await clockOf('lab-critical', caseId))[0].detail, `${r.number} · Complete blood count · Haemoglobin`);
+    const edta = r.samples.find((s) => s.tube === 'edta')!;
+    const serum = r.samples.find((s) => s.tube === 'serum')!;
+    await bench.reject(LAB, serum.id, 'haemolysed');
+    assert.equal((await clockOf('lab-recollect', caseId))[0].detail, `${r.number} · Kidney function`);
+    assert.ok(edta);
+    const details = (await m.Clock.find().lean()).map((c: any) => c.detail ?? '').join(' ');
+    assert.ok(!details.includes('Ravi'));
   });
 
   test('acknowledging a non-critical line is refused', async () => {

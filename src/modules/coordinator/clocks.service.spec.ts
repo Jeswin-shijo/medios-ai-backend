@@ -41,6 +41,8 @@ describe('ClocksService', () => {
         { type: 'test.ref.done', agent: 'er', description: 'per item stop', payload: {} },
         { type: 'test.ref.move', agent: 'er', description: 'per item update', payload: {} },
         { type: 'test.ref.bad', agent: 'er', description: 'bad ref', payload: {} },
+        { type: 'test.result', agent: 'er', description: 'a result needing acknowledgement', payload: {} },
+        { type: 'test.result.acked', agent: 'er', description: 'the result was acknowledged', payload: {} },
       ],
       clocks: [
         { key: 'test-wait', agent: 'er', label: 'Test wait', startOn: 'test.wait', stopOn: ['test.done'], minutes: 10, ladder: 'default' },
@@ -88,6 +90,19 @@ describe('ClocksService', () => {
           minutes: 10,
           ladder: 'default',
           match: (_t, p) => p.step === 'ecg',
+        },
+        {
+          key: 'test-result',
+          agent: 'er',
+          label: 'Result acknowledgement',
+          startOn: 'test.result',
+          stopOn: ['test.result.acked'],
+          minutes: 15,
+          ladder: 'default',
+          refFrom: (_t, p) => (typeof p.item === 'string' ? p.item : null),
+          resolveEscalationOnStop: true,
+          alertLink: (ref) => (ref ? `test-item:${ref}` : null),
+          detailFrom: (p) => (typeof p.label === 'string' ? p.label : null),
         },
       ],
       status,
@@ -321,5 +336,74 @@ describe('ClocksService', () => {
     assert.ok(!left.some((i) => i.name === 'def_1_case_1'));
     assert.ok(left.some((i) => JSON.stringify(i.key) === JSON.stringify({ def: 1, case: 1, ref: 1 })));
     await service.onModuleInit(); // a second run finds nothing to drop
+  });
+
+  test('a def with detailFrom, alertLink and resolveEscalationOnStop: detail in the reason, the link on the alert, closed by the stop', async () => {
+    const caseId = String(new Types.ObjectId());
+    await TaskAlertItem.create({ title: 'The item alert', type: 'Lab Alert', category: 'Critical', priority: 'High', link: 'test-item:a', patientName: 'kept' });
+    await sendWith('test.result', { item: 'a', label: 'LR-0001 · Troponin I' }, caseId);
+    const started: any = await Clock.findOne({ def: 'test-result' }).lean();
+    assert.equal(started.detail, 'LR-0001 · Troponin I');
+    assert.equal(await service.checkDue(new Date(Date.now() + 16 * MIN)), 1);
+    const esc: any = await Escalation.findOne().lean();
+    assert.equal(esc.reason, 'Result acknowledgement overdue — LR-0001 · Troponin I');
+    assert.equal(esc.closesOnStop, true);
+    // The escalation takes over the item's own alert: one alert per link.
+    assert.equal(await TaskAlertItem.countDocuments(), 1);
+    const alert: any = await TaskAlertItem.findById(esc.alert).lean();
+    assert.equal(alert.link, 'test-item:a');
+    assert.equal(alert.title, 'Escalated to Duty administrator: Result acknowledgement overdue — LR-0001 · Troponin I');
+    assert.equal(alert.escalation.id, String(esc._id));
+    assert.equal(alert.patientName, 'kept');
+    // A step up keeps writing the same alert.
+    await escalations.advanceDue(new Date(Date.now() + 16 * MIN));
+    assert.equal(await TaskAlertItem.countDocuments(), 1);
+    assert.match(((await TaskAlertItem.findById(esc.alert).lean()) as any).title, /^Escalated to Medical superintendent: Result acknowledgement overdue — LR-0001/);
+    // Acknowledging the escalation itself is refused.
+    const admin = { id: 'admin-1', name: 'Admin', role: 'admin' } as any;
+    await assert.rejects(() => escalations.acknowledge(admin, String(esc._id)), {
+      status: 409,
+      message: 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+    });
+    // The work being done closes it.
+    await sendWith('test.result.acked', { item: 'a' }, caseId);
+    const closed: any = await Escalation.findById(esc._id).lean();
+    assert.equal(closed.state, 'acknowledged');
+    assert.equal(closed.ackByName, 'Result acknowledged');
+    assert.ok(closed.ackAt);
+    assert.equal(((await TaskAlertItem.findById(esc.alert).lean()) as any).status, 'Completed');
+    const clock: any = await Clock.findById(started._id).lean();
+    assert.equal(clock.state, 'expired');
+    assert.ok(clock.stoppedAt);
+  });
+
+  test('a stop closes the escalation of an earlier expired clock for the same item even when a newer clock is running', async () => {
+    const caseId = String(new Types.ObjectId());
+    await sendWith('test.result', { item: 'a', label: 'v1' }, caseId);
+    await service.checkDue(new Date(Date.now() + 16 * MIN));
+    await messages.send({ case: caseId, from: 'er', to: ['coordinator'], type: 'test.result', priority: 'medium', summary: 'v2', payload: { item: 'a', label: 'v2' }, dedupeKey: 'v2' });
+    assert.equal(await Clock.countDocuments({ def: 'test-result', state: 'running' }), 1);
+    await sendWith('test.result.acked', { item: 'a' }, caseId);
+    assert.equal(await Clock.countDocuments({ def: 'test-result', state: 'running' }), 0);
+    assert.equal(((await Escalation.findOne().lean()) as any).state, 'acknowledged');
+  });
+
+  test('a def without the new fields escalates as before: no detail, its own escalation alert, acknowledged directly', async () => {
+    const caseId = String(new Types.ObjectId());
+    await send('test.wait', caseId);
+    await service.checkDue(new Date(Date.now() + 11 * MIN));
+    const clock: any = await Clock.findOne({ def: 'test-wait' }).lean();
+    assert.equal(clock.detail, undefined);
+    const esc: any = await Escalation.findOne().lean();
+    assert.equal(esc.reason, 'Test wait overdue');
+    assert.equal(esc.closesOnStop, undefined);
+    const alert: any = await TaskAlertItem.findById(esc.alert).lean();
+    assert.equal(alert.link, `escalation:${esc._id}`);
+    assert.equal(alert.type, 'System');
+    await send('test.done', caseId);
+    assert.equal(((await Escalation.findById(esc._id).lean()) as any).state, 'open', 'a late stop leaves it open');
+    await escalations.acknowledge({ id: 'admin-1', name: 'Admin', role: 'admin' } as any, String(esc._id));
+    assert.equal(((await Escalation.findById(esc._id).lean()) as any).state, 'acknowledged');
+    assert.equal(((await TaskAlertItem.findById(esc.alert).lean()) as any).status, 'Completed');
   });
 });

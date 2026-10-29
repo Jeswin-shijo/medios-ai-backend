@@ -138,18 +138,24 @@ export class EscalationsService {
     return { label, names: who.names, subtitle: hasHolders ? `On duty: ${who.names.join(', ')}` : NO_HOLDERS };
   }
 
-  private async writeAlert(e: EscalationDocument, titleKey: string, create: boolean) {
+  /**
+   * Writes the escalation's alert. With an `alertLink` the escalation takes over the alert already kept for
+   * that link (one alert per link), or makes it; later steps rewrite the alert it stored.
+   */
+  private async writeAlert(e: EscalationDocument, titleKey: string, create: boolean, alertLink?: string) {
     const v = await this.stepView(titleKey);
     const fields = {
       title: `Escalated to ${v.label}: ${e.reason}`,
       subtitle: v.subtitle,
       escalation: { id: String(e._id), ladder: e.ladder, step: e.step, titleKey, titleLabel: v.label, holderNames: v.names },
     };
+    const link = alertLink ?? `escalation:${e._id}`;
+    const filter = create || !alertLink || !e.alert ? { link } : { _id: e.alert };
     const alert = await this.alertModel
       .findOneAndUpdate(
-        { link: `escalation:${e._id}` },
+        filter,
         create
-          ? { $set: fields, $setOnInsert: { type: 'System', category: 'Critical', priority: 'High', status: 'Pending', link: `escalation:${e._id}` } }
+          ? { $set: fields, $setOnInsert: { type: 'System', category: 'Critical', priority: 'High', status: 'Pending', link } }
           : { $set: fields },
         { upsert: create, new: true },
       )
@@ -157,7 +163,16 @@ export class EscalationsService {
     return { alert, label: v.label };
   }
 
-  async raise(input: { ladder: string; case?: string | null; reason: string; source: Escalation['source'] }): Promise<EscalationDocument> {
+  async raise(input: {
+    ladder: string;
+    case?: string | null;
+    reason: string;
+    source: Escalation['source'];
+    /** The alert link to use instead of `escalation:<id>`, e.g. `lab-line:<id>`. */
+    alertLink?: string;
+    /** Closed only by its source's work being done (see resolve), never by Acknowledge. */
+    closesOnStop?: boolean;
+  }): Promise<EscalationDocument> {
     const ladder = await this.ladderModel.findOne({ key: input.ladder }).lean().exec();
     if (!ladder || !ladder.steps.length) throw new BadRequestException(`Unknown ladder "${input.ladder}"`);
     const bySource = () => this.model.findOne({ 'source.kind': input.source.kind, 'source.id': input.source.id }).exec();
@@ -177,6 +192,8 @@ export class EscalationsService {
         state: 'open',
         raisedAt: now,
         stepAt: now,
+        ...(input.closesOnStop ? { closesOnStop: true } : {}),
+        ...(input.alertLink ? { alertLink: input.alertLink } : {}),
       });
     } catch (err) {
       // 11000: another pass raised it for the same source a moment ago.
@@ -184,7 +201,7 @@ export class EscalationsService {
       if (!existing) throw err;
       return existing;
     }
-    const { alert, label } = await this.writeAlert(e, ladder.steps[0].title, true);
+    const { alert, label } = await this.writeAlert(e, ladder.steps[0].title, true, input.alertLink);
     e.alert = alert!._id as Types.ObjectId;
     await e.save();
     await this.messages.send({
@@ -223,7 +240,7 @@ export class EscalationsService {
     // The step in the filter stops two passes from moving the same escalation twice.
     const updated = await this.model.findOneAndUpdate({ _id: e._id, state: 'open', step: e.step }, { $set: { step: next, stepAt: now } }, { new: true }).exec();
     if (!updated) return false;
-    await this.writeAlert(updated, ladder.steps[next].title, false);
+    await this.writeAlert(updated, ladder.steps[next].title, false, updated.alertLink);
     this.emit(updated);
     return true;
   }
@@ -237,6 +254,7 @@ export class EscalationsService {
     const e = await this.model.findById(id).exec();
     if (!e) throw new NotFoundException('Escalation not found');
     if (e.state === 'acknowledged') throw new ConflictException('Already acknowledged.');
+    if (e.closesOnStop) throw new ConflictException('Acknowledge the result on the Lab page; this alert closes when it is acknowledged.');
     if (actor.role !== UserRole.ADMIN) {
       const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
       const keys = (ladder?.steps ?? []).slice(e.step).map((s) => s.title);
@@ -253,6 +271,17 @@ export class EscalationsService {
       .exec();
     if (!done) throw new ConflictException('Already acknowledged.');
     await this.alertModel.updateOne({ _id: e.alert }, { $set: { status: 'Completed' } }).exec();
+    this.emit(done);
+  }
+
+  /** Closes an open escalation because its source's work is done (no person acknowledged it here), and completes its alert. */
+  async resolve(id: string, by: string): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) return;
+    const done = await this.model
+      .findOneAndUpdate({ _id: id, state: 'open' }, { $set: { state: 'acknowledged', ackByName: by, ackAt: new Date() } }, { new: true })
+      .exec();
+    if (!done) return;
+    if (done.alert) await this.alertModel.updateOne({ _id: done.alert }, { $set: { status: 'Completed' } }).exec();
     this.emit(done);
   }
 

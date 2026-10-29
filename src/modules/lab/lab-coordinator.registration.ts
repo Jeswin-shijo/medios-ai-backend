@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
+import { testByKey } from './lab-catalogue';
 import { LabOrdersService } from './lab-orders.service';
 import { LabLine, LabLineDocument } from './schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
@@ -20,11 +21,13 @@ const MESSAGE_TYPES: MessageTypeDef[] = [
   type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', reason: 'string', tatDueAt: 'date' }),
   type('lab.collected', 'A sample was collected', { requestId: 'string', sampleId: 'string', sampleNumber: 'string', tube: 'string', tests: 'string[]' }),
   type('lab.collection-done', 'Every sample for a request was collected', { requestId: 'string' }),
-  type('lab.received', 'A sample reached the lab', { requestId: 'string', sampleId: 'string', firstReceive: 'boolean', tatDueAt: 'date' }),
-  type('lab.rejected', 'A sample was rejected and needs recollecting', { requestId: 'string', sampleId: 'string', newSampleId: 'string', reason: 'string', recollectBy: 'date' }),
+  // `tests` here: the request's open tests, which its turnaround clock covers.
+  type('lab.received', 'A sample reached the lab', { requestId: 'string', requestNumber: 'string', sampleId: 'string', firstReceive: 'boolean', tests: 'string[]', tatDueAt: 'date' }),
+  // `tests` here: the tests to recollect.
+  type('lab.rejected', 'A sample was rejected and needs recollecting', { requestId: 'string', requestNumber: 'string', sampleId: 'string', newSampleId: 'string', reason: 'string', tests: 'string[]', recollectBy: 'date' }),
   type('lab.resulted', 'A lab result was released', { requestId: 'string', lineId: 'string', test: 'string', flag: 'string', version: 'number', tatDueAt: 'date' }),
   type('lab.request-done', 'Every test on a request is finished', { requestId: 'string' }),
-  type('lab.critical', 'A critical lab value was found', { requestId: 'string', lineId: 'string', test: 'string', parameter: 'string', value: 'string', unit: 'string', version: 'number' }),
+  type('lab.critical', 'A critical lab value was found', { requestId: 'string', requestNumber: 'string', lineId: 'string', test: 'string', parameter: 'string', value: 'string', unit: 'string', version: 'number' }),
   type('lab.critical-acked', 'A doctor acknowledged a critical value', { lineId: 'string' }),
 ];
 
@@ -35,8 +38,30 @@ const date = (key: string) => (payload: Record<string, unknown>): Date | null =>
   return d && !isNaN(d.getTime()) ? d : null;
 };
 const byRequest = (_t: string, p: Record<string, unknown>) => str(p.requestId);
+const labelOf = (test: string) => testByKey(test)?.label ?? test;
+const DETAIL_TESTS = 3;
 
-const CLOCKS: ClockDef[] = [
+/** "LR-0019 · Complete blood count, Troponin I" (three tests, then "+N more"): what an escalation is about, never a name. */
+const requestDetail = (p: Record<string, unknown>): string | null => {
+  const number = str(p.requestNumber);
+  if (!number) return null;
+  const tests = Array.isArray(p.tests) ? p.tests.filter((t): t is string => typeof t === 'string').map(labelOf) : [];
+  const shown = tests.slice(0, DETAIL_TESTS).join(', ') + (tests.length > DETAIL_TESTS ? ` +${tests.length - DETAIL_TESTS} more` : '');
+  return shown ? `${number} · ${shown}` : number;
+};
+
+/** "LR-0019 · Complete blood count · Haemoglobin"; the parameter is left out when it repeats the label ("LR-0019 · Troponin I"). */
+const criticalDetail = (p: Record<string, unknown>): string | null => {
+  const number = str(p.requestNumber);
+  const test = str(p.test);
+  if (!number || !test) return null;
+  const label = labelOf(test);
+  const param = str(p.parameter);
+  return [number, label, ...(param && param !== label ? [param] : [])].join(' · ');
+};
+
+/** Exported for the demo seed, so seeded clocks carry the same detail the live ones do. */
+export const LAB_CLOCKS: ClockDef[] = [
   {
     key: 'lab-collect',
     agent: 'lab',
@@ -47,6 +72,7 @@ const CLOCKS: ClockDef[] = [
     ladder: 'lab',
     dueFrom: date('collectBy'),
     refFrom: byRequest,
+    detailFrom: requestDetail,
   },
   {
     key: 'lab-recollect',
@@ -58,6 +84,7 @@ const CLOCKS: ClockDef[] = [
     ladder: 'lab',
     dueFrom: date('recollectBy'),
     refFrom: byRequest,
+    detailFrom: requestDetail,
   },
   {
     key: 'lab-tat',
@@ -72,6 +99,7 @@ const CLOCKS: ClockDef[] = [
     dueFrom: date('tatDueAt'),
     refFrom: byRequest,
     updateOn: ['lab.resulted', 'lab.cancelled'],
+    detailFrom: requestDetail,
   },
   {
     key: 'lab-critical',
@@ -82,6 +110,10 @@ const CLOCKS: ClockDef[] = [
     minutes: 15,
     ladder: 'lab-critical',
     refFrom: (_t, p) => str(p.lineId),
+    // One acknowledgement path: the result itself. Its escalation rides on the line's alert and closes with the acknowledgement.
+    resolveEscalationOnStop: true,
+    alertLink: (ref) => (ref ? `lab-line:${ref}` : null),
+    detailFrom: criticalDetail,
   },
 ];
 
@@ -115,7 +147,7 @@ export class LabCoordinatorRegistration implements OnModuleInit {
     return {
       key: 'lab',
       messageTypes: MESSAGE_TYPES,
-      clocks: CLOCKS,
+      clocks: LAB_CLOCKS,
       handles: [
         { type: 'er.arrived', handler: (id) => this.locate(id, () => ({ area: 'ER' })) },
         { type: 'bed.assigned', handler: (id) => this.locate(id, (p) => ({ area: 'Ward', ward: str(p.ward) ?? undefined })) },
