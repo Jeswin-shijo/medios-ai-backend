@@ -17,6 +17,26 @@ export function normalizeCardId(raw: string): string {
   return id;
 }
 
+/**
+ * Every form another reader may have typed for the same card. A desk USB reader
+ * types the UID as a decimal number (often zero-padded to 10 digits, in either
+ * byte order); an NFC tablet reads it as hex. Original first, no duplicates.
+ */
+export function cardIdCandidates(raw: string): string[] {
+  const id = normalizeCardId(raw);
+  const out = [id];
+  if (/^[0-9A-F]+$/.test(id) && id.length % 2 === 0 && id.length >= 8 && id.length <= 14) {
+    const bytes = id.match(/../g)!;
+    const reversed = [...bytes].reverse().join('');
+    out.push(reversed);
+    for (const hex of [id, reversed]) {
+      const dec = BigInt(`0x${hex}`).toString();
+      out.push(dec, dec.padStart(10, '0'));
+    }
+  }
+  return [...new Set(out)];
+}
+
 /** "…B2C3": enough to tell cards apart on screen. */
 export const cardHint = (cardId: string) => `…${cardId.slice(-4)}`;
 
@@ -67,13 +87,23 @@ export class PatientCardsService {
     return { id, removed: true };
   }
 
+  /** The card for a read in any reader's format: an exact match first, then the other forms. Null when unknown. */
+  async findByCard(raw: string): Promise<PatientCardDocument | null> {
+    const candidates = cardIdCandidates(raw);
+    const found = await this.cards.find({ cardId: { $in: candidates } }).exec();
+    const card = candidates.map((id) => found.find((c) => c.cardId === id)).find(Boolean);
+    if (!card) return null;
+    card.lastUsedAt = new Date();
+    return card.save();
+  }
+
   /**
    * A card tapped on a reader: today's token for its patient, issued or (if they
    * already hold one) returned. Unknown cards are refused with 404.
    */
   async tap(rawCardId: string, actor: string, source: 'front-desk' | 'kiosk') {
     const cardId = normalizeCardId(rawCardId);
-    const card = await this.cards.findOneAndUpdate({ cardId }, { $set: { lastUsedAt: new Date() } }, { new: true }).exec();
+    const card = await this.findByCard(cardId);
     if (!card) throw new NotFoundException('This card is not registered. Please go to the front desk.');
     const issued = await this.queue.issue({ uhid: card.uhid }, actor, source);
     return { ...issued, cardId };
