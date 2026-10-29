@@ -8,6 +8,8 @@ import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/
 import { HospitalSettings, HospitalSettingsDocument, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 import { BillInvoice, BillInvoiceDocument, BillInvoiceSchema } from '../modules/billing/schemas/bill.schema';
 import { Department, DepartmentDocument, DepartmentSchema } from '../modules/opd/schemas/department.schema';
+import { ReceptionSession, ReceptionSessionDocument, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
+import { OtpChallenge, OtpChallengeDocument, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
 import { OpDoctor, OpDoctorDocument, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -43,6 +45,8 @@ export function models() {
     BillInvoice: model(BillInvoice, BillInvoiceSchema) as Model<BillInvoiceDocument>,
     Department: model(Department, DepartmentSchema) as Model<DepartmentDocument>,
     OpDoctor: model(OpDoctor, OpDoctorSchema) as Model<OpDoctorDocument>,
+    ReceptionSession: model(ReceptionSession, ReceptionSessionSchema) as Model<ReceptionSessionDocument>,
+    OtpChallenge: model(OtpChallenge, OtpChallengeSchema) as Model<OtpChallengeDocument>,
   };
 }
 
