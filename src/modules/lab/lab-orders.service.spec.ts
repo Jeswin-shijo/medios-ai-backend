@@ -114,7 +114,7 @@ describe('LabOrdersService', () => {
     assert.equal(await m.LabRequest.countDocuments({}), 0);
   });
 
-  test('a repeat troponin is its own request due at the scheduled time', async () => {
+  test('a repeat troponin is its own request due at the scheduled time, with a real collection window', async () => {
     const before = Date.now();
     const out = await service.order(DOC, { patientId, tests: ['troponin'], priority: 'stat', repeatAfterHours: 3 });
     assert.equal(out.length, 2);
@@ -123,11 +123,13 @@ describe('LabOrdersService', () => {
     assert.equal(b.repeatOf, a.id);
     const sched = new Date(b.scheduledFor!).getTime();
     assert.ok(Math.abs(sched - (before + 3 * 3_600_000)) < 5_000);
-    assert.equal(b.collectBy, b.scheduledFor);
+    // STAT: collect within 15 minutes of the scheduled time; the turnaround still counts from the schedule.
+    assert.equal(new Date(b.collectBy).getTime(), sched + 15 * MIN);
+    assert.equal(new Date(b.samples[0].collectBy).getTime(), sched + 15 * MIN);
     assert.ok(Math.abs(new Date(b.lines[0].tatDueAt).getTime() - (sched + 60 * MIN)) < 1);
     const ordered = await sent('lab.ordered');
     assert.equal(ordered.length, 2, 'the repeat is sent at once');
-    assert.equal(new Date(ordered[1].payload.collectBy).getTime(), sched);
+    assert.equal(new Date(ordered[1].payload.collectBy).getTime(), sched + 15 * MIN);
     assert.equal(new Date(ordered[1].payload.tatDueAt).getTime(), sched + 60 * MIN);
   });
 

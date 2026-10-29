@@ -14,6 +14,8 @@ import { LabSample, LabSampleDocument } from './schemas/lab-sample.schema';
 
 const MIN_MS = 60_000;
 const SUMMARY_MAX = 140;
+/** A repeat may be drawn this many minutes before its scheduled time, no earlier. */
+export const REPEAT_EARLY_MINUTES = 15;
 const CLOSED_LINE = ['released', 'cancelled'];
 const CASE_PRIORITY: Record<Priority, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
 const PRIORITY_RANK: Record<Priority, number> = { stat: 0, urgent: 1, routine: 2 };
@@ -36,6 +38,10 @@ export interface CollectionItem {
   location: { area: LabArea; ward?: string };
   collectBy: string;
   overdue: boolean;
+  /** A repeat's scheduled time (real, ISO); null for an order due now. */
+  scheduledFor: string | null;
+  /** The earliest a repeat may be drawn: 15 minutes before its scheduled time. Null for an order due now. */
+  notBefore: string | null;
 }
 
 export interface WorklistSample {
@@ -87,6 +93,9 @@ export interface Worklist {
 
 const WORKLIST_MAX = 200;
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+const pad2 = (n: number) => String(n).padStart(2, '0');
+/** "14:30": the time of day, which the clinic clock shares with the real one. */
+const hhmm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 const cut = (s: string) => s.slice(0, SUMMARY_MAX);
 
 /** The bench: collecting, receiving and rejecting samples. */
@@ -107,6 +116,11 @@ export class LabBenchService {
     if (!sample) throw new NotFoundException('Sample not found');
     const notWaiting = () => new ConflictException("This sample isn't waiting to be collected.");
     if (sample.status !== 'waiting') throw notWaiting();
+    // A repeat drawn too early spoils the series it is timed for.
+    const parent = await this.requests.findById(sample.request).select('scheduledFor').lean<{ scheduledFor?: Date }>().exec();
+    if (parent?.scheduledFor && new Date(parent.scheduledFor).getTime() > Date.now() + REPEAT_EARLY_MINUTES * MIN_MS) {
+      throw new ConflictException(`This repeat is due at ${hhmm(new Date(parent.scheduledFor))}.`);
+    }
     const claimed = await this.samples
       .findOneAndUpdate({ _id: sample._id, status: 'waiting' }, { $set: { status: 'collected', collected: { by: actor.name, at: clinicNow() }, collectedRealAt: new Date() } }, { new: true })
       .exec();
@@ -253,6 +267,8 @@ export class LabBenchService {
         location,
         collectBy: s.collectBy.toISOString(),
         overdue: s.collectBy.getTime() < now,
+        scheduledFor: r.scheduledFor ? r.scheduledFor.toISOString() : null,
+        notBefore: r.scheduledFor ? new Date(r.scheduledFor.getTime() - REPEAT_EARLY_MINUTES * MIN_MS).toISOString() : null,
       });
     }
     return out.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.collectBy.localeCompare(b.collectBy));

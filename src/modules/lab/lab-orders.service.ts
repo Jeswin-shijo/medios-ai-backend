@@ -193,7 +193,8 @@ export class LabOrdersService {
     scheduledFor?: Date;
     repeatOf?: Types.ObjectId;
   }): Promise<LabRequestDocument> {
-    const collectBy = a.scheduledFor ?? new Date(a.at.getTime() + COLLECT_MINUTES[a.priority] * MIN_MS);
+    // A repeat gets the same window as any order, counted from its scheduled time.
+    const collectBy = new Date(a.at.getTime() + COLLECT_MINUTES[a.priority] * MIN_MS);
     const request = await this.requests.create({
       number: await this.nextRequestNumber(),
       patient: a.patient._id,

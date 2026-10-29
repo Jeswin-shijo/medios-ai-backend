@@ -219,6 +219,55 @@ describe('LabBenchService', () => {
     assert.deepEqual((await bench.collectionList()).map((i) => i.requestNumber), ['LR-0001']);
   });
 
+  /** Moves a request's real times (schedule, collect-by, due times, its running clocks) by `ms`, as if it had been ordered that much earlier. */
+  const shift = async (requestId: string, ms: number) => {
+    const id = new Types.ObjectId(requestId);
+    const r: any = await m.LabRequest.findById(id).lean();
+    const move = (d?: Date) => (d ? new Date(new Date(d).getTime() + ms) : d);
+    await m.LabRequest.collection.updateOne({ _id: id }, { $set: { scheduledFor: move(r.scheduledFor), collectBy: move(r.collectBy) } });
+    for (const s of (await m.LabSample.find({ request: id }).lean()) as any[]) await m.LabSample.collection.updateOne({ _id: s._id }, { $set: { collectBy: move(s.collectBy) } });
+    for (const l of (await m.LabLine.find({ request: id }).lean()) as any[]) await m.LabLine.collection.updateOne({ _id: l._id }, { $set: { tatDueAt: move(l.tatDueAt) } });
+    for (const c of (await m.Clock.find({ ref: requestId }).lean()) as any[]) await m.Clock.collection.updateOne({ _id: c._id }, { $set: { dueAt: move(c.dueAt) } });
+  };
+  const repeat = async (hours: number) => (await orders.order(DOC, { patientId, tests: ['troponin'], priority: 'stat', repeatAfterHours: hours }))[1];
+
+  test("a repeat can't be collected 2 hours early; 10 minutes early is fine", async () => {
+    const r = await repeat(2);
+    const due = new Date(r.scheduledFor!);
+    const hhmm = `${String(due.getHours()).padStart(2, '0')}:${String(due.getMinutes()).padStart(2, '0')}`;
+    await assert.rejects(() => bench.collect(NURSE, r.samples[0].number), { status: 409, message: `This repeat is due at ${hhmm}.` });
+    assert.equal(((await m.LabSample.findById(r.samples[0].id).lean()) as any).status, 'waiting');
+    assert.equal((await sent('lab.collected')).length, 0);
+    await shift(r.id, -(2 * 60 - 10) * MIN); // now due in 10 minutes
+    await bench.collect(NURSE, r.samples[0].number);
+    assert.equal(((await m.LabSample.findById(r.samples[0].id).lean()) as any).status, 'collected');
+  });
+
+  test("a STAT repeat drawn 5 minutes after its scheduled time doesn't escalate", async () => {
+    const r = await repeat(1);
+    await shift(r.id, -65 * MIN); // scheduled 5 minutes ago
+    const [clock] = (await m.Clock.find({ def: 'lab-collect', ref: r.id }).lean()) as any[];
+    assert.ok(Math.abs(clock.dueAt.getTime() - (Date.now() + 10 * MIN)) < 5_000, 'collect-by is the schedule plus 15 minutes');
+    await bench.collect(NURSE, r.samples[0].number);
+    assert.equal(((await m.Clock.findById(clock._id).lean()) as any).state, 'met');
+    await clocks.checkDue(new Date(Date.now() + 60 * MIN));
+    // (The first request, ordered for now and never drawn, escalates; the repeat does not.)
+    assert.equal(await m.Escalation.countDocuments({ 'source.id': String(clock._id) }), 0);
+  });
+
+  test('the collection list carries a repeat\'s scheduled time and the earliest it may be drawn', async () => {
+    const out = await orders.order(DOC, { patientId, tests: ['crp'], priority: 'routine', repeatAfterHours: 6 });
+    const list = await bench.collectionList();
+    const now = list.find((i) => i.requestId === out[0].id)!;
+    assert.equal(now.scheduledFor, null);
+    assert.equal(now.notBefore, null);
+    const later = list.find((i) => i.requestId === out[1].id)!;
+    assert.equal(later.scheduledFor, out[1].scheduledFor);
+    assert.equal(new Date(later.notBefore!).getTime(), new Date(out[1].scheduledFor!).getTime() - 15 * MIN);
+    assert.equal(new Date(later.collectBy).getTime(), new Date(out[1].scheduledFor!).getTime() + 240 * MIN);
+    assert.equal(later.overdue, false);
+  });
+
   test('two concurrent collects of the last two samples send one lab.collection-done and stop lab-collect', async () => {
     const r = await order(['cbc', 'rft']);
     assert.equal(r.samples.length, 2);
