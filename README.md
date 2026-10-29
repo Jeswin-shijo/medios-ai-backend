@@ -110,6 +110,8 @@ The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 npm run seed
 ```
 
+The seed reads `MONGODB_URI` from `.env` (or the environment), prints the database it is wiping, and refuses to run when no URI is set.
+
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
 - Logins, all with password **`Admin@123`**: **`doctor@medios.ai`** (doctor), **`admin@medios.ai`** (admin, can create accounts), **`nurse@`**, **`frontdesk@`** (staff), **`pharmacy@`** (pharmacist) and **`lab@medios.ai`** (lab). Change these before any real use.
 - 12 patients; **Arun Kumar** (`UHID: MHK202500321`) has the full chart: 8 consultations, prescription, medications, 8 lab reports, 6 imaging studies, 7 invoices, vitals history, timeline and documents
