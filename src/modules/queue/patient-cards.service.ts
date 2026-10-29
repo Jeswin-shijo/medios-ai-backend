@@ -61,8 +61,12 @@ export class PatientCardsService {
     const patient = await this.patients.findOne({ uhid: uhid.trim() }).exec();
     if (!patient) throw new NotFoundException(`${uhid} is not a registered patient`);
 
-    const existing = await this.cards.findOne({ cardId }).exec();
-    if (existing?.uhid === patient.uhid) return existing;
+    // The same card may have been linked in another reader's format.
+    const candidates = cardIdCandidates(cardId);
+    const found = await this.cards.find({ cardId: { $in: candidates } }).exec();
+    const sameOwner = found.find((c) => c.uhid === patient.uhid);
+    if (sameOwner) return sameOwner;
+    const existing = candidates.map((id) => found.find((c) => c.cardId === id)).find(Boolean);
     if (existing && !reassign) {
       const owner = await this.patients.findOne({ uhid: existing.uhid }).exec();
       throw new ConflictException(`Card ${cardHint(cardId)} is already linked to ${owner?.name ?? existing.uhid} (${existing.uhid}).`);

@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { describe, test, before, beforeEach, after } from 'node:test';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PatientCardsService, cardIdCandidates } from './patient-cards.service';
 
@@ -42,5 +42,30 @@ describe('card lookup across reader formats', () => {
   test('an unknown well-formed id gives null; a malformed one throws', async () => {
     assert.equal(await service.findByCard('ZZZZ9999'), null);
     await assert.rejects(() => service.findByCard('ab'), BadRequestException);
+  });
+
+  describe('link across formats', () => {
+    beforeEach(async () => {
+      for (const uhid of ['U1', 'U2']) await m().Patient.create({ uhid, name: `Patient ${uhid}`, phone: '9876543210', gender: 'Male', age: 30 } as any);
+      await m().PatientCard.create({ cardId: '0077705923', uhid: 'U1', linkedBy: 't' });
+    });
+
+    test('a hex link to another patient is refused', async () => {
+      await assert.rejects(() => service.link('04A1B2C3', 'U2', 'tester'), ConflictException);
+      assert.equal(await m().PatientCard.countDocuments(), 1);
+    });
+
+    test('with reassign the one record moves to the new patient', async () => {
+      await service.link('04A1B2C3', 'U2', 'tester', true);
+      const all = await m().PatientCard.find();
+      assert.equal(all.length, 1);
+      assert.equal(all[0].uhid, 'U2');
+    });
+
+    test('the same patient in another format gets the existing record', async () => {
+      const card = await service.link('04A1B2C3', 'U1', 'tester');
+      assert.equal(card.cardId, '0077705923');
+      assert.equal(await m().PatientCard.countDocuments(), 1);
+    });
   });
 });
