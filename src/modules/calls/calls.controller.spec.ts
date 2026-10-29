@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { CallsController } from './calls.controller';
 import { UserRole } from '../users/schemas/user.schema';
+import { ROLES_KEY } from '../../common/decorators/roles.decorator';
 
 const TOOLS_SECRET = 'tools-secret-0123456789abcdef';
 const WEBHOOK_SECRET = 'webhook-secret-0123456789abcdef';
@@ -109,6 +110,13 @@ describe('CallsController: one call', () => {
     for (const role of [UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF, UserRole.PHARMACIST, UserRole.LAB]) {
       await ctrl.findOne('call-1', role);
       assert.deepEqual(seen.findOne, ['call-1', false], role);
+    }
+  });
+
+  test('the call log and transcripts are for admin, doctor, nurse and front desk only', () => {
+    const staff = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
+    for (const route of ['list', 'findOne'] as const) {
+      assert.deepEqual(Reflect.getMetadata(ROLES_KEY, CallsController.prototype[route]), staff, route);
     }
   });
 });

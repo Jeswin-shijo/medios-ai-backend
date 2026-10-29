@@ -57,6 +57,9 @@ const sameSecret = (presented: string, expected: string) => {
   return !!expected && timingSafeEqual(digest(presented), digest(expected));
 };
 
+/** Who may read the call log and transcripts: calls hold patients' own words, which pharmacy and lab don't need. */
+const CALL_LOG_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE, UserRole.STAFF];
+
 @ApiTags('AI Call Agent')
 @ApiBearerAuth()
 @Controller('calls')
@@ -68,6 +71,7 @@ export class CallsController {
   ) {}
 
   @Get()
+  @Roles(...CALL_LOG_ROLES)
   @ApiOperation({ summary: 'Call log, newest first (transcripts omitted)' })
   list(@Query() query: ListCallsQueryDto) {
     return this.calls.list(query);
@@ -202,6 +206,7 @@ export class CallsController {
   }
 
   @Get(':id')
+  @Roles(...CALL_LOG_ROLES)
   @ApiOperation({ summary: "One call with its transcript (the provider's raw payload for admins only)" })
   findOne(@Param('id') id: string, @CurrentUser('role') role: string) {
     return this.calls.findOne(id, role === UserRole.ADMIN);
