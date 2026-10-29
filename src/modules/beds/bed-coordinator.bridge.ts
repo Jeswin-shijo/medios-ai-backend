@@ -157,8 +157,9 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
       openedBy: 'bed',
     });
     const caseId = String(c._id);
-    const first = !c.refs?.bedRequestIds?.includes(r.id);
     await this.cases.addRefs(caseId, { bedRequestId: r.id });
+    // Decided by the log, not the refs: a send that failed after addRefs is still sent on a replay.
+    const first = !(await this.messages.findOne('bed.request', { requestId: r.id }));
     const priority: Priority = r.priority;
 
     if (first) {
@@ -186,7 +187,10 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
         await this.approvals.markDone(source, 'Bed Agent');
         break;
       }
-      case 'waiting':
+      case 'waiting': {
+        // Each retry pass re-announces the wait; log it once per wait.
+        const last = await this.messages.findLatest('bed.', { requestId: r.id });
+        if (last?.type === 'bed.waiting') break;
         await this.messages.send({
           case: caseId,
           from: 'bed',
@@ -197,6 +201,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
           payload: { requestId: r.id },
         });
         break;
+      }
       case 'attention':
         await this.messages.send({
           case: caseId,

@@ -148,7 +148,13 @@ describe('BedCoordinatorBridge', () => {
 
   const noNames = async () => {
     const rows = await all();
-    for (const n of names) assert.ok(!JSON.stringify(rows).includes(n), `a message leaked the name ${n}`);
+    const everything = JSON.stringify([
+      rows,
+      await m.Approval.find().lean(),
+      await m.Escalation.find().lean(),
+      await TaskAlertItem.find({ link: { $not: /^bed-request:/ } }).lean(),
+    ]);
+    for (const n of names) assert.ok(!everything.includes(n), `a message, approval, escalation or alert leaked the name ${n}`);
   };
 
   test('a new bed request opens a case and sends bed.request', async () => {
@@ -240,6 +246,43 @@ describe('BedCoordinatorBridge', () => {
     const c: any = await m.Case.findOne().lean();
     assert.equal(c.refs.admissionId, String(req.admission));
     await noNames();
+  });
+
+  test('a retry that waits again logs one bed.waiting; a wait after attention logs a new one', async () => {
+    const p = await patient();
+    await fillGeneralMen();
+    const id = await ask({ patientId: p.id });
+    await agent.process(id);
+    await bridge.idle();
+    const again = (state: 'waiting' | 'attention') =>
+      events.requestChanged({ id, state, type: 'admission', patientName: '', reason: '' });
+    const ageAll = () => m.AgentMessage.collection.updateMany({}, { $set: { createdAt: new Date(Date.now() - 5 * MIN) } });
+    assert.equal((await all('bed.waiting')).length, 1);
+
+    await ageAll();
+    again('waiting');
+    await bridge.idle();
+    assert.equal((await all('bed.waiting')).length, 1);
+
+    again('attention');
+    await bridge.idle();
+    await ageAll();
+    again('waiting');
+    await bridge.idle();
+    assert.equal((await all('bed.waiting')).length, 2);
+  });
+
+  test('a replayed event sends bed.request when an earlier send was lost, and only once', async () => {
+    const p = await patient();
+    const id = await ask({ patientId: p.id });
+    await bridge.idle();
+    await m.AgentMessage.deleteMany({ type: 'bed.request' }); // the send was lost; the refs stayed
+    events.requestChanged({ id, state: 'searching', type: 'admission', patientName: '', reason: '' });
+    await bridge.idle();
+    assert.equal((await all('bed.request')).length, 1);
+    events.requestChanged({ id, state: 'searching', type: 'admission', patientName: '', reason: '' });
+    await bridge.idle();
+    assert.equal((await all('bed.request')).length, 1);
   });
 
   test('a request waiting 60 minutes escalates through the bed-wait ladder', async () => {

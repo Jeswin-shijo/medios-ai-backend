@@ -307,6 +307,14 @@ export class MessagesService {
     return m ? toView(m) : null;
   }
 
+  /** The newest message whose type starts with `typePrefix` and whose payload holds the given values. */
+  async findLatest(typePrefix: string, payload: Record<string, string | number | boolean>): Promise<MessageView | null> {
+    const match: Record<string, unknown> = { type: { $regex: `^${typePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` } };
+    for (const [k, v] of Object.entries(payload)) match[`payload.${k}`] = v;
+    const m = await this.model.findOne(match).sort({ createdAt: -1, _id: -1 }).lean().exec();
+    return m ? toView(m) : null;
+  }
+
   countSince(since: Date): Promise<number> {
     return this.model.countDocuments({ createdAt: { $gte: since } }).exec();
   }
