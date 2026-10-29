@@ -3,6 +3,7 @@ import { describe, test, before, beforeEach, after } from 'node:test';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { OpdService } from './opd.service';
+import { UpdateDepartmentDto, UpdateDoctorDto } from './dto/opd.dto';
 import { SettingsService } from '../settings/settings.service';
 
 const session = (start: string, end: string, days = [6]) => ({ days, start, end });
@@ -121,6 +122,32 @@ describe('OpdService', () => {
     await assert.rejects(opd.updateDepartment('nope', { name: 'x' }), /Department not found/);
     await assert.rejects(opd.updateDepartment('000000000000000000000000', { name: 'x' }), /Department not found/);
     await assert.rejects(opd.updateDoctor('nope', { fee: 1 }), /Doctor not found/);
+  });
+
+  test('a partial doctor update changes only the fields sent', async () => {
+    const d = await opd.createDoctor(doctor());
+    const dto = Object.assign(new UpdateDoctorDto(), { active: false, room: undefined, fee: undefined });
+    const updated = await opd.updateDoctor(String(d._id), dto);
+    assert.equal(updated.active, false);
+    assert.equal(updated.room, 'Room 101');
+    assert.equal(updated.fee, 300);
+  });
+
+  test('a doctor whose room was removed from the queue can still be deactivated', async () => {
+    const d = await opd.createDoctor(doctor());
+    await settingsService.updateSettings({ queue: { counters: ['Room 102'] } } as any);
+    const updated = await opd.updateDoctor(String(d._id), { active: false });
+    assert.equal(updated.active, false);
+    await assert.rejects(opd.updateDoctor(String(d._id), { active: true }), BadRequestException);
+  });
+
+  test('a partial department update changes only the fields sent', async () => {
+    const dept = await m().Department.findOne({ code: 'paediatrics' });
+    const dto = Object.assign(new UpdateDepartmentDto(), { active: false, name: undefined, color: undefined });
+    const updated = await opd.updateDepartment(String(dept!._id), dto);
+    assert.equal(updated.active, false);
+    assert.equal(updated.name, 'Paediatrics');
+    assert.equal(updated.color, '#E07B1D');
   });
 
   test('getDoctor answers 404 for a missing or malformed id', async () => {

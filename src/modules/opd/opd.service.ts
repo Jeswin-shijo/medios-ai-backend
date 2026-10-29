@@ -30,6 +30,11 @@ function assertSessions(sessions: SessionInput[]) {
   }
 }
 
+/** The fields actually sent: a DTO instance carries explicit `undefined` for every field left out. */
+function defined<T extends object>(dto: T): Partial<T> {
+  return Object.fromEntries(Object.entries(dto).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 @Injectable()
 export class OpdService {
   constructor(
@@ -55,7 +60,7 @@ export class OpdService {
   }
 
   async updateDepartment(id: string, dto: Partial<DepartmentInput>): Promise<DepartmentDocument> {
-    const { code: _code, ...changes } = dto; // the code never changes: doctors point at it
+    const { code: _code, ...changes } = defined(dto); // the code never changes: doctors point at it
     const updated = await this.departments
       .findByIdAndUpdate(id, changes, { new: true, runValidators: true })
       .exec()
@@ -89,10 +94,12 @@ export class OpdService {
   }
 
   async updateDoctor(id: string, dto: Partial<DoctorInput>): Promise<OpDoctorDocument> {
+    const changes = defined(dto);
     const doctor = await this.getDoctor(id);
-    const merged = { ...doctor.toObject(), ...dto };
-    await this.validateDoctor(merged, id);
-    doctor.set(dto);
+    const merged = { ...doctor.toObject(), ...changes };
+    // A doctor being switched off needs no valid room or department (the room may have been removed).
+    await this.validateDoctor(merged, id, changes.active === false);
+    doctor.set(changes);
     return doctor.save().catch((e) => this.rethrowPrefixClash(e, merged.tokenPrefix));
   }
 
@@ -132,7 +139,8 @@ export class OpdService {
     throw error;
   }
 
-  private async validateDoctor(doctor: { departmentCode: string; room: string; tokenPrefix: string; sessions?: SessionInput[]; active?: boolean }, selfId?: string) {
+  private async validateDoctor(doctor: { departmentCode: string; room: string; tokenPrefix: string; sessions?: SessionInput[]; active?: boolean }, selfId?: string, deactivating = false) {
+    if (deactivating) return;
     const rooms = resolveQueueSettings((await this.settings.getSettings()).queue).counters;
     if (!rooms.includes(doctor.room)) {
       throw new BadRequestException(`Room "${doctor.room}" is not one of the queue rooms (${rooms.join(', ')})`);
