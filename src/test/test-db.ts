@@ -25,6 +25,10 @@ import { ErExpected, ErExpectedDocument, ErExpectedSchema } from '../modules/er/
 import { ErSnapshot, ErSnapshotDocument, ErSnapshotSchema } from '../modules/er/schemas/er-snapshot.schema';
 import { VitalsRecord, VitalsRecordDocument, VitalsRecordSchema } from '../modules/vitals/schemas/vitals.schema';
 import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
+import { LabRequest, LabRequestDocument, LabRequestSchema } from '../modules/lab/schemas/lab-request.schema';
+import { LabLine, LabLineDocument, LabLineSchema } from '../modules/lab/schemas/lab-line.schema';
+import { LabSample, LabSampleDocument, LabSampleSchema } from '../modules/lab/schemas/lab-sample.schema';
+import { LabLocation, LabLocationDocument, LabLocationSchema } from '../modules/lab/schemas/lab-location.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -75,6 +79,10 @@ export function models() {
     ErBay: model(ErBay, ErBaySchema) as Model<ErBayDocument>,
     ErExpected: model(ErExpected, ErExpectedSchema) as Model<ErExpectedDocument>,
     PatientCard: model(PatientCard, PatientCardSchema) as Model<PatientCardDocument>,
+    LabRequest: model(LabRequest, LabRequestSchema) as Model<LabRequestDocument>,
+    LabLine: model(LabLine, LabLineSchema) as Model<LabLineDocument>,
+    LabSample: model(LabSample, LabSampleSchema) as Model<LabSampleDocument>,
+    LabLocation: model(LabLocation, LabLocationSchema) as Model<LabLocationDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };

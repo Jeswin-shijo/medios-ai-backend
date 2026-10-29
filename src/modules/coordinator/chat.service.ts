@@ -231,7 +231,7 @@ export class ChatService {
     };
 
     const agentNames = c.agents.map((k) => `${AGENTS.find((a) => a.key === k)?.name ?? k} Agent`);
-    let template = `The case for the patient is ${c.state} (${c.kind === 'ipd' ? 'IPD' : 'ER'}, ${c.priority} priority).`;
+    let template = `The case for the patient is ${c.state} (${c.kind === 'ipd' ? 'IPD' : c.kind === 'opd' ? 'OPD' : 'ER'}, ${c.priority} priority).`;
     if (agentNames.length) template += ` ${agentNames.join(', ')} ${agentNames.length === 1 ? 'is' : 'are'} involved.`;
     if (running.length) template += ` ${joinMax(running.map((r) => `${r.label} has ${r.minutesLeft} min left`), 3, '; ')}.`;
     if (last) {

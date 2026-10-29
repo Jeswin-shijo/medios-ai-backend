@@ -221,14 +221,14 @@ export class CasesService {
     }
   }
 
-  /** A line on the patient's own timeline: Emergency for an er case, Admission for ipd. */
+  /** A line on the patient's own timeline: Emergency for an er case, Outpatient for opd, Admission for ipd. */
   async milestone(c: Pick<Case, 'patientUhid' | 'kind'>, title: string, subtitle: string): Promise<void> {
     const now = clinicNow();
     await this.timelineService.create({
       uhid: c.patientUhid,
       date: displayDate(now),
       time: displayTime(now),
-      category: c.kind === 'ipd' ? 'Admission' : 'Emergency',
+      category: c.kind === 'ipd' ? 'Admission' : c.kind === 'opd' ? 'Outpatient' : 'Emergency',
       title,
       subtitle,
       status: 'Completed',
