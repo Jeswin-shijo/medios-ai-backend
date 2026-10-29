@@ -37,7 +37,7 @@ describe('CasesService', () => {
     checks = { a: false, b: false };
     registry.register({
       key: 'bed',
-      messageTypes: [],
+      messageTypes: [{ type: 'test.ping', agent: 'bed', description: 'test', payload: {} }],
       closeChecks: [
         { agent: 'bed', label: 'Bed released', check: async () => checks.a },
         { agent: 'bed', label: 'Bed cleaned', check: async () => checks.b },
@@ -120,11 +120,19 @@ describe('CasesService', () => {
     assert.equal((await service.list({ state: 'closed' })).length, 1);
   });
 
+  test('a case does not close at the instant it opens', async () => {
+    checks.a = true;
+    checks.b = true;
+    const { case: c } = await service.openOrJoin(input());
+    assert.equal((await service.get(String(c._id)))!.state, 'open');
+    assert.equal(await AgentMessage.countDocuments({ type: 'case.closed' }), 0);
+  });
+
   test('a stored message with a case triggers the close check', async () => {
     const { case: c } = await service.openOrJoin(input());
     checks.a = true;
     checks.b = true;
-    await messages.send({ case: String(c._id), from: 'bed', to: ['coordinator'], type: 'case.opened', priority: 'low', summary: 'poke', dedupeKey: 'poke' });
+    await messages.send({ case: String(c._id), from: 'bed', to: ['coordinator'], type: 'test.ping', priority: 'low', summary: 'poke', dedupeKey: 'poke' });
     assert.equal((await service.get(String(c._id)))!.state, 'closed');
   });
 
@@ -134,7 +142,7 @@ describe('CasesService', () => {
     checks.a = true;
     checks.b = true;
     await service.evaluateClose(String(c._id));
-    const rows = await TimelineEvent.find({ uhid: 'MHK202600009' }).sort({ createdAt: 1 }).lean();
+    const rows = await TimelineEvent.find({ uhid: 'MHK202600009' }).sort({ createdAt: 1, _id: 1 }).lean();
     assert.equal(rows.length, 2);
     assert.equal(rows[0].category, 'Emergency');
     assert.equal(rows[0].status, 'Completed');

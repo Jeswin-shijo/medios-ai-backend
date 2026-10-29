@@ -17,7 +17,7 @@ export class Case {
   @Prop({ required: true }) patientUhid: string;
   @Prop({ required: true }) patientName: string;
   @Prop({ required: true, type: String, enum: CASE_KINDS }) kind: CaseKind;
-  @Prop({ required: true, type: String }) priority: Priority;
+  @Prop({ required: true, type: String, enum: ['critical', 'high', 'medium', 'low'] }) priority: Priority;
   @Prop({ type: String, default: 'open', enum: CASE_STATES }) state: CaseState;
   @Prop({ required: true, type: Date }) openedAt: Date;
   @Prop({ type: Date }) closedAt?: Date;

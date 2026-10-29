@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { clinicNow, displayDate, displayTime } from '../../common/utils/clinic-time';
@@ -30,6 +30,8 @@ const isOpen = { state: 'open' } as const;
 /** A case is one patient's journey through the agents; at most one is open per patient. */
 @Injectable()
 export class CasesService {
+  private readonly logger = new Logger(CasesService.name);
+
   constructor(
     @InjectModel(Case.name) private readonly model: Model<CaseDocument>,
     @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>,
@@ -39,10 +41,14 @@ export class CasesService {
   ) {
     // Any message on a case may be the last thing the close checks were waiting for.
     this.messages.onStored(async (m) => {
-      if (m.case) await this.evaluateClose(String(m.case));
+      if (!m.case) return;
+      // The Coordinator's own open/close messages must not close a case (never at the instant it opens).
+      if (m.from === 'coordinator' && (m.type === 'case.opened' || m.type === 'case.closed')) return;
+      await this.evaluateClose(String(m.case));
     });
   }
 
+  /** Takes the next case number. A create that then loses the 11000 race skips its number; that is fine. */
   private async nextNumber(): Promise<string> {
     const counter = await this.counters
       .findOneAndUpdate({ key: 'case' }, { $inc: { last: 1 } }, { upsert: true, new: true })
@@ -89,7 +95,7 @@ export class CasesService {
       summary: `${created.number} opened for ${created.patientUhid}`,
       payload: {},
     });
-    await this.milestone(created, `Case ${created.number} opened`, `Opened by the ${input.openedBy} agent`);
+    await this.safeMilestone(created, `Case ${created.number} opened`, `Opened by the ${input.openedBy} agent`);
     return { case: created, opened: true };
   }
 
@@ -139,7 +145,7 @@ export class CasesService {
       summary: `${closed.number} closed: ${closedReason}`.slice(0, 140),
       payload: {},
     });
-    await this.milestone(closed, `Case ${closed.number} closed`, closedReason);
+    await this.safeMilestone(closed, `Case ${closed.number} closed`, closedReason);
     return true;
   }
 
@@ -183,6 +189,15 @@ export class CasesService {
 
   timeline(caseId: string): Promise<MessageView[]> {
     return this.messages.forCase(caseId);
+  }
+
+  /** A failed timeline write is logged; it must not undo the open or close. */
+  private async safeMilestone(c: Pick<Case, 'patientUhid' | 'kind'>, title: string, subtitle: string): Promise<void> {
+    try {
+      await this.milestone(c, title, subtitle);
+    } catch (e) {
+      this.logger.error(`Timeline milestone failed: ${(e as Error).message}`);
+    }
   }
 
   /** A line on the patient's own timeline: Emergency for an er case, Admission for ipd. */
