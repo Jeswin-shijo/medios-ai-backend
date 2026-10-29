@@ -27,6 +27,8 @@ export class LabLine {
   @Prop({ type: Date }) enteredAt?: Date;
   @Prop({ type: Object }) validatedBy?: { id: string; name: string };
   @Prop({ type: Date }) releasedAt?: Date;
+  /** Real time of the latest release (every version); the on-time figures compare real times only. */
+  @Prop({ type: Date }) releasedRealAt?: Date;
   @Prop({ default: 0 }) version: number;
   @Prop({ type: [Object], default: [] }) history: {
     version: number;

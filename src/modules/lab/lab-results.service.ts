@@ -9,6 +9,7 @@ import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-rep
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { LabTestDef, effectiveLimits, flagValue, testByKey } from './lab-catalogue';
 import { LabOrdersService } from './lab-orders.service';
+import { LabSettingsService } from './lab-settings.service';
 import { LabLine, LabLineDocument, LabResultRow } from './schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
 
@@ -31,6 +32,7 @@ export class LabResultsService {
     @InjectModel(TaskAlertItem.name) private readonly alerts: Model<TaskAlertDocument>,
     private readonly orders: LabOrdersService,
     private readonly messages: MessagesService,
+    private readonly labSettings: LabSettingsService,
   ) {}
 
   // ---------- entering ----------
@@ -39,7 +41,7 @@ export class LabResultsService {
     const line = await this.lineById(lineId);
     const wait = () => new ConflictException("This test isn't waiting for results.");
     if (line.status !== 'received') throw wait();
-    const rows = this.flag(line.test, values);
+    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits);
     const done = await this.lines
       .findOneAndUpdate(
         { _id: line._id, status: 'received' },
@@ -94,7 +96,7 @@ export class LabResultsService {
       .findOneAndUpdate(
         { _id: line._id, status: 'awaiting-validation', version: line.version ?? 0, 'enteredBy.id': line.enteredBy?.id },
         {
-          $set: { status: 'released', version, validatedBy, releasedAt, critical },
+          $set: { status: 'released', version, validatedBy, releasedAt, releasedRealAt: new Date(), critical },
           $push: { history: entry },
           $unset: { pendingAmendReason: '', sentBack: '' },
         },
@@ -179,7 +181,7 @@ export class LabResultsService {
     const line = await this.lineById(lineId);
     const cannot = () => new ConflictException('Only a released result can be amended.');
     if (line.status !== 'released') throw cannot();
-    const rows = this.flag(line.test, values);
+    const rows = this.flag(line.test, values, (await this.labSettings.overrides()).criticalLimits);
     const done = await this.lines
       .findOneAndUpdate(
         { _id: line._id, status: 'released', version: line.version },
@@ -198,7 +200,7 @@ export class LabResultsService {
   }
 
   /** Every catalogue parameter, nothing else; flagged with the fixed rules. */
-  private flag(test: string, values: Record<string, number | string>): LabResultRow[] {
+  private flag(test: string, values: Record<string, number | string>, criticalLimits?: Parameters<typeof effectiveLimits>[0]): LabResultRow[] {
     const def = testByKey(test);
     if (!def) throw new BadRequestException(`Unknown test "${test}"`);
     if (!values || typeof values !== 'object' || Array.isArray(values)) throw new BadRequestException('Results are required');
@@ -207,7 +209,7 @@ export class LabResultsService {
     if (unknown.length) throw new BadRequestException(`Unknown parameter: ${unknown.join(', ')}`);
     const missing = names.filter((n) => values[n] === undefined || values[n] === null || values[n] === '');
     if (missing.length) throw new BadRequestException(`Missing result: ${missing.join(', ')}`);
-    const limits = effectiveLimits();
+    const limits = effectiveLimits(criticalLimits);
     return def.params.map((p) => {
       const raw = values[p.name];
       const value = p.text && typeof raw === 'string' ? raw.trim() : raw;

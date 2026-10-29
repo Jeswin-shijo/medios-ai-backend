@@ -40,6 +40,14 @@ export class HospitalSettings {
   /** ER: minutes from arrival per pathway step, by `<pathway>.<step>` key (see er/er-rules.ts); missing keys use the defaults. */
   @Prop({ type: Object, default: {} })
   er: { targets?: Record<string, number> };
+
+  /** Lab: turnaround targets per test (minutes), critical limits per `<test>.<parameter>`, and who changed the limits (last 50). */
+  @Prop({ type: Object, default: {} })
+  lab: {
+    targets?: Record<string, { stat?: number; routine?: number }>;
+    criticalLimits?: Record<string, { low?: number | null; high?: number | null }>;
+    limitsHistory?: { by: string; at: Date; changes: { key: string; from: unknown; to: unknown }[] }[];
+  };
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

@@ -17,6 +17,8 @@ export class LabSample {
   /** Real time. */
   @Prop({ required: true, type: Date }) collectBy: Date;
   @Prop({ type: { by: String, at: Date }, _id: false }) collected?: { by: string; at: Date };
+  /** Real time of the collection: the on-time figures compare real times only. */
+  @Prop({ type: Date }) collectedRealAt?: Date;
   @Prop({ type: { by: String, at: Date }, _id: false }) received?: { by: string; at: Date };
   @Prop({ type: { by: String, reason: String, note: String, at: Date }, _id: false }) rejected?: { by: string; reason: string; note: string; at: Date };
   @Prop({ type: MongooseSchema.Types.ObjectId }) replaces?: Types.ObjectId;

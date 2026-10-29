@@ -72,6 +72,7 @@ const DEFAULT_SETTINGS = {
   queue: DEFAULT_QUEUE_SETTINGS,
   coordinator: { rules: {} as Record<string, boolean> },
   er: { targets: {} as Record<string, number> },
+  lab: {} as Record<string, unknown>,
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];
@@ -120,6 +121,15 @@ export class SettingsService {
       const stored = settings.get('er')?.targets ?? {};
       if (erPatch.targets !== undefined && !isDeepStrictEqual(erPatch.targets, stored)) {
         throw new ForbiddenException('Only an admin can change pathway targets.');
+      }
+    }
+    const labPatch = (updates as any)?.lab;
+    if (by?.role !== UserRole.ADMIN && labPatch && typeof labPatch === 'object') {
+      const stored = settings.get('lab') ?? {};
+      for (const key of ['targets', 'criticalLimits', 'limitsHistory']) {
+        if (labPatch[key] !== undefined && !isDeepStrictEqual(labPatch[key], stored[key] ?? (key === 'limitsHistory' ? [] : {}))) {
+          throw new ForbiddenException('Only an admin can change lab targets and critical limits.');
+        }
       }
     }
     for (const section of SECTIONS) {

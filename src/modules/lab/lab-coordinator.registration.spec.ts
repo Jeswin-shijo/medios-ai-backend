@@ -10,6 +10,8 @@ import { PatientsService } from '../patients/patients.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { LabCoordinatorRegistration } from './lab-coordinator.registration';
 import { LabOrdersService } from './lab-orders.service';
+import { LabSettingsService } from './lab-settings.service';
+import { SettingsService } from '../settings/settings.service';
 
 describe('LabCoordinatorRegistration', () => {
   const m = models();
@@ -27,7 +29,7 @@ describe('LabCoordinatorRegistration', () => {
     registry = new AgentRegistry();
     const messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    const orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages);
+    const orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
   });
 

@@ -15,6 +15,8 @@ import { UserRole } from '../users/schemas/user.schema';
 import { LabBenchService } from './lab-bench.service';
 import { LabCoordinatorRegistration } from './lab-coordinator.registration';
 import { LabOrdersService } from './lab-orders.service';
+import { LabSettingsService } from './lab-settings.service';
+import { SettingsService } from '../settings/settings.service';
 
 const DOC: Actor = { id: 'user-doc', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
@@ -54,7 +56,7 @@ describe('LabBenchService', () => {
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages);
+    orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });

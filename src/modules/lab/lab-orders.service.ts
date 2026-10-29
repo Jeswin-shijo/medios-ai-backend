@@ -10,6 +10,7 @@ import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/s
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { COLLECT_MINUTES, LAB_TESTS, Priority, TUBE_LABEL, groupIntoTubes, targetMinutes, testByKey } from './lab-catalogue';
+import { LabSettingsService } from './lab-settings.service';
 import { LAB_PRIORITIES, LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
 import { LabLine, LabLineDocument, LabLineStatus } from './schemas/lab-line.schema';
 import { LabSample, LabSampleDocument } from './schemas/lab-sample.schema';
@@ -113,6 +114,7 @@ export class LabOrdersService {
     private readonly patients: PatientsService,
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
+    private readonly labSettings: LabSettingsService,
   ) {}
 
   // ---------- ordering ----------
@@ -177,12 +179,13 @@ export class LabOrdersService {
       scheduledFor: a.scheduledFor,
     });
     const lineByTest = new Map<string, Types.ObjectId>();
+    const { targets } = await this.labSettings.overrides();
     for (const test of a.tests) {
       const line = await this.lines.create({
         request: request._id,
         test,
         status: 'ordered',
-        tatDueAt: new Date(a.at.getTime() + targetMinutes(test, a.priority) * MIN_MS),
+        tatDueAt: new Date(a.at.getTime() + targetMinutes(test, a.priority, targets) * MIN_MS),
       });
       lineByTest.set(test, line._id as Types.ObjectId);
     }

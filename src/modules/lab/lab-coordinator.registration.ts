@@ -85,6 +85,17 @@ const CLOCKS: ClockDef[] = [
   },
 ];
 
+/**
+ * The share of lines released since `since` (real time) that met their due. Null when none were released.
+ * Both the agent status and the overview use it; it compares real stamps only.
+ */
+export async function labOnTimePct(lines: Model<LabLineDocument>, since: Date): Promise<number | null> {
+  const done = await lines.find({ releasedRealAt: { $gte: since } }).select('tatDueAt releasedRealAt').lean<{ tatDueAt: Date; releasedRealAt: Date }[]>().exec();
+  if (!done.length) return null;
+  const onTime = done.filter((l) => new Date(l.releasedRealAt).getTime() <= new Date(l.tatDueAt).getTime()).length;
+  return Math.round((onTime / done.length) * 100);
+}
+
 /** Tells the Coordinator what the Lab agent sends, and the clocks and rule it brings. */
 @Injectable()
 export class LabCoordinatorRegistration implements OnModuleInit {
@@ -124,7 +135,11 @@ export class LabCoordinatorRegistration implements OnModuleInit {
           locked: true,
         },
       ],
-      status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
+      status: async () => ({
+        open: await this.lines.countDocuments({ status: { $nin: ['released', 'cancelled'] } }).exec(),
+        capacity: 0,
+        onTimePct: await labOnTimePct(this.lines, new Date(Date.now() - 24 * 3_600_000)),
+      }),
     };
   }
 

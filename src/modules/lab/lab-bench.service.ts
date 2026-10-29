@@ -60,7 +60,7 @@ export class LabBenchService {
     const notWaiting = () => new ConflictException("This sample isn't waiting to be collected.");
     if (sample.status !== 'waiting') throw notWaiting();
     const claimed = await this.samples
-      .findOneAndUpdate({ _id: sample._id, status: 'waiting' }, { $set: { status: 'collected', collected: { by: actor.name, at: clinicNow() } } }, { new: true })
+      .findOneAndUpdate({ _id: sample._id, status: 'waiting' }, { $set: { status: 'collected', collected: { by: actor.name, at: clinicNow() }, collectedRealAt: new Date() } }, { new: true })
       .exec();
     if (!claimed) throw notWaiting();
     await this.lines.updateMany({ _id: { $in: claimed.lines }, status: 'ordered' }, { $set: { status: 'collected' } }).exec();

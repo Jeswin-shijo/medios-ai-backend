@@ -11,6 +11,8 @@ import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { LabCoordinatorRegistration } from './lab-coordinator.registration';
 import { LabOrdersService, orderSummary } from './lab-orders.service';
+import { LabSettingsService } from './lab-settings.service';
+import { SettingsService } from '../settings/settings.service';
 
 const DOC: Actor = { id: 'user-doc', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 const OTHER_DOC: Actor = { id: 'user-doc-2', name: 'Dr. Priya', role: UserRole.DOCTOR };
@@ -41,7 +43,7 @@ describe('LabOrdersService', () => {
     registry = new AgentRegistry();
     messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    service = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages);
+    service = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)));
     registration = new LabCoordinatorRegistration(registry, service, messages, m.LabRequest, m.LabLine);
     registration.onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });
