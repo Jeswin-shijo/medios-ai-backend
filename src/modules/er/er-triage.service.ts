@@ -142,6 +142,13 @@ export class ErTriageService {
       vitalsId = String(record._id);
     }
 
+    // The readings stay on the visit even when no Vitals record could be saved.
+    const savedVitals = Object.fromEntries(
+      (['spo2', 'bpSystolic', 'bpDiastolic', 'heartRate', 'respiratoryRate', 'temperature'] as const)
+        .filter((k) => typeof vitals[k] === 'number' && Number.isFinite(vitals[k]))
+        .map((k) => [k, vitals[k]]),
+    );
+
     const at = clinicNow();
     const updated = await this.visits
       .findOneAndUpdate(
@@ -160,6 +167,7 @@ export class ErTriageService {
               history: [{ colour: input.colour, byName: actor.name, at, kind: 'triage', ...(reason ? { reason } : {}) }],
             },
             ...(vitalsId ? { vitalsId } : {}),
+            ...(Object.keys(savedVitals).length ? { vitals: savedVitals } : {}),
             ...(typeof input.painScore === 'number' ? { painScore: input.painScore } : {}),
           },
         },

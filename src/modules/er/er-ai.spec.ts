@@ -96,6 +96,17 @@ describe('ErAiService', () => {
     }
   });
 
+  test('the handover facts use the readings kept on the visit first, then the Vitals record', async () => {
+    const { visit } = await makeVisit();
+    await m.ErVisit.updateOne({ _id: visit._id }, { $set: { vitals: { spo2: 91, heartRate: 118 } } });
+    const ai = fakeAi();
+    await new ErAiService(ai as any, m.ErVisit, m.VitalsRecord).draftHandover(String(visit._id));
+    const v = (ai.tasks[0].input as any).facts.vitals;
+    assert.equal(v.spo2, 91);
+    assert.equal(v.heartRate, 118);
+    assert.equal(v.bpSystolic, 150);
+  });
+
   test("the AI's text is used when it is valid", async () => {
     const svc = new ErAiService(fakeAi('text', '  Heart rate and chest pain point to Orange.  ') as any, m.ErVisit, m.VitalsRecord);
     const res = await svc.explainTriage(explainInput);

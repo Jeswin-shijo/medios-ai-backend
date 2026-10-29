@@ -68,6 +68,6 @@ import { RulesService } from './rules.service';
     ChatService,
     CoordinatorScheduler,
   ],
-  exports: [AgentRegistry, MessagesService, CasesService, ApprovalsService, CoordinatorEvents],
+  exports: [AgentRegistry, MessagesService, CasesService, ApprovalsService, CoordinatorEvents, RulesService, MongooseModule],
 })
 export class CoordinatorModule {}

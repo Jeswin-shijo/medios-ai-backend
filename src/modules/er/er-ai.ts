@@ -128,6 +128,9 @@ export class ErAiService {
     if (!visit) throw new NotFoundException('ER visit not found');
     const record = visit.vitalsId && isValidObjectId(visit.vitalsId) ? await this.vitals.findById(visit.vitalsId).lean().exec() : null;
 
+    // The readings kept on the visit come first; the Vitals record fills only what is missing.
+    const reading: Record<string, unknown> = { ...(record ?? {}), ...(visit.vitals ?? {}) };
+
     const arrived = new Date(visit.arrivedAt).getTime();
     const minutes = (d: Date) => Math.max(0, Math.round((new Date(d).getTime() - arrived) / MIN_MS));
 
@@ -141,12 +144,12 @@ export class ErAiService {
       complaint: complaintLabel(visit.complaint),
       ...(visit.triage?.colour ? { colour: visit.triage.colour as TriageColour } : {}),
       vitals: {
-        ...(has(record?.spo2) ? { spo2: record!.spo2 } : {}),
-        ...(has(record?.bpSystolic) ? { bpSystolic: record!.bpSystolic } : {}),
-        ...(has(record?.bpDiastolic) ? { bpDiastolic: record!.bpDiastolic } : {}),
-        ...(has(record?.heartRate) ? { heartRate: record!.heartRate } : {}),
-        ...(has(record?.respiratoryRate) ? { respiratoryRate: record!.respiratoryRate } : {}),
-        ...(has(record?.temperature) ? { temperature: record!.temperature } : {}),
+        ...(has(reading.spo2) ? { spo2: reading.spo2 } : {}),
+        ...(has(reading.bpSystolic) ? { bpSystolic: reading.bpSystolic } : {}),
+        ...(has(reading.bpDiastolic) ? { bpDiastolic: reading.bpDiastolic } : {}),
+        ...(has(reading.heartRate) ? { heartRate: reading.heartRate } : {}),
+        ...(has(reading.respiratoryRate) ? { respiratoryRate: reading.respiratoryRate } : {}),
+        ...(has(reading.temperature) ? { temperature: reading.temperature } : {}),
       },
       ...(has(visit.painScore) ? { painScore: visit.painScore } : {}),
       pathways: running.map((key) => ({

@@ -63,6 +63,7 @@ export interface ErVisitView {
     history: { colour: string; byName: string; at: string; reason?: string; kind: 'triage' | 'retriage' }[];
   } | null;
   vitalsId: string | null;
+  vitals: { spo2?: number; bpSystolic?: number; bpDiastolic?: number; heartRate?: number; respiratoryRate?: number; temperature?: number } | null;
   painScore: number | null;
   bayId: string | null;
   bayName: string | null;
@@ -90,6 +91,10 @@ export interface ErExpectedView {
   state: 'waiting' | 'arrived' | 'expired';
 }
 
+const VITAL_KEYS = ['spo2', 'bpSystolic', 'bpDiastolic', 'heartRate', 'respiratoryRate', 'temperature'] as const;
+/** Named keys only: a Mongoose subdocument has other fields too. */
+const pickVitals = (v: any) => Object.fromEntries(VITAL_KEYS.filter((k) => typeof v[k] === 'number').map((k) => [k, v[k]]));
+
 const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
 
 export function toVisitView(v: any): ErVisitView {
@@ -110,6 +115,7 @@ export function toVisitView(v: any): ErVisitView {
         }
       : null,
     vitalsId: v.vitalsId ?? null,
+    vitals: v.vitals ? pickVitals(v.vitals) : null,
     painScore: v.painScore ?? null,
     bayId: v.bay ? String(v.bay) : null,
     bayName: v.bayName ?? null,
@@ -330,6 +336,12 @@ export class ErVisitsService {
     return toExpectedView(doc);
   }
 
+  /** Removes a card that is still waiting. An arrived or expired card is history and stays. */
+  async deleteExpected(id: string): Promise<void> {
+    const res = isValidObjectId(id) ? await this.expected.deleteOne({ _id: id, state: 'waiting' }).exec() : null;
+    if (!res?.deletedCount) throw new NotFoundException('Expected arrival not found');
+  }
+
   /** Both times are on the clinic clock: the scheduler passes `clinicNow()`. */
   async expireExpected(now: Date): Promise<number> {
     const res = await this.expected.updateMany({ state: 'waiting', expectedAt: { $lt: new Date(now.getTime() - 2 * HOUR_MS) } }, { state: 'expired' }).exec();
@@ -340,6 +352,19 @@ export class ErVisitsService {
     const visit = isValidObjectId(id) ? await this.visits.findById(id).lean().exec() : null;
     if (!visit) throw new NotFoundException('ER visit not found');
     return toVisitView(visit);
+  }
+
+  /** Saves the handover note the nurse edited. A left visit is closed to changes. */
+  async saveHandover(visitId: string, note: string): Promise<ErVisitView> {
+    const text = (note ?? '').trim();
+    if (text.length > 2000) throw new BadRequestException('The handover note can have at most 2000 characters');
+    const updated = isValidObjectId(visitId)
+      ? await this.visits.findOneAndUpdate({ _id: visitId, status: { $ne: 'left' } }, { $set: { handoverNote: text } }, { new: true }).exec()
+      : null;
+    if (updated) return toVisitView(updated);
+    const exists = isValidObjectId(visitId) && (await this.visits.exists({ _id: visitId }).exec());
+    if (exists) throw new ConflictException('This patient has left the ER.');
+    throw new NotFoundException('ER visit not found');
   }
 
   async board(): Promise<{ visits: ErVisitView[]; expected: ErExpectedView[] }> {

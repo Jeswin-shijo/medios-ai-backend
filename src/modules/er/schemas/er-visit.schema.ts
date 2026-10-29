@@ -36,6 +36,17 @@ export class ErTriage {
   @Prop({ type: [ErTriageEntry], default: [] }) history: ErTriageEntry[];
 }
 
+/** The vital signs entered at triage. Kept on the visit even when no Vitals record is saved. */
+@Schema({ _id: false })
+export class ErVitals {
+  @Prop() spo2?: number;
+  @Prop() bpSystolic?: number;
+  @Prop() bpDiastolic?: number;
+  @Prop() heartRate?: number;
+  @Prop() respiratoryRate?: number;
+  @Prop() temperature?: number;
+}
+
 @Schema({ _id: false })
 export class ErCancelled {
   @Prop({ required: true }) byName: string;
@@ -82,6 +93,7 @@ export class ErVisit {
   @Prop({ required: true }) arrivedAt: Date;
   @Prop({ type: ErTriage }) triage?: ErTriage;
   @Prop() vitalsId?: string;
+  @Prop({ type: ErVitals }) vitals?: ErVitals;
   @Prop() painScore?: number;
   @Prop({ type: MongooseSchema.Types.ObjectId }) bay?: Types.ObjectId;
   /** The bay's name, kept here so the visit shows it without a lookup. An occupied bay cannot be renamed. */

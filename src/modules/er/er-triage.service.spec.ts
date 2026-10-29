@@ -98,6 +98,18 @@ describe('ErTriageService', () => {
     assert.equal((await clockOf('er-triage', v.caseId)).state, 'met');
   });
 
+  test('the triage readings stay on the visit even when no Vitals record is saved', async () => {
+    const v = await arrive('other');
+    const out = await service.triage(NURSE, v.id, input({ complaint: 'other', colour: 'green', vitals: { spo2: 97, temperature: 37.2 } }));
+    assert.equal(out.vitalsId, null);
+    assert.deepEqual(out.vitals, { spo2: 97, temperature: 37.2 });
+    assert.equal(await m.VitalsRecord.countDocuments(), 0);
+    const full = await arrive('other');
+    const out2 = await service.triage(NURSE, full.id, input({ complaint: 'other', colour: 'green' }));
+    assert.equal(out2.vitals!.bpDiastolic, 80);
+    assert.ok(out2.vitalsId);
+  });
+
   test('a colour lower than suggested needs a reason', async () => {
     const v = await arrive('chest-pain-severe');
     await assert.rejects(service.triage(NURSE, v.id, input({ complaint: 'chest-pain-severe', colour: 'yellow' })), (e: any) => e.status === 400 && e.message === 'Give a reason for a lower colour than suggested.');
