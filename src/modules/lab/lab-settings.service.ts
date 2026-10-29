@@ -82,6 +82,7 @@ export class LabSettingsService {
       if (!isObj(value)) throw new BadRequestException(`"${key}" must have a low and a high`);
       const [test, ...rest] = key.split('.');
       const param = testByKey(test)?.params.find((p) => p.name === rest.join('.'));
+      if (has(CRITICAL_LIMITS[key], 'anyAbnormalText') || param?.text) throw new BadRequestException('Text results have no numeric limits.');
       patch[key] = {};
       for (const [side, v] of Object.entries(value)) {
         if (side !== 'low' && side !== 'high') throw new BadRequestException(`"${key}.${side}" must be low or high`);
@@ -105,7 +106,7 @@ export class LabSettingsService {
     }
     if (!changes.length) return this.getLimits();
     const history = [...((lab.limitsHistory ?? []) as LimitsHistoryEntry[]), { by: actor.name, at: new Date(), changes }].slice(-HISTORY_KEEP);
-    await this.settings.updateSettings({ lab: { criticalLimits: merged, limitsHistory: history } }, actor);
+    await this.settings.setLabLimits(merged, history);
     return this.getLimits();
   }
 }

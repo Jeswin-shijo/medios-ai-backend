@@ -25,3 +25,4 @@ export class LabSample {
 }
 
 export const LabSampleSchema = SchemaFactory.createForClass(LabSample);
+LabSampleSchema.index({ collectedRealAt: 1 });

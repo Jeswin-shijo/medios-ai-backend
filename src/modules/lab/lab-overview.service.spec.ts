@@ -264,4 +264,41 @@ describe('Lab close check, status, overview and settings', () => {
     const b = await order(['troponin'], 'stat');
     assert.ok(Math.abs(new Date(b.lines[0].tatDueAt).getTime() - (t1 + 45 * MIN)) < 5_000);
   });
+
+  test('an amendment keeps the first release time: today figures and turnaround do not change', async () => {
+    const r = await order(['crp'], 'routine');
+    await receive(r);
+    await release(r.lines[0].id, { CRP: 2 });
+    const yesterday = new Date(Date.now() - 26 * HOUR);
+    await backdate(r.lines[0].id, { releasedRealAt: yesterday });
+    const tat0 = (await overview.overview()).performance.avgTatMin;
+    assert.equal((await overview.overview()).cards.resultsCompleted.value, 0);
+    await results.amend(LAB, r.lines[0].id, { CRP: 3 }, 'typo');
+    await results.release(PATH, r.lines[0].id);
+    const l = (await m.LabLine.findById(r.lines[0].id).lean())!;
+    assert.equal(l.version, 2);
+    assert.equal(new Date(l.releasedRealAt!).getTime(), yesterday.getTime());
+    assert.ok(new Date(l.lastReleasedRealAt!).getTime() > Date.now() - MIN);
+    const o = await overview.overview();
+    assert.equal(o.cards.resultsCompleted.value, 0);
+    assert.equal(o.performance.avgTatMin, tat0);
+    assert.equal(await agentStatus().then((s) => s.onTimePct), null);
+  });
+
+  test('limitsHistory is server-only: a round-tripped settings object passes, a fake history is ignored', async () => {
+    const svc = new SettingsService(m.HospitalSettings);
+    await settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 6.5 } });
+    const whole = JSON.parse(JSON.stringify(await svc.getSettings()));
+    await svc.updateSettings(whole, { role: UserRole.DOCTOR }); // does not throw
+    await svc.updateSettings({ lab: { limitsHistory: [{ by: 'x', at: new Date(), changes: [] }] } } as any, { role: UserRole.ADMIN });
+    const { history } = await settings.getLimits();
+    assert.equal(history.length, 1);
+    assert.equal(history[0].by, 'Admin');
+  });
+
+  test('text parameters have no numeric limits; a one-sided parameter saves', async () => {
+    await assert.rejects(settings.saveLimits(ADMIN, { 'blood-culture.Result': { high: 1 } }), { status: 400, message: 'Text results have no numeric limits.' });
+    await settings.saveLimits(ADMIN, { 'cbc.Haemoglobin': { low: 6 } });
+    assert.deepEqual((await settings.getLimits()).limits['cbc.Haemoglobin'], { low: 6 });
+  });
 });

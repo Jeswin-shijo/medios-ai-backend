@@ -27,8 +27,10 @@ export class LabLine {
   @Prop({ type: Date }) enteredAt?: Date;
   @Prop({ type: Object }) validatedBy?: { id: string; name: string };
   @Prop({ type: Date }) releasedAt?: Date;
-  /** Real time of the latest release (every version); the on-time figures compare real times only. */
+  /** Real time of the FIRST release (version 1); every turnaround and on-time figure uses it, so an amendment never changes them. */
   @Prop({ type: Date }) releasedRealAt?: Date;
+  /** Real time of the latest release, amendments included. */
+  @Prop({ type: Date }) lastReleasedRealAt?: Date;
   @Prop({ default: 0 }) version: number;
   @Prop({ type: [Object], default: [] }) history: {
     version: number;
@@ -54,3 +56,4 @@ export class LabLine {
 }
 
 export const LabLineSchema = SchemaFactory.createForClass(LabLine);
+LabLineSchema.index({ releasedRealAt: 1 });

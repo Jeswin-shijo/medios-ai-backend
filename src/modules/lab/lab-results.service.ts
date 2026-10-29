@@ -96,7 +96,7 @@ export class LabResultsService {
       .findOneAndUpdate(
         { _id: line._id, status: 'awaiting-validation', version: line.version ?? 0, 'enteredBy.id': line.enteredBy?.id },
         {
-          $set: { status: 'released', version, validatedBy, releasedAt, releasedRealAt: new Date(), critical },
+          $set: { status: 'released', version, validatedBy, releasedAt, lastReleasedRealAt: new Date(), ...(version === 1 ? { releasedRealAt: new Date() } : {}), critical },
           $push: { history: entry },
           $unset: { pendingAmendReason: '', sentBack: '' },
         },

@@ -123,11 +123,16 @@ export class SettingsService {
         throw new ForbiddenException('Only an admin can change pathway targets.');
       }
     }
+    // The limits history is written only by LabSettingsService.saveLimits, never by a settings patch.
+    if ((updates as any)?.lab && typeof (updates as any).lab === 'object') {
+      const { limitsHistory: _ignored, ...rest } = (updates as any).lab;
+      updates = { ...updates, lab: rest } as Partial<HospitalSettings>;
+    }
     const labPatch = (updates as any)?.lab;
     if (by?.role !== UserRole.ADMIN && labPatch && typeof labPatch === 'object') {
       const stored = settings.get('lab') ?? {};
-      for (const key of ['targets', 'criticalLimits', 'limitsHistory']) {
-        if (labPatch[key] !== undefined && !isDeepStrictEqual(labPatch[key], stored[key] ?? (key === 'limitsHistory' ? [] : {}))) {
+      for (const key of ['targets', 'criticalLimits']) {
+        if (labPatch[key] !== undefined && !isDeepStrictEqual(labPatch[key], stored[key] ?? {})) {
           throw new ForbiddenException('Only an admin can change lab targets and critical limits.');
         }
       }
@@ -139,5 +144,12 @@ export class SettingsService {
       }
     }
     return settings.save();
+  }
+
+  /** Saves the critical limits with their history. Only LabSettingsService.saveLimits calls this. */
+  async setLabLimits(criticalLimits: NonNullable<HospitalSettings['lab']['criticalLimits']>, limitsHistory: NonNullable<HospitalSettings['lab']['limitsHistory']>): Promise<void> {
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    settings.set('lab', { ...(settings.get('lab') ?? {}), criticalLimits, limitsHistory });
+    await settings.save();
   }
 }
