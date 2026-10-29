@@ -236,6 +236,19 @@ describe('seedCoordinator', () => {
       const clock = (await m.Clock.find().lean().exec())[0];
       assert.equal(clock.dueAt.getTime() - clock.startedAt.getTime(), 60 * MINUTE);
       assert.ok(clock.dueAt.getTime() <= fake.getTime());
+      assert.ok(Math.abs(clock.dueAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000, 'clock expired 5 min before now');
+      assert.ok(Math.abs(clock.startedAt.getTime() - (fake.getTime() - 65 * MINUTE)) < 5000, 'clock started 65 min before now');
+      const esc = (await m.Escalation.find().lean().exec())[0];
+      assert.ok(Math.abs(esc.stepAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000, 'stepAt 5 min before now');
+      assert.ok(Math.abs(esc.raisedAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000);
+      const alert = (await m.TaskAlertItem.findById(esc.alert).lean().exec())!;
+      assert.ok(Math.abs((alert as any).createdAt.getTime() - (fake.getTime() - 5 * MINUTE)) < 5000);
+      const waitMsg = (await m.AgentMessage.find({ type: 'bed.waiting', case: esc.case }).lean().exec())[0];
+      assert.ok(Math.abs(waitMsg.createdAt.getTime() - (fake.getTime() - 65 * MINUTE)) < 5000, 'bed.waiting about 65 min before now');
+      const midnight = new Date(fake);
+      midnight.setHours(0, 0, 0, 0);
+      const snap = (await m.CoordinatorSnapshot.find().sort({ hour: -1 }).limit(1).lean().exec())[0];
+      assert.equal(snap.tasksToday, msgs.filter((x) => x.createdAt.getTime() >= midnight.getTime()).length, 'messages today match the stored log');
     });
   }
 

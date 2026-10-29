@@ -215,9 +215,13 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
   const docs: Record<string, unknown>[] = [];
   let waitMessageId: Types.ObjectId | undefined;
   let shift = 0;
+  // The waiting request's own history stays on the real clock (it is the live escalation demo), so it is never shifted.
+  const anchoredCase = plans.find((p) => p.reqs.some((r) => String(r._id) === waitingId))!.id;
+  const anchored = new Set<string>();
   const push = (caseId: Types.ObjectId, at: Date, m: Record<string, unknown>): Types.ObjectId => {
     const _id = new Types.ObjectId();
     const key = `${m.type}:${caseId}:${String((m.payload as any)?.requestId ?? docs.length)}`;
+    if (String(caseId) === String(anchoredCase)) anchored.add(String(_id));
     docs.push({
       _id,
       case: caseId,
@@ -299,10 +303,10 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
 
   // Real-clock times come from the clinic clock, so some may fall after now (a request's later steps, or +1s
   // offsets). Move the whole history back together by the overshoot: order and spacing stay as they were.
-  const latest = Math.max(...docs.map((d) => Math.max((d.createdAt as Date).getTime(), (d.resolvedAt as Date | undefined)?.getTime() ?? 0)));
+  const latest = Math.max(...docs.filter((d) => !anchored.has(String(d._id))).map((d) => Math.max((d.createdAt as Date).getTime(), (d.resolvedAt as Date | undefined)?.getTime() ?? 0)));
   shift = Math.max(0, latest - now);
   if (shift) {
-    for (const d of docs) {
+    for (const d of docs.filter((x) => !anchored.has(String(x._id)))) {
       d.createdAt = new Date((d.createdAt as Date).getTime() - shift);
       if (d.resolvedAt) d.resolvedAt = new Date((d.resolvedAt as Date).getTime() - shift);
     }
@@ -327,8 +331,8 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
         agents: ['bed'],
         refs: { bedRequestIds: p.reqs.map((r) => String(r._id)), ...(admissionId ? { admissionId: String(admissionId) } : {}) },
         openedBy: 'bed',
-        createdAt: new Date(real(first.requestedAt).getTime() - shift),
-        updatedAt: new Date(real(p.closedAt ?? first.requestedAt).getTime() - shift),
+        createdAt: new Date(real(first.requestedAt).getTime() - (p.id === anchoredCase ? 0 : shift)),
+        updatedAt: new Date(real(p.closedAt ?? first.requestedAt).getTime() - (p.id === anchoredCase ? 0 : shift)),
       };
     }),
   );
@@ -351,7 +355,7 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
 
   // The escalation: the waiting request's bed-wait clock ran out about five minutes ago.
   const waitingPlan = plans.find((p) => p.reqs.some((r) => String(r._id) === waitingId))!;
-  const expiredAt = new Date(now - 5 * MIN - shift);
+  const expiredAt = new Date(now - 5 * MIN);
   const clockId = new Types.ObjectId();
   const escalationId = new Types.ObjectId();
   const alertId = new Types.ObjectId();
@@ -363,11 +367,11 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
     def: 'bed-wait',
     case: waitingPlan.id,
     startedBy: waitMessageId,
-    startedAt: new Date(real(clinicAgo(65)).getTime() - shift),
+    startedAt: new Date(now - 65 * MIN),
     dueAt: expiredAt,
     state: 'expired',
     escalation: escalationId,
-    createdAt: new Date(real(clinicAgo(65)).getTime() - shift),
+    createdAt: new Date(now - 65 * MIN),
   });
   await alerts.create({
     _id: alertId,
