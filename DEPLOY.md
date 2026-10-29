@@ -33,7 +33,7 @@ The API cannot run on Vercel. It keeps live connections open for the Token Queue
 |---|---|
 | `MONGODB_URI` | The Atlas connection string from step 1 |
 | `CORS_ORIGIN` | The Vercel address from step 4, e.g. `https://medios.vercel.app`. Enter a placeholder for now and update it after step 4. |
-| `SNAPSERVE_*`, `CALL_WEBHOOK_SECRET` | Leave these empty for now. The call agent stays off (`CALL_PROVIDER=none`) until step 6. |
+| `SNAPSERVE_*`, `CALL_WEBHOOK_SECRET`, `CALL_TOOLS_SECRET`, `CALL_ALLOWED_NUMBERS` | Leave these empty for now. The call agent stays off (`CALL_PROVIDER=none`) until step 6. |
 
 **Existing web service.** If you created the service by hand, copy the build command, start command, health check path, region, plan and every setting from [`render.yaml`](render.yaml) into its **Settings** and **Environment** pages.
 
@@ -85,10 +85,13 @@ To fix it, put both under one domain you own:
    - `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID` and `SNAPSERVE_BOOKING_AGENT_ID`;
    - `CALL_WEBHOOK_SECRET`, which must be letters and digits only (generate one with `openssl rand -hex 24`);
    - `CALL_PROVIDER=snapserve`.
-2. In both SnapServe agents, set the post-call notify URL to
-   `https://<api-address>/api/calls/webhook/snapserve?token=<CALL_WEBHOOK_SECRET>`
+2. In both SnapServe agents, set the post-call notify URL to `https://<api-address>/api/calls/webhook/snapserve`, and send `CALL_WEBHOOK_SECRET` in an `X-MediOS-Webhook-Token` header. If SnapServe only takes a URL, use `https://<api-address>/api/calls/webhook/snapserve?token=<CALL_WEBHOOK_SECRET>` instead.
+3. Optional settings:
+   - **Calls to the hospital (inbound):** `SNAPSERVE_INBOUND_AGENT_ID` and `CALL_TOOLS_SECRET` (24+ characters, `openssl rand -hex 24`). The tools are on only while `CALL_PROVIDER=snapserve`.
+   - **Signed webhooks:** `SNAPSERVE_SIGNING_SECRET`, SnapServe's signing secret.
+   - **Testing real calls:** `CALL_ALLOWED_NUMBERS`, comma-separated. No other number is dialled. Remove it for go-live.
 
-The API refuses to start if `CALL_PROVIDER=snapserve` is set without these values. The error message names the missing one.
+The API refuses to start if `CALL_PROVIDER=snapserve` is set without the values in step 1. The error message names the missing one.
 
 ## 7. AI bed suggestions
 

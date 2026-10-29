@@ -37,7 +37,7 @@ services:
       # For real AI set "claude" and add ANTHROPIC_API_KEY in the Render dashboard (never here).
       - key: AI_PROVIDER
         value: sample
-      # AI call agent: starts off. Set to "snapserve" once the four values below are filled in.
+      # AI call agent: starts off. Set to "snapserve" once the first four values below are filled in.
       - key: CALL_PROVIDER
         value: none
       - key: SNAPSERVE_API_KEY
@@ -46,6 +46,18 @@ services:
         sync: false
       - key: SNAPSERVE_BOOKING_AGENT_ID
         sync: false
-      # 24+ characters, letters and digits only (it travels in the webhook URL): openssl rand -hex 24
+      # 24+ characters, letters and digits only (it may travel in the webhook URL): openssl rand -hex 24
       - key: CALL_WEBHOOK_SECRET
+        sync: false
+      # Optional, for calls to the hospital (inbound): the inbound agent's id, and 24+ characters
+      # that turn on its mid-call tools (openssl rand -hex 24).
+      - key: SNAPSERVE_INBOUND_AGENT_ID
+        sync: false
+      - key: CALL_TOOLS_SECRET
+        sync: false
+      # Optional: SnapServe's signing secret; post-call webhooks must then be signed.
+      - key: SNAPSERVE_SIGNING_SECRET
+        sync: false
+      # Optional, for testing real calls: comma-separated numbers; no other number is dialled.
+      - key: CALL_ALLOWED_NUMBERS
         sync: false
