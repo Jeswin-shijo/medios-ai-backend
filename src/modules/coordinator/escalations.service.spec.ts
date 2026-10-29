@@ -302,4 +302,15 @@ describe('EscalationsService', () => {
     const h = await service.holders('duty-administrator');
     assert.deepEqual(h.names, ['Dev Duty']);
   });
+
+  test('titles carry the names of their active holders only', async () => {
+    const off = await makeUser('Off Duty', UserRole.STAFF, { isActive: false });
+    await hold('duty-administrator', dutyAdmin.id, off.id);
+    const titles = await service.titles();
+    const t = titles.find((x) => x.key === 'duty-administrator')!;
+    assert.deepEqual(t.holders, [dutyAdmin.id, off.id]);
+    assert.deepEqual(t.holderNames, ['Dev Duty']);
+    const empty = titles.find((x) => x.holders.length === 0)!;
+    assert.deepEqual(empty.holderNames, []);
+  });
 });

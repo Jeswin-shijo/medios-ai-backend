@@ -47,6 +47,8 @@ export interface DutyTitleView {
   key: string;
   label: string;
   holders: string[];
+  /** Names of the active holders, in the order of `holders`. Inactive or unknown ids are left out. */
+  holderNames: string[];
 }
 export interface LadderView {
   key: string;
@@ -241,9 +243,22 @@ export class EscalationsService {
   async titles(): Promise<DutyTitleView[]> {
     const list = await this.titleModel.find().lean().exec();
     const order = new Map(DEFAULT_TITLES.map((t, i) => [t.key, i]));
+    const names = await this.activeNames(list.flatMap((t) => t.holders));
     return list
       .sort((a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99) || a.label.localeCompare(b.label))
-      .map((t) => ({ key: t.key, label: t.label, holders: t.holders.map(String) }));
+      .map((t) => ({
+        key: t.key,
+        label: t.label,
+        holders: t.holders.map(String),
+        holderNames: t.holders.map((h) => names.get(String(h))).filter((n): n is string => !!n),
+      }));
+  }
+
+  /** One query: id to name for the active users among these ids. */
+  private async activeNames(ids: unknown[]): Promise<Map<string, string>> {
+    if (!ids.length) return new Map();
+    const users = await this.userModel.find({ _id: { $in: ids }, isActive: { $ne: false } }).select('name').lean().exec();
+    return new Map(users.map((u) => [String(u._id), u.name]));
   }
 
   private requireAdmin(actor: Actor): void {
@@ -260,7 +275,8 @@ export class EscalationsService {
       throw new BadRequestException('Every holder must be an existing user.');
     }
     await this.titleModel.updateOne({ key }, { $set: { label, holders: holders.map((h) => new Types.ObjectId(h)) } }, { upsert: true }).exec();
-    return { key, label, holders };
+    const names = await this.activeNames(holders);
+    return { key, label, holders, holderNames: holders.map((h) => names.get(h)).filter((n): n is string => !!n) };
   }
 
   async ladders(): Promise<LadderView[]> {
