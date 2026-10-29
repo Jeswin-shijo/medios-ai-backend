@@ -326,6 +326,39 @@ describe('Lab close check, status, overview and settings', () => {
     assert.equal(w.toValidate[0].validatedBy, null);
   });
 
+  test('a worklist line awaiting validation says whether it is an amendment: the reason and the released values it replaces', async () => {
+    const r = await order(['crp', 'electrolytes'], 'routine');
+    await receive(r);
+    const crp = r.lines.find((l) => l.test === 'crp')!.id;
+    const lytes = r.lines.find((l) => l.test === 'electrolytes')!.id;
+    await release(crp, { CRP: 2 });
+    await results.amend(LAB, crp, { CRP: 9 }, 'Recheck on a fresh run');
+    await results.enterResults(LAB, lytes, { Sodium: 140, Potassium: 4.2 });
+    const w = await bench.worklist();
+    const amended = w.toValidate.find((l) => l.lineId === crp)!;
+    assert.deepEqual(amended.amendment, { reason: 'Recheck on a fresh run', previous: [{ param: 'CRP', value: 2, unit: 'mg/L', flag: 'normal' }] });
+    assert.equal(amended.results[0].value, 9);
+    assert.equal(w.toValidate.find((l) => l.lineId === lytes)!.amendment, null, 'a first entry is not an amendment');
+  });
+
+  test('an amended report keeps its original date and time and gains amendedAt', async () => {
+    const r = await order(['crp'], 'routine');
+    await receive(r);
+    await release(r.lines[0].id, { CRP: 2 });
+    // Make the first release's stamp recognisable.
+    await m.LabTestReport.collection.updateMany({}, { $set: { date: '25 Sep 2026', time: '09:00 AM' } });
+    let report: any = await m.LabTestReport.findOne().lean();
+    assert.equal(report.amendedAt, undefined);
+    await results.amend(LAB, r.lines[0].id, { CRP: 3 }, 'typo');
+    await results.release(PATH, r.lines[0].id);
+    report = await m.LabTestReport.findOne().lean();
+    assert.equal(report.date, '25 Sep 2026');
+    assert.equal(report.time, '09:00 AM');
+    assert.equal(report.amended, true);
+    assert.match(report.amendedAt, /^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} (AM|PM)$/);
+    assert.equal(report.groups[0].parameters[0].result, 3);
+  });
+
   test('a released line view carries real release stamps, who entered and validated, and the version', async () => {
     const r = await order(['crp'], 'routine');
     await receive(r);

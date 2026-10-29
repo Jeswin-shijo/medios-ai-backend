@@ -101,6 +101,10 @@ export class LabTestReport {
 
   @Prop()
   amended?: boolean;
+
+  /** Set by the Lab Agent on an amendment: when it was released ("26 Sep 2026, 02:30 PM", clinic clock). `date` and `time` stay the first release's. */
+  @Prop()
+  amendedAt?: string;
 }
 
 export const LabTestReportSchema = SchemaFactory.createForClass(LabTestReport);

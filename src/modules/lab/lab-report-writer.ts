@@ -1,5 +1,5 @@
 import { Types, Model } from 'mongoose';
-import { clinicNow, displayDate, displayTime } from '../../common/utils/clinic-time';
+import { clinicNow, displayDate, displayDateTime, displayTime } from '../../common/utils/clinic-time';
 import { LabReportDocument } from '../lab-reports/schemas/lab-report.schema';
 import { templateSummary } from './lab-ai';
 import { LabTestDef, rangeText } from './lab-catalogue';
@@ -9,8 +9,9 @@ import { LabRequestDocument } from './schemas/lab-request.schema';
 const STATUS_LABEL = { normal: 'Normal', low: 'Low', high: 'High', abnormal: 'Abnormal' } as const;
 
 /**
- * One LabTestReport per line: a later release or amendment updates it. A plain function over the two
- * models so both the results service and the reconcile pass can use it without a circular dependency.
+ * One LabTestReport per line: a later release or amendment updates it, keeping the report's original
+ * date and time and stamping `amendedAt` (clinic clock). A plain function over the two models so both the
+ * results service and the reconcile pass can use it without a circular dependency.
  */
 export async function writeLabReport(
   reports: Model<LabReportDocument>,
@@ -35,12 +36,11 @@ export async function writeLabReport(
     uhid: request.patientUhid,
     testName: def.label,
     category: def.category,
-    date: displayDate(now),
-    time: displayTime(now),
     status: line.results.some((r) => r.flag !== 'normal') ? 'Abnormal' : 'Completed',
     groups: [{ category: def.label, parameters }],
     labLine: String(line._id),
     amended: version > 1,
+    ...(version > 1 ? { amendedAt: displayDateTime(now) } : {}),
     aiSummary: {
       sample: false,
       ...templateSummary(
@@ -50,7 +50,7 @@ export async function writeLabReport(
   };
   let report = line.reportId ? await reports.findByIdAndUpdate(line.reportId, { $set: fields }, { new: true }).exec() : null;
   if (!report) {
-    report = await reports.create(fields);
+    report = await reports.create({ ...fields, date: displayDate(now), time: displayTime(now) });
     await lines.updateOne({ _id: line._id }, { $set: { reportId: report._id } }).exec();
   }
   return report._id as Types.ObjectId;

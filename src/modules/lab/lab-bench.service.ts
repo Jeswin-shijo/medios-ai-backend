@@ -78,6 +78,8 @@ export interface WorklistLine {
   lastReleasedRealAt: string | null;
   version: number;
   sentBack: { by: string; reason: string; at: string } | null;
+  /** Set while an amendment waits for validation: why, and the released values it would replace. Null for a first entry. */
+  amendment: { reason: string; previous: { param: string; value: string | number; unit: string; flag: string }[] } | null;
 }
 
 export interface Worklist {
@@ -94,6 +96,13 @@ export interface Worklist {
 const WORKLIST_MAX = 200;
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/** A pending amendment: its reason and the last released values (from history). Null otherwise. */
+function amendmentOf(l: LabLineDocument): WorklistLine['amendment'] {
+  const last = l.history?.[l.history.length - 1];
+  if (l.status !== 'awaiting-validation' || !l.pendingAmendReason || !last) return null;
+  return { reason: l.pendingAmendReason, previous: (last.results ?? []).map((r) => ({ param: r.param, value: r.value, unit: r.unit, flag: r.flag })) };
+}
 /** "14:30": the time of day, which the clinic clock shares with the real one. */
 const hhmm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 const cut = (s: string) => s.slice(0, SUMMARY_MAX);
@@ -345,6 +354,7 @@ export class LabBenchService {
         lastReleasedRealAt: iso(l.lastReleasedRealAt),
         version: l.version ?? 0,
         sentBack: l.sentBack ? { by: l.sentBack.by, reason: l.sentBack.reason, at: iso(l.sentBack.at)! } : null,
+        amendment: amendmentOf(l),
       };
     };
     const order = (a: WorklistLine, b: WorklistLine) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.tatDueAt.localeCompare(b.tatDueAt);
