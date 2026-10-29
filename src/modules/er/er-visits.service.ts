@@ -6,10 +6,11 @@ import type { Actor } from '../beds/actor';
 import { CasesService } from '../coordinator/cases.service';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { MessagesService } from '../coordinator/messages.service';
+import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { PatientsService } from '../patients/patients.service';
 import { PatientCardsService } from '../queue/patient-cards.service';
-import { BED_PRIORITY, COLOUR_RANK, COMPLAINTS, ComplaintKey, PathwayKey, StepKey, TriageColour } from './er-rules';
+import { BED_PRIORITY, COLOUR_RANK, COMPLAINTS, PATHWAYS, ComplaintKey, PathwayKey, StepKey, TriageColour } from './er-rules';
 import { ErBaysService } from './er-bays.service';
 import { ErExpected, ErExpectedDocument } from './schemas/er-expected.schema';
 import { ER_DISPOSITIONS, ER_MODES, ErDispositionKind, ErMode, ErStatus, ErVisit, ErVisitDocument, OPEN_ER_STATUSES } from './schemas/er-visit.schema';
@@ -77,6 +78,44 @@ export interface ErVisitView {
   handoverNote: string | null;
   caseId: string;
   createdAt: string;
+  /** Read from the visit's Patient. Never a phone or address. */
+  patientAge: number | null;
+  patientGender: string | null;
+  /** True while the Patient record is a placeholder; looked up, so it clears when staff fill the details in. */
+  detailsPending: boolean;
+  /** The case's er-* Coordinator clocks that still need action: running, or expired and not yet stopped. Empty once the visit has left. */
+  clocks: ErClockView[];
+  /** Any listed clock has expired, or is running past its due time. */
+  overdue: boolean;
+}
+
+export interface ErClockView {
+  key: string;
+  label: string;
+  state: 'running' | 'expired';
+  dueAt: string;
+}
+
+export interface ErVisitExtras {
+  patientAge: number | null;
+  patientGender: string | null;
+  detailsPending: boolean;
+  clocks: ErClockView[];
+  overdue: boolean;
+}
+
+const NO_EXTRAS: ErVisitExtras = { patientAge: null, patientGender: null, detailsPending: false, clocks: [], overdue: false };
+
+/** What the page shows for a Coordinator clock key. Mirrors the labels the ER agent registers. */
+export function clockLabel(key: string): string {
+  if (key === 'er-triage') return 'Triage';
+  if (key === 'er-doctor') return 'Doctor review';
+  const step = key.replace(/^er-step-/, '');
+  for (const p of Object.values(PATHWAYS)) {
+    const found = p.steps.find((x) => x.key === step);
+    if (found) return found.label;
+  }
+  return key;
 }
 
 export interface ErExpectedView {
@@ -97,7 +136,8 @@ const pickVitals = (v: any) => Object.fromEntries(VITAL_KEYS.filter((k) => typeo
 
 const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
 
-export function toVisitView(v: any): ErVisitView {
+/** The plain mapping; `extras` come from `ErVisitsService.toViews`, which looks up the patient and the clocks. */
+export function toVisitView(v: any, extras: ErVisitExtras = NO_EXTRAS): ErVisitView {
   return {
     id: String(v._id),
     number: v.number,
@@ -134,6 +174,7 @@ export function toVisitView(v: any): ErVisitView {
     handoverNote: v.handoverNote ?? null,
     caseId: String(v.case),
     createdAt: iso(v.createdAt)!,
+    ...extras,
   };
 }
 
@@ -170,7 +211,46 @@ export class ErVisitsService {
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
     private readonly bays: ErBaysService,
+    @InjectModel(Clock.name) private readonly clockModel: Model<ClockDocument>,
   ) {}
+
+  /**
+   * The views for some visits, with the patient's age, sex and details-pending flag and the live er clocks.
+   * Two queries in all (patients by id, clocks by case), however many visits there are.
+   */
+  async toViews(visits: any[]): Promise<ErVisitView[]> {
+    if (!visits.length) return [];
+    const open = visits.filter((v) => v.status !== 'left');
+    const [patients, clocks] = await Promise.all([
+      this.patientModel.find({ _id: { $in: visits.map((v) => v.patient) } }).select('age gender detailsPending').lean().exec(),
+      open.length
+        ? this.clockModel
+            .find({ case: { $in: open.map((v) => v.case) }, def: /^er-/, $or: [{ state: 'running' }, { state: 'expired', stoppedAt: { $exists: false } }] })
+            .sort({ dueAt: 1 })
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+    ]);
+    const byPatient = new Map(patients.map((p: any) => [String(p._id), p]));
+    const byCase = new Map<string, any[]>();
+    for (const c of clocks as any[]) byCase.set(String(c.case), [...(byCase.get(String(c.case)) ?? []), c]);
+    const now = Date.now();
+    return visits.map((v) => {
+      const p: any = byPatient.get(String(v.patient));
+      const mine = v.status === 'left' ? [] : (byCase.get(String(v.case)) ?? []);
+      return toVisitView(v, {
+        patientAge: typeof p?.age === 'number' ? p.age : null,
+        patientGender: p?.gender ?? null,
+        detailsPending: p?.detailsPending === true,
+        clocks: mine.map((c) => ({ key: c.def, label: clockLabel(c.def), state: c.state, dueAt: iso(c.dueAt)! })),
+        overdue: mine.some((c) => c.state === 'expired' || new Date(c.dueAt).getTime() < now),
+      });
+    });
+  }
+
+  private async toView(visit: any): Promise<ErVisitView> {
+    return (await this.toViews([visit]))[0];
+  }
 
   private async nextNumber(): Promise<string> {
     const c = await this.counters.findOneAndUpdate({ key: 'er' }, { $inc: { last: 1 } }, { upsert: true, new: true }).exec();
@@ -216,7 +296,7 @@ export class ErVisitsService {
     } else {
       patient = await this.resolve(input);
       const open = await this.openVisit(patient._id);
-      if (open) return toVisitView(await this.announce(open, input.expectedId));
+      if (open) return this.toView(await this.announce(open, input.expectedId));
       number = await this.nextNumber();
     }
 
@@ -247,11 +327,11 @@ export class ErVisitsService {
       if (err instanceof mongo.MongoServerError && err.code === DUPLICATE_KEY && 'patient' in (err.keyPattern ?? {})) {
         // The same patient arrived at the same moment: the other call made the visit.
         const open = await this.openVisit(patient._id);
-        if (open) return toVisitView(await this.announce(open, input.expectedId));
+        if (open) return this.toView(await this.announce(open, input.expectedId));
       }
       throw err;
     }
-    return toVisitView(await this.announce(visit, input.expectedId));
+    return this.toView(await this.announce(visit, input.expectedId));
   }
 
   /**
@@ -351,7 +431,7 @@ export class ErVisitsService {
   async get(id: string): Promise<ErVisitView> {
     const visit = isValidObjectId(id) ? await this.visits.findById(id).lean().exec() : null;
     if (!visit) throw new NotFoundException('ER visit not found');
-    return toVisitView(visit);
+    return this.toView(visit);
   }
 
   /** Saves the handover note the nurse edited. A left visit is closed to changes. */
@@ -361,7 +441,7 @@ export class ErVisitsService {
     const updated = isValidObjectId(visitId)
       ? await this.visits.findOneAndUpdate({ _id: visitId, status: { $ne: 'left' } }, { $set: { handoverNote: text } }, { new: true }).exec()
       : null;
-    if (updated) return toVisitView(updated);
+    if (updated) return this.toView(updated);
     const exists = isValidObjectId(visitId) && (await this.visits.exists({ _id: visitId }).exec());
     if (exists) throw new ConflictException('This patient has left the ER.');
     throw new NotFoundException('ER visit not found');
@@ -372,7 +452,7 @@ export class ErVisitsService {
       this.visits.find({ status: { $in: [...OPEN_ER_STATUSES] } }).lean().exec(),
       this.expected.find({ state: 'waiting' }).sort({ expectedAt: 1 }).lean().exec(),
     ]);
-    return { visits: visits.sort(boardOrder).map(toVisitView), expected: expected.map(toExpectedView) };
+    return { visits: await this.toViews(visits.sort(boardOrder)), expected: expected.map(toExpectedView) };
   }
 
   /**
@@ -398,7 +478,7 @@ export class ErVisitsService {
         throw new ConflictException('Triage this patient first.');
       }
       await this.sendDisposition(updated, kind);
-      return toVisitView(updated);
+      return this.toView(updated);
     }
 
     const updated = await this.leave(
@@ -412,11 +492,11 @@ export class ErVisitsService {
       const now = await this.visits.findById(visit._id).exec();
       if (now?.status === 'left' && !now.leftAnnouncedAt) {
         await this.announceLeft(now);
-        return toVisitView(now);
+        return this.toView(now);
       }
       throw new ConflictException('This patient has left the ER.');
     }
-    return toVisitView(updated);
+    return this.toView(updated);
   }
 
   /**

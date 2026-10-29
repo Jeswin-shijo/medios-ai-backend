@@ -55,10 +55,10 @@ describe('ErTriageService', () => {
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
-    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
     new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
     const settings = new SettingsService(m.HospitalSettings);
-    service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings));
+    service = new ErTriageService(m.ErVisit, new VitalsService(m.VitalsRecord, m.Patient), new RulesService(registry, settings, events), cases, messages, new ErTargetsService(settings), visits);
   });
 
   const arrive = async (complaint: any = 'chest-pain') => {
@@ -138,6 +138,37 @@ describe('ErTriageService', () => {
     assert.deepEqual(Object.keys(started.payload.stepDue), ['ecg']);
     assert.equal(new Date((await sent('er.triaged'))[0].payload.doctorDueAt).getTime(), base + 15 * MIN);
     assert.equal(new Date((await clockOf('er-doctor', v.caseId)).dueAt).getTime(), base + 15 * MIN);
+  });
+
+  test('the view lists the live er clocks with their due times, and a done step leaves the list', async () => {
+    const v = await arrive('chest-pain');
+    const out = await service.triage(NURSE, v.id, input());
+    const base = await created(v.id);
+    assert.deepEqual(
+      out.clocks.map((c) => [c.key, c.label, c.state, c.dueAt]).sort(),
+      [
+        ['er-doctor', 'Doctor review', 'running', new Date(base + 15 * MIN).toISOString()],
+        ['er-step-ecg', 'ECG done', 'running', new Date(base + 10 * MIN).toISOString()],
+      ],
+    );
+    assert.equal(out.overdue, false, 'only future running clocks');
+    const after = await service.tickStep(NURSE, v.id, 'ecg');
+    assert.deepEqual(after.clocks.map((c) => c.key), ['er-doctor']);
+  });
+
+  test('an expired clock makes the visit overdue until it is stopped', async () => {
+    const v = await arrive('chest-pain');
+    await service.triage(NURSE, v.id, input());
+    await backdate(v.id, 12);
+    await m.Clock.updateOne({ def: 'er-step-ecg', case: v.caseId }, { $set: { dueAt: new Date(Date.now() - 2 * MIN) } });
+    assert.equal(await clocks.checkDue(new Date()), 1);
+    const late = await visits.get(v.id);
+    assert.equal(late.overdue, true);
+    assert.equal(late.clocks.find((c) => c.key === 'er-step-ecg')!.state, 'expired');
+    // Done late: the clock stays expired but stopped, so it no longer needs action.
+    const done = await service.tickStep(NURSE, v.id, 'ecg');
+    assert.equal(done.clocks.some((c) => c.key === 'er-step-ecg'), false);
+    assert.equal(done.overdue, false);
   });
 
   test('re-triage to red after the target passed makes the doctor clock due at once', async () => {

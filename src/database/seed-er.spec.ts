@@ -190,7 +190,7 @@ describe('seedEr', () => {
   test('reannounce() finds nothing to resend after seeding', async () => {
     const sent: unknown[] = [];
     const stub = { send: async (x: unknown) => void sent.push(x) } as any;
-    const service = new ErVisitsService(m.ErVisit as any, m.ErExpected as any, m.CoordinatorCounter as any, m.Patient as any, null as any, null as any, null as any, stub, null as any);
+    const service = new ErVisitsService(m.ErVisit as any, m.ErExpected as any, m.CoordinatorCounter as any, m.Patient as any, null as any, null as any, null as any, stub, null as any, m.Clock as any);
     assert.deepEqual(await service.reannounce(), { arrived: 0, left: 0 });
     assert.equal(sent.length, 0);
     // Each visit has the messages its state implies.

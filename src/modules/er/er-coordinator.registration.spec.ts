@@ -104,7 +104,7 @@ describe('ErCoordinatorRegistration', () => {
     await bays.ensureDefaults();
     const patients = new PatientsService(m.Patient);
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
-    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    visits = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
     new ErCoordinatorRegistration(registry, visits, bays, messages, m.ErVisit, m.Clock).onModuleInit();
 
     const bedEvents = new BedEvents();

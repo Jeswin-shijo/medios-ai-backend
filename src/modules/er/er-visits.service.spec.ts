@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { Types } from 'mongoose';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { Actor } from '../beds/actor';
@@ -51,7 +52,7 @@ describe('ErVisitsService', () => {
     // A card lookup never issues a queue token, so the queue service is not needed here.
     const cards = new PatientCardsService(m.PatientCard, m.Patient, null as unknown as QueueService);
     const bays = new ErBaysService(m.ErBay, m.ErVisit);
-    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays);
+    service = new ErVisitsService(m.ErVisit, m.ErExpected, m.CoordinatorCounter, m.Patient, patients, cards, cases, messages, bays, m.Clock);
     new ErCoordinatorRegistration(registry, service, bays, messages, m.ErVisit, m.Clock).onModuleInit();
   });
 
@@ -225,5 +226,58 @@ describe('ErVisitsService', () => {
     // Announced now: a further arrival sends nothing.
     await service.arrive(NURSE, { uhid: p.uhid, mode: 'walk-in', complaint: 'chest-pain' });
     assert.equal((await sent('er.arrived')).length, 1);
+  });
+
+  test('the view carries age, sex and details-pending from the patient, and the pending tag clears', async () => {
+    const known = await patient();
+    await service.arrive(NURSE, { uhid: known.uhid, mode: 'walk-in', complaint: 'fever' });
+    const unknown = await service.arrive(NURSE, { emergency: { gender: 'Female', approxAge: 40, description: 'x' }, mode: 'ambulance', complaint: 'unresponsive' });
+    const byUhid = async () => Object.fromEntries((await service.board()).visits.map((v) => [v.patientUhid, v]));
+    let board = await byUhid();
+    assert.equal(board[known.uhid].patientAge, 52);
+    assert.equal(board[known.uhid].patientGender, 'Male');
+    assert.equal(board[known.uhid].detailsPending, false);
+    assert.equal(board[unknown.patientUhid].patientAge, 40);
+    assert.equal(board[unknown.patientUhid].patientGender, 'Female');
+    assert.equal(board[unknown.patientUhid].detailsPending, true);
+    assert.ok(!('phone' in board[known.uhid]) && !('address' in board[known.uhid]));
+    assert.equal((await service.get(unknown.id)).detailsPending, true);
+
+    await m.Patient.updateOne({ uhid: unknown.patientUhid }, { name: 'Meena S', detailsPending: false });
+    board = await byUhid();
+    assert.equal(board[unknown.patientUhid].detailsPending, false);
+  });
+
+  test('board() makes one patient query and one clock query however many visits there are', async () => {
+    for (let i = 0; i < 4; i++) await service.arrive(NURSE, { uhid: (await patient(`P${i}`)).uhid, mode: 'walk-in', complaint: 'fever' });
+    const count = async () => {
+      let patientFinds = 0;
+      let clockFinds = 0;
+      const pf = m.Patient.find;
+      const cf = m.Clock.find;
+      m.Patient.find = function (this: unknown, ...a: any[]) { patientFinds++; return (pf as any).apply(this, a); } as any;
+      m.Clock.find = function (this: unknown, ...a: any[]) { clockFinds++; return (cf as any).apply(this, a); } as any;
+      try {
+        assert.equal((await service.board()).visits.length >= 1, true);
+      } finally {
+        m.Patient.find = pf;
+        m.Clock.find = cf;
+      }
+      return [patientFinds, clockFinds];
+    };
+    assert.deepEqual(await count(), [1, 1]);
+    await service.arrive(NURSE, { uhid: (await patient('More')).uhid, mode: 'walk-in', complaint: 'fever' });
+    assert.deepEqual(await count(), [1, 1]);
+  });
+
+  test('a left visit has no clocks and is not overdue', async () => {
+    const p = await patient();
+    const v = await service.arrive(NURSE, { uhid: p.uhid, mode: 'walk-in', complaint: 'fever' });
+    await m.Clock.create({ def: 'er-triage', case: v.caseId, startedBy: new Types.ObjectId(), startedAt: new Date(Date.now() - 1000), dueAt: new Date(Date.now() - 500), state: 'expired' });
+    assert.equal((await service.get(v.id)).overdue, true);
+    const left = await service.dispose({ ...NURSE, role: UserRole.DOCTOR }, v.id, 'home');
+    assert.deepEqual(left.clocks, []);
+    assert.equal(left.overdue, false);
+    assert.deepEqual((await service.get(v.id)).clocks, []);
   });
 });

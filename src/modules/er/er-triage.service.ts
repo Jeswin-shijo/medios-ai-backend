@@ -22,7 +22,7 @@ import {
   suggestTriage,
 } from './er-rules';
 import { ErTargetsService } from './er-targets.service';
-import { ErVisitView, toVisitView } from './er-visits.service';
+import { ErVisitView, ErVisitsService } from './er-visits.service';
 import { ErVisit, ErVisitDocument } from './schemas/er-visit.schema';
 
 const MIN_MS = 60_000;
@@ -66,6 +66,7 @@ export class ErTriageService {
     private readonly cases: CasesService,
     private readonly messages: MessagesService,
     private readonly erTargets: ErTargetsService,
+    private readonly views: ErVisitsService,
   ) {}
 
   /** The suggestion only: nothing is saved. */
@@ -205,7 +206,7 @@ export class ErTriageService {
       const next = await this.beginPathway(current, key, 'rules', caseId, targets, doctorDueAt);
       if (next) current = next;
     }
-    return toVisitView(current);
+    return (await this.views.toViews([current]))[0];
   }
 
   private complaintLabel(key: string): string {
@@ -252,7 +253,7 @@ export class ErTriageService {
       // The same change twice in a minute (red, orange, red) is a new action, not a repeat.
       dedupeKey: `er.retriaged:${String(updated._id)}:${updated.triage!.history.length}`,
     });
-    return toVisitView(updated);
+    return (await this.views.toViews([updated]))[0];
   }
 
   async startPathway(actor: Actor, visitId: string, key: PathwayKey): Promise<ErVisitView> {
@@ -261,7 +262,7 @@ export class ErTriageService {
     if (runningKeys(visit).includes(key)) throw new ConflictException(`The ${PATHWAYS[key].label} pathway is already running.`);
     const updated = await this.beginPathway(visit, key, 'staff', String(visit.case), await this.targets(), undefined, actor.name);
     if (!updated) throw new ConflictException(`The ${PATHWAYS[key].label} pathway is already running.`);
-    return toVisitView(updated);
+    return (await this.views.toViews([updated]))[0];
   }
 
   /**
@@ -332,7 +333,7 @@ export class ErTriageService {
       payload: { visitId: String(updated._id), pathway: key, doctorDueAt: this.doctorDueAt(updated, colour, runningKeys(updated), await this.targets()) },
       dedupeKey: `er.pathway-cancelled:${String(updated._id)}:${updated.pathways.map((p) => p.key).lastIndexOf(key)}`,
     });
-    return toVisitView(updated);
+    return (await this.views.toViews([updated]))[0];
   }
 
   async tickStep(actor: Actor, visitId: string, step: StepKey): Promise<ErVisitView> {
@@ -341,7 +342,7 @@ export class ErTriageService {
     const inRunning = runningKeys(visit).some((p) => PATHWAYS[p].steps.some((s) => s.key === step));
     if (!inRunning) throw new ConflictException('That step is not in a running pathway.');
     const entry = (visit.steps ?? []).find((s) => s.key === step);
-    if (entry?.doneAt) return toVisitView(visit);
+    if (entry?.doneAt) return (await this.views.toViews([visit]))[0];
 
     const updated = await this.visits
       .findOneAndUpdate(
@@ -351,7 +352,7 @@ export class ErTriageService {
       )
       .exec();
     // Someone ticked it a moment ago: nothing more to say.
-    if (!updated) return toVisitView((await this.visits.findById(visit._id).exec()) ?? visit);
+    if (!updated) return (await this.views.toViews([(await this.visits.findById(visit._id).exec()) ?? visit]))[0];
     await this.messages.send({
       case: String(updated.case),
       from: 'er',
@@ -361,12 +362,12 @@ export class ErTriageService {
       summary: `${updated.number} ${this.colourOf(updated)}: ${stepLabel(step)}`,
       payload: { visitId: String(updated._id), step },
     });
-    return toVisitView(updated);
+    return (await this.views.toViews([updated]))[0];
   }
 
   async doctorSeen(actor: Actor, visitId: string): Promise<ErVisitView> {
     const visit = await this.loadTriaged(visitId);
-    if (visit.doctorSeenAt) return toVisitView(visit);
+    if (visit.doctorSeenAt) return (await this.views.toViews([visit]))[0];
     const now = clinicNow();
     const updated = await this.visits
       .findOneAndUpdate(
@@ -383,7 +384,7 @@ export class ErTriageService {
         { new: true, arrayFilters: [{ 'd.key': 'doctor', 'd.doneAt': { $exists: false } }] },
       )
       .exec();
-    if (!updated) return toVisitView((await this.visits.findById(visit._id).exec()) ?? visit);
+    if (!updated) return (await this.views.toViews([(await this.visits.findById(visit._id).exec()) ?? visit]))[0];
     await this.messages.send({
       case: String(updated.case),
       from: 'er',
@@ -393,6 +394,6 @@ export class ErTriageService {
       summary: `${updated.number} ${this.colourOf(updated)}: seen by a doctor`,
       payload: { visitId: String(updated._id) },
     });
-    return toVisitView(updated);
+    return (await this.views.toViews([updated]))[0];
   }
 }
