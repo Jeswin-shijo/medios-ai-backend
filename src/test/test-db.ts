@@ -29,6 +29,7 @@ import { LabRequest, LabRequestDocument, LabRequestSchema } from '../modules/lab
 import { LabLine, LabLineDocument, LabLineSchema } from '../modules/lab/schemas/lab-line.schema';
 import { LabSample, LabSampleDocument, LabSampleSchema } from '../modules/lab/schemas/lab-sample.schema';
 import { LabLocation, LabLocationDocument, LabLocationSchema } from '../modules/lab/schemas/lab-location.schema';
+import { LabTestReport, LabReportDocument, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -83,6 +84,7 @@ export function models() {
     LabLine: model(LabLine, LabLineSchema) as Model<LabLineDocument>,
     LabSample: model(LabSample, LabSampleSchema) as Model<LabSampleDocument>,
     LabLocation: model(LabLocation, LabLocationSchema) as Model<LabLocationDocument>,
+    LabTestReport: model(LabTestReport, LabTestReportSchema) as Model<LabReportDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };

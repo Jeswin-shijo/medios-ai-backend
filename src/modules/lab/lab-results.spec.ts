@@ -1,0 +1,316 @@
+import * as assert from 'node:assert/strict';
+import { after, before, beforeEach, describe, test } from 'node:test';
+import { Types } from 'mongoose';
+import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
+import { Actor } from '../beds/actor';
+import { AgentRegistry } from '../coordinator/agent-registry';
+import { CasesService } from '../coordinator/cases.service';
+import { ClocksService } from '../coordinator/clocks.service';
+import { CoordinatorEvents } from '../coordinator/coordinator-events';
+import { EscalationsService } from '../coordinator/escalations.service';
+import { MessagesService } from '../coordinator/messages.service';
+import { PatientsService } from '../patients/patients.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { UserRole } from '../users/schemas/user.schema';
+import { LabBenchService } from './lab-bench.service';
+import { LabResultsService } from './lab-results.service';
+import { LabCoordinatorRegistration } from './lab-coordinator.registration';
+import { LabOrdersService } from './lab-orders.service';
+
+const DOC: Actor = { id: 'user-doc', name: 'Dr. Shajin', role: UserRole.DOCTOR };
+const NURSE: Actor = { id: 'user-nurse', name: 'Nurse Anita', role: UserRole.NURSE };
+const LAB: Actor = { id: 'user-lab', name: 'Meera', role: UserRole.LAB };
+const PATH: Actor = { id: 'user-path', name: 'Dr. Meera Nair', role: UserRole.LAB };
+const ADMIN: Actor = { id: 'user-admin', name: 'Admin', role: UserRole.ADMIN };
+const MIN = 60_000;
+
+describe('LabResultsService', () => {
+  const m = models();
+  let messages: MessagesService;
+  let cases: CasesService;
+  let clocks: ClocksService;
+  let orders: LabOrdersService;
+  let bench: LabBenchService;
+  let results: LabResultsService;
+  let patientId: string;
+
+  const sent = (type: string) => m.AgentMessage.find({ type }).sort({ createdAt: 1, _id: 1 }).lean().exec() as Promise<any[]>;
+  const clockOf = (def: string, caseId: string) => m.Clock.find({ def, case: caseId }).sort({ createdAt: 1 }).lean().exec() as Promise<any[]>;
+  const escalationsOn = (ladder: string) => m.Escalation.countDocuments({ ladder }).exec();
+  const order = (tests: string[], priority: 'stat' | 'urgent' | 'routine' = 'stat') => orders.order(DOC, { patientId, tests, priority }).then((r) => r[0]);
+  /** Real-time backdating: timestamps are immutable, so the clock and request go via the collection. */
+  const backdateClock = (def: string, caseId: string, minutes: number) =>
+    m.Clock.collection.updateMany({ def, case: new Types.ObjectId(caseId) }, { $set: { dueAt: new Date(Date.now() - minutes * MIN) } });
+
+  before(async () => {
+    await connectTestDb();
+  });
+  after(async () => {
+    await closeTestDb();
+  });
+
+  beforeEach(async () => {
+    await resetTestDb();
+    const registry = new AgentRegistry();
+    const events = new CoordinatorEvents();
+    messages = new MessagesService(m.AgentMessage, registry, events);
+    const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
+    await escalations.ensureDefaults();
+    clocks = new ClocksService(m.Clock, registry, messages, escalations);
+    cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
+    orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages);
+    new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
+    bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
+    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages);
+    const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });
+    patientId = String(p._id);
+  });
+
+  /** Order, collect and receive every sample; returns the request view and a line lookup. */
+  const received = async (tests: string[], priority: 'stat' | 'urgent' | 'routine' = 'stat') => {
+    const r = await order(tests, priority);
+    for (const s of r.samples) {
+      await bench.collect(NURSE, s.number);
+      await bench.receive(LAB, s.id);
+    }
+    const lineId = (test: string) => r.lines.find((l) => l.test === test)!.id;
+    return { r, lineId };
+  };
+  const line = (id: string) => m.LabLine.findById(id).lean().exec() as Promise<any>;
+  const alerts = () => m.TaskAlertItem.find({ type: 'Lab Alert' }).lean().exec() as Promise<any[]>;
+  const K = { Sodium: 140, Potassium: 6.4 };
+  const NORMAL = { Sodium: 140, Potassium: 4.2 };
+
+  test('entering potassium 6.4 flags it high and critical', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    const l = await line(lineId('electrolytes'));
+    assert.equal(l.status, 'awaiting-validation');
+    assert.deepEqual(l.enteredBy, { id: 'user-lab', name: 'Meera' });
+    assert.ok(l.enteredAt);
+    const k = l.results.find((x: any) => x.param === 'Potassium');
+    assert.deepEqual(k, { param: 'Potassium', value: 6.4, unit: 'mmol/L', flag: 'high', critical: true });
+    assert.equal(l.results.find((x: any) => x.param === 'Sodium').flag, 'normal');
+    assert.equal((await sent('lab.resulted')).length, 0, 'nothing is announced before release');
+  });
+
+  test('entering needs every parameter, no unknown ones, and a received line', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await assert.rejects(() => results.enterResults(LAB, lineId('electrolytes'), { Sodium: 140 }), { status: 400 });
+    await assert.rejects(() => results.enterResults(LAB, lineId('electrolytes'), { ...NORMAL, Calcium: 9 }), { status: 400 });
+    await assert.rejects(() => results.enterResults(LAB, lineId('electrolytes'), { Sodium: 'x', Potassium: 4 }), { status: 400 });
+    await results.enterResults(LAB, lineId('electrolytes'), NORMAL);
+    await assert.rejects(() => results.enterResults(LAB, lineId('electrolytes'), NORMAL), { status: 409 });
+    const fresh = await order(['crp']);
+    await assert.rejects(() => results.enterResults(LAB, fresh.lines[0].id, { CRP: 2 }), { status: 409 });
+  });
+
+  test("the person who entered can't release; the pathologist can", async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), NORMAL);
+    await assert.rejects(() => results.release(LAB, lineId('electrolytes')), { status: 403, message: 'Someone else must validate this result.' });
+    assert.equal((await line(lineId('electrolytes'))).status, 'awaiting-validation');
+    await results.release(PATH, lineId('electrolytes'));
+    const l = await line(lineId('electrolytes'));
+    assert.equal(l.status, 'released');
+    assert.equal(l.version, 1);
+    assert.deepEqual(l.validatedBy, { id: 'user-path', name: 'Dr. Meera Nair' });
+    assert.equal(l.history.length, 1);
+    // an admin who entered the result is bound too
+    const b = await received(['crp']);
+    await results.enterResults(ADMIN, b.lineId('crp'), { CRP: 3 });
+    await assert.rejects(() => results.release(ADMIN, b.lineId('crp')), { status: 403 });
+  });
+
+  test('release writes a LabTestReport the Lab Reports list returns', async () => {
+    const { r, lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    assert.equal(await m.LabTestReport.countDocuments(), 0, 'nothing reaches the report before release');
+    await results.release(PATH, lineId('electrolytes'));
+    const reports = (await m.LabTestReport.find({ uhid: 'MHK202600901' }).lean()) as any[];
+    assert.equal(reports.length, 1);
+    const rep = reports[0];
+    assert.equal(rep.testName, 'Electrolytes');
+    assert.equal(rep.category, 'Biochemistry');
+    assert.equal(rep.status, 'Abnormal');
+    assert.equal(rep.labLine, lineId('electrolytes'));
+    assert.ok(!rep.amended);
+    assert.ok(rep.date && rep.time);
+    const k = rep.groups[0].parameters.find((p: any) => p.name === 'Potassium');
+    assert.deepEqual({ ...k, _id: undefined }, { _id: undefined, name: 'Potassium', result: 6.4, referenceRange: '3.5–5.1', unit: 'mmol/L', status: 'High', critical: true });
+    assert.equal(String((await line(lineId('electrolytes'))).reportId), String(rep._id));
+    const [msg] = await sent('lab.resulted');
+    assert.equal(msg.payload.flag, 'critical');
+    assert.equal(msg.payload.version, 1);
+    assert.equal(msg.payload.lineId, lineId('electrolytes'));
+    assert.ok(!msg.summary.includes('Ravi') && msg.summary.includes(r.number));
+    const { LabReportsService } = await import('../lab-reports/lab-reports.service');
+    const listed = await new LabReportsService(m.LabTestReport).findAll({ uhid: 'MHK202600901' });
+    assert.equal(listed.length, 1);
+  });
+
+  test('a released normal result has no critical flag and no alert', async () => {
+    const { lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), NORMAL);
+    await results.release(PATH, lineId('electrolytes'));
+    assert.equal((await line(lineId('electrolytes'))).critical.active, false);
+    assert.equal((await alerts()).length, 0);
+    assert.equal((await sent('lab.critical')).length, 0);
+    assert.equal(((await m.LabTestReport.findOne().lean()) as any).status, 'Completed');
+    assert.equal((await sent('lab.resulted'))[0].payload.flag, 'normal');
+  });
+
+  test('a critical release starts the 15-minute acknowledgement clock and makes one alert; acknowledging stops it', async () => {
+    const { r, lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, { Sodium: 118, Potassium: 6.4 });
+    await results.release(PATH, id);
+    const crit = await sent('lab.critical');
+    assert.equal(crit.length, 2, 'one per critical parameter');
+    const k = crit.find((c) => c.payload.parameter === 'Potassium');
+    assert.deepEqual(k.payload, { requestId: r.id, lineId: id, test: 'electrolytes', parameter: 'Potassium', value: '6.4', unit: 'mmol/L', version: 1 });
+    assert.ok(!k.summary.includes('Ravi'));
+    const clocks1 = await clockOf('lab-critical', String((await m.LabRequest.findById(r.id).lean() as any).case));
+    assert.equal(clocks1.length, 1, 'one clock for the line');
+    assert.equal(clocks1[0].state, 'running');
+    const mins = (clocks1[0].dueAt.getTime() - clocks1[0].startedAt.getTime()) / MIN;
+    assert.ok(Math.abs(mins - 15) < 1);
+    const a = await alerts();
+    assert.equal(a.length, 1);
+    assert.equal(a[0].category, 'Critical');
+    assert.equal(a[0].priority, 'High');
+    assert.equal(a[0].link, `lab-line:${id}`);
+    assert.equal(a[0].title, 'Critical: Electrolytes Sodium 118 mmol/L');
+    assert.equal(a[0].subtitle, 'For Dr. Shajin · acknowledge within 15 min');
+    assert.equal(a[0].uhid, 'MHK202600901');
+    assert.equal(a[0].patientName, 'Ravi Kumar');
+
+    await results.acknowledge(DOC, id, 'Informed ward, repeating');
+    const l = await line(id);
+    assert.equal(l.critical.ackBy, 'Dr. Shajin');
+    assert.ok(l.critical.ackAt);
+    assert.equal(l.critical.ackNote, 'Informed ward, repeating');
+    assert.equal((await alerts())[0].status, 'Completed');
+    assert.deepEqual((await sent('lab.critical-acked'))[0].payload, { lineId: id });
+    const after = await clockOf('lab-critical', String((await m.LabRequest.findById(r.id).lean() as any).case));
+    assert.notEqual(after[0].state, 'running');
+    await assert.rejects(() => results.acknowledge(DOC, id), { status: 409, message: 'Nothing to acknowledge.' });
+  });
+
+  test('nobody acknowledging escalates on lab-critical to the duty doctor', async () => {
+    const { r, lineId } = await received(['electrolytes']);
+    await results.enterResults(LAB, lineId('electrolytes'), K);
+    await results.release(PATH, lineId('electrolytes'));
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    await backdateClock('lab-critical', caseId, 1);
+    assert.equal(await escalationsOn('lab-critical'), 0);
+    await clocks.checkDue(new Date());
+    assert.equal(await escalationsOn('lab-critical'), 1);
+    const e = (await m.Escalation.findOne({ ladder: 'lab-critical' }).lean()) as any;
+    assert.equal(e.step, 0);
+  });
+
+  test('acknowledging a non-critical line is refused', async () => {
+    const { lineId } = await received(['crp']);
+    await results.enterResults(LAB, lineId('crp'), { CRP: 2 });
+    await results.release(PATH, lineId('crp'));
+    await assert.rejects(() => results.acknowledge(DOC, lineId('crp')), { status: 409 });
+  });
+
+  test('send back returns the line for re-entry with the reason', async () => {
+    const { lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, K);
+    await assert.rejects(() => results.sendBack(PATH, id, '  '), { status: 400 });
+    await results.sendBack(PATH, id, 'Potassium looks haemolysed, recheck');
+    const l = await line(id);
+    assert.equal(l.status, 'received');
+    assert.deepEqual(l.results, []);
+    assert.equal(l.sentBack.reason, 'Potassium looks haemolysed, recheck');
+    assert.equal(l.sentBack.by, 'Dr. Meera Nair');
+    await assert.rejects(() => results.sendBack(PATH, id, 'again'), { status: 409 });
+    await results.enterResults(LAB, id, NORMAL);
+    const again = await line(id);
+    assert.equal(again.status, 'awaiting-validation');
+    assert.equal(again.sentBack, undefined, 're-entry clears the send-back note');
+  });
+
+  test('amending a released normal result to a critical one starts a new acknowledgement and the report is marked amended', async () => {
+    const { r, lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, NORMAL);
+    await results.release(PATH, id);
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    await assert.rejects(() => results.amend(LAB, id, K, ' '), { status: 400 });
+    const other = await received(['crp']);
+    await assert.rejects(() => results.amend(LAB, other.lineId('crp'), { CRP: 1 }, 'typo'), { status: 409 });
+    await results.amend(LAB, id, K, 'Transcription error');
+    let l = await line(id);
+    assert.equal(l.status, 'awaiting-validation');
+    assert.equal(l.version, 1);
+    assert.equal((await sent('lab.critical')).length, 0, 'nothing is critical until released');
+    await assert.rejects(() => results.release(LAB, id), { status: 403 });
+    await results.release(PATH, id);
+    l = await line(id);
+    assert.equal(l.version, 2);
+    assert.equal(l.history.length, 2);
+    assert.equal(l.history[1].amendReason, 'Transcription error');
+    assert.equal(l.history[0].amendReason, undefined);
+    assert.equal(l.pendingAmendReason, undefined);
+    assert.deepEqual(l.critical, { active: true });
+    const rep = (await m.LabTestReport.find().lean()) as any[];
+    assert.equal(rep.length, 1, 'the same report is updated');
+    assert.equal(rep[0].amended, true);
+    assert.equal(rep[0].status, 'Abnormal');
+    const crit = await sent('lab.critical');
+    assert.equal(crit.length, 1);
+    assert.equal(crit[0].payload.version, 2);
+    assert.equal((await sent('lab.resulted')).length, 2);
+    assert.equal((await alerts()).length, 1);
+    assert.equal((await alerts())[0].status, 'Pending');
+    const clock = await clockOf('lab-critical', caseId);
+    assert.ok(clock.some((c) => c.state === 'running'));
+    await results.acknowledge(DOC, id);
+    assert.ok((await line(id)).critical.ackAt);
+    // a second amendment to critical clears the earlier acknowledgement
+    await results.amend(LAB, id, { Sodium: 140, Potassium: 2.5 }, 'Re-run');
+    await results.release(PATH, id);
+    assert.deepEqual((await line(id)).critical, { active: true });
+    assert.equal((await alerts())[0].status, 'Pending');
+    assert.equal((await alerts()).length, 1);
+  });
+
+  test('sending back an amendment restores the released result', async () => {
+    const { lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, NORMAL);
+    await results.release(PATH, id);
+    await results.amend(LAB, id, K, 'oops');
+    await results.sendBack(PATH, id, 'not convinced');
+    const l = await line(id);
+    assert.equal(l.status, 'released');
+    assert.equal(l.version, 1);
+    assert.equal(l.results.find((x: any) => x.param === 'Potassium').value, 4.2);
+    assert.equal(l.pendingAmendReason, undefined);
+  });
+
+  test('releasing the last open line sends lab.request-done and stops the turnaround clock', async () => {
+    const { r, lineId } = await received(['electrolytes', 'crp']);
+    const caseId = String(((await m.LabRequest.findById(r.id).lean()) as any).case);
+    await results.enterResults(LAB, lineId('crp'), { CRP: 2 });
+    await results.release(PATH, lineId('crp'));
+    assert.equal((await sent('lab.request-done')).length, 0);
+    const resulted = (await sent('lab.resulted'))[0];
+    const open = (await line(lineId('electrolytes'))).tatDueAt;
+    assert.equal(new Date(resulted.payload.tatDueAt).getTime(), open.getTime(), 'the earliest still-open line');
+    await results.enterResults(LAB, lineId('electrolytes'), NORMAL);
+    await results.release(PATH, lineId('electrolytes'));
+    assert.equal((await sent('lab.request-done')).length, 1);
+    const tat = await clockOf('lab-tat', caseId);
+    assert.ok(tat.length > 0 && tat.every((c) => c.state !== 'running'));
+    // amending later never reopens or re-announces
+    await results.amend(LAB, lineId('crp'), { CRP: 9 }, 'recheck');
+    await results.release(PATH, lineId('crp'));
+    assert.equal((await sent('lab.request-done')).length, 1);
+  });
+});

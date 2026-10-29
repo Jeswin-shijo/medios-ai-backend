@@ -38,12 +38,15 @@ export class LabLine {
   }[];
   @Prop({ type: { by: String, reason: String, at: Date }, _id: false }) sentBack?: { by: string; reason: string; at: Date };
   @Prop({ type: { by: String, reason: String, at: Date }, _id: false }) cancelled?: { by: string; reason: string; at: Date };
-  @Prop({ type: { active: Boolean, ackBy: String, ackAt: Date, ackNote: String }, _id: false }) critical?: {
+  @Prop({ type: { active: Boolean, ackBy: String, ackById: String, ackAt: Date, ackNote: String }, _id: false }) critical?: {
     active: boolean;
     ackBy?: string;
+    ackById?: string;
     ackAt?: Date;
     ackNote?: string;
   };
+  /** Set while an amendment waits for a second person; carried into history on release. */
+  @Prop() pendingAmendReason?: string;
   @Prop({ type: MongooseSchema.Types.ObjectId }) reportId?: Types.ObjectId;
 }
 

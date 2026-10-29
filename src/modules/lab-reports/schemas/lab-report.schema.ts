@@ -25,6 +25,10 @@ export class LabParameter {
 
   @Prop()
   relativePosition?: number;
+
+  /** Set by the Lab Agent: a critical value. */
+  @Prop()
+  critical?: boolean;
 }
 
 @Schema({ _id: false })
@@ -82,6 +86,13 @@ export class LabTestReport {
 
   @Prop({ type: Object, default: null })
   trend: any;
+
+  /** Set by the Lab Agent: the test line this report came from, and whether it was amended. */
+  @Prop({ index: true })
+  labLine?: string;
+
+  @Prop()
+  amended?: boolean;
 }
 
 export const LabTestReportSchema = SchemaFactory.createForClass(LabTestReport);
