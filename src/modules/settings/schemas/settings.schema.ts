@@ -32,6 +32,10 @@ export class HospitalSettings {
   /** Token queue: rooms, token prefix, what the waiting-room display shows (see queue/queue-settings.ts). */
   @Prop({ type: Object, default: {} })
   queue: any;
+
+  /** Reception kiosk: payment methods, default doctor, UPI payee, slip footer (see reception/reception-settings.ts). */
+  @Prop({ type: Object, default: {} })
+  reception: any;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

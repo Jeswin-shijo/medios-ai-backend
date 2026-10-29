@@ -7,6 +7,8 @@ import { QueueDisplay, QueueDisplayDocument, QueueDisplaySchema } from '../modul
 import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { HospitalSettings, HospitalSettingsDocument, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 import { BillInvoice, BillInvoiceDocument, BillInvoiceSchema } from '../modules/billing/schemas/bill.schema';
+import { Department, DepartmentDocument, DepartmentSchema } from '../modules/opd/schemas/department.schema';
+import { OpDoctor, OpDoctorDocument, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_reception_dev).
@@ -39,6 +41,8 @@ export function models() {
     PatientCard: model(PatientCard, PatientCardSchema) as Model<PatientCardDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
     BillInvoice: model(BillInvoice, BillInvoiceSchema) as Model<BillInvoiceDocument>,
+    Department: model(Department, DepartmentSchema) as Model<DepartmentDocument>,
+    OpDoctor: model(OpDoctor, OpDoctorSchema) as Model<OpDoctorDocument>,
   };
 }
 
