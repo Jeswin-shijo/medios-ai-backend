@@ -136,4 +136,32 @@ describe('QueueService doctor-wise tokens', () => {
     assert.equal(counts.get(docA), 2);
     assert.equal(counts.get(docB), 1);
   });
+
+  describe('hospital-wide line (no doctors)', () => {
+    beforeEach(async () => {
+      await m().OpDoctor.deleteMany({});
+    });
+
+    test('concurrent first tokens of the day all succeed with distinct numbers', async () => {
+      for (let i = 1; i <= 6; i++) await patient(`W${i}`);
+      const issued = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => queue.issue({ uhid: `W${i}` }, 'Tester')));
+      const numbers = issued.map((r) => r.token.number).sort((a, b) => a - b);
+      assert.deepEqual(numbers, [1, 2, 3, 4, 5, 6]);
+    });
+
+    test('label stays the old prefix+number with series empty', async () => {
+      const { token } = await issueFor('W1');
+      const prefix = (await queue.queueSettings()).tokenPrefix;
+      assert.equal(token.label, `${prefix}1`);
+      assert.equal(token.series, '');
+    });
+
+    test('an old sequence doc without series continues after start', async () => {
+      await m().QueueSequence.collection.insertOne({ date: queue.today(), last: 7 });
+      await queue.onModuleInit();
+      queue.onModuleDestroy();
+      const { token } = await issueFor('W1');
+      assert.equal(token.number, 8);
+    });
+  });
 });

@@ -80,6 +80,9 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     // Numbers now restart per doctor, so the hospital-wide unique keys must go.
     await this.dropIndex(this.tokens, 'date_1_number_1');
     await this.dropIndex(this.sequences, 'date_1');
+    // Old records have no series; give them '' so upserts can match on plain equality.
+    await this.sequences.updateMany({ series: { $exists: false } }, { $set: { series: '' } }).exec();
+    await this.tokens.updateMany({ series: { $exists: false } }, { $set: { series: '' } }).exec();
   }
 
   private async dropIndex(model: Model<any>, name: string) {
@@ -325,7 +328,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
   private async nextNumber(date: string, series: string): Promise<number> {
     const seq = await this.sequences
-      .findOneAndUpdate({ date, ...seriesFilter(series) }, { $inc: { last: 1 }, $setOnInsert: { series } }, { upsert: true, new: true })
+      .findOneAndUpdate({ date, series }, { $inc: { last: 1 } }, { upsert: true, new: true })
       .exec();
     return seq!.last;
   }
