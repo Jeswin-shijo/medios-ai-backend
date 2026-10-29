@@ -192,9 +192,10 @@ export class CoordinatorController {
     return this.escalations.saveLadder(actorOf(user), dto);
   }
 
+  // Readable by everyone who can reassign an approval: Reassign offers the titles as targets.
   @Get('titles')
-  @Roles(...ADMIN)
-  @ApiOperation({ summary: 'Duty titles and who holds them (admin)' })
+  @Roles(...ADMIT_ROLES)
+  @ApiOperation({ summary: 'Duty titles and who holds them' })
   titles() {
     return this.escalations.titles();
   }
