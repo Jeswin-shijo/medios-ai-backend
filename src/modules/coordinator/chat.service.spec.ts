@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { Types } from 'mongoose';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AiResult, StructuredTask } from '../ai/ai-types';
@@ -37,6 +38,7 @@ describe('ChatService', () => {
   let ai: ReturnType<typeof fakeAi>;
   let service: ChatService;
   let cases: CasesService;
+  let clocks: ClocksService;
   let messages: MessagesService;
   let patientId: string;
 
@@ -60,7 +62,7 @@ describe('ChatService', () => {
     messages = new MessagesService(AgentMessage, registry, events);
     const escalations = new EscalationsService(Escalation, DutyTitle, Ladder, TaskAlertItem, User, messages);
     await escalations.ensureDefaults();
-    const clocks = new ClocksService(Clock, registry, messages, escalations);
+    clocks = new ClocksService(Clock, registry, messages, escalations);
     cases = new CasesService(Case, CoordinatorCounter, messages, registry, new TimelineService(TimelineEvent));
     const approvals = new ApprovalsService(Approval, DutyTitle, registry, messages);
     const patients = new PatientsService(Patient);
@@ -118,5 +120,69 @@ describe('ChatService', () => {
     const log = (await ChatLog.findOne({ question: /^Status of/ }).lean())!;
     assert.deepEqual((log.aiInput as any).input.facts.agents, ['bed']);
     assert.match(log.answer, /Zarathustra/);
+  });
+
+  const approval = (type: string, agent: string, summary: string) =>
+    Approval.create({ type, agent, summary, roles: ['doctor'], primary: { kind: 'approve', label: 'Approve' } });
+
+  test('approvals counts open approvals by type and agent', async () => {
+    await approval('bed-override', 'bed', 'MHK202588888 needs a decision');
+    await approval('bed-override', 'bed', 'another');
+    await approval('discharge-sign', 'discharge', 'sign it');
+    const res = await service.ask(actor, 'Pending approvals');
+    assert.match(res.answer, /3 open approvals/);
+    assert.match(res.answer, /2 bed-override from Bed/);
+    assert.match(res.answer, /1 discharge-sign from Discharge/);
+    const facts = (ai.tasks[0].input as any).facts;
+    assert.equal(facts.open, 3);
+    assert.ok(!JSON.stringify(ai.tasks[0]).includes('MHK202588888'));
+  });
+
+  test('overdue lists an expired clock with an open escalation and a running clock due soon', async () => {
+    const lateCase = String(new Types.ObjectId());
+    const soonCase = String(new Types.ObjectId());
+    await messages.send({ case: lateCase, from: 'bed', to: ['coordinator'], type: 'bed.requested', priority: 'high', summary: 'late', payload: {} });
+    await messages.send({ case: soonCase, from: 'bed', to: ['coordinator'], type: 'bed.requested', priority: 'high', summary: 'soon', payload: {} });
+    await Clock.updateOne({ case: lateCase }, { $set: { dueAt: new Date(Date.now() - 60_000) } });
+    await Clock.updateOne({ case: soonCase }, { $set: { dueAt: new Date(Date.now() + 5 * 60_000) } });
+    assert.equal(await clocks.checkDue(new Date()), 1);
+    const res = await service.ask(actor, 'What is overdue?');
+    assert.match(res.answer, /1 item overdue with an open escalation: Bed wait \(1\)/);
+    assert.match(res.answer, /1 item due within 15 minutes: Bed wait \(1\)/);
+  });
+
+  test('every AI-bound intent sends no identity, id or UHID, and the case status names its last update', async () => {
+    const c = await openCase();
+    await approval('bed-override', 'bed', 'MHK202588888 needs a decision');
+    const questions = [
+      'Where is the bed request for MHK202577777?',
+      'Discharge status for MHK202577777',
+      'Check discharge status',
+      'Show agent workload',
+      'Pending approvals',
+      "What's overdue?",
+    ];
+    const answers: string[] = [];
+    for (const q of questions) answers.push((await service.ask(actor, q)).answer);
+    assert.equal(ai.tasks.length, questions.length);
+    assert.match(answers[0], /Last update: asked, \d+ min ago/);
+    assert.match(answers[2], /For example: 'Discharge status for MHK202500323'\.$/);
+    const logs = await ChatLog.find().lean();
+    const blobs = [...ai.tasks.map((t) => JSON.stringify({ instructions: t.instructions, input: t.input })), ...logs.map((l) => JSON.stringify(l.aiInput))];
+    assert.equal(blobs.length, questions.length * 2);
+    for (const blob of blobs) {
+      for (const secret of ['Zarathustra', 'Quillfeather', 'MHK202577777', c.number, patientId, String(c._id)]) assert.ok(!blob.includes(secret), `leaked ${secret}`);
+      assert.ok(!/MHK\d{9}/i.test(blob), 'a UHID reached the AI');
+      assert.ok(!/\b[a-f\d]{24}\b/i.test(blob), 'an id reached the AI');
+    }
+  });
+
+  test('a question that fails or is not text is still logged, and an AI that is off leaves aiInput empty', async () => {
+    ai.runStructured = async () => ({ ok: false, failure: 'off', provider: 'none', model: 'none', latencyMs: 0 }) as any;
+    const res = await service.ask(actor, 'Show agent workload');
+    assert.equal(res.sample, false);
+    assert.equal((await ChatLog.findOne({ question: 'Show agent workload' }).lean())!.aiInput, null);
+    await service.ask(actor, undefined as unknown as string);
+    assert.equal(await ChatLog.countDocuments(), 2);
   });
 });

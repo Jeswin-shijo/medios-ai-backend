@@ -18,4 +18,13 @@ describe('resolveQuestion', () => {
     assert.deepEqual(resolveQuestion('Check discharge status'), { kind: 'discharge-status' });
     assert.deepEqual(resolveQuestion('Show agent workload'), { kind: 'agent-workload' });
   });
+
+  test('resolveQuestion stays fast on a very long question and ignores a UHID with an extra digit', () => {
+    const long = 'status for a' + ' '.repeat(50_000) + 'b' + ' word'.repeat(10_000);
+    const started = Date.now();
+    resolveQuestion(long);
+    assert.ok(Date.now() - started < 100);
+    assert.equal(resolveQuestion('status for MHK2025003230').ref?.kind, 'name');
+    assert.deepEqual(resolveQuestion(undefined as unknown as string), { kind: 'unknown' });
+  });
 });

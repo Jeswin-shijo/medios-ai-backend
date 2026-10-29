@@ -166,6 +166,10 @@ export class CasesService {
     return this.model.findOne({ number }).exec();
   }
 
+  countOpen(kind?: CaseKind): Promise<number> {
+    return this.model.countDocuments({ ...isOpen, ...(kind ? { kind } : {}) }).exec();
+  }
+
   /** The patient's open case, else their most recent one. */
   async forPatient(patientId: string): Promise<CaseDocument | null> {
     if (!Types.ObjectId.isValid(patientId)) return null;

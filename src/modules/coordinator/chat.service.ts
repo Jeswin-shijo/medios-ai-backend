@@ -73,12 +73,18 @@ interface Draft {
   patient?: PatientRef;
   case?: { id: string; number: string };
   action?: ChatAction;
+  /** Added to the shown answer after the AI. Used for example UHIDs, which must never reach it. */
+  suffix?: string;
 }
 
 type Lookup =
   | { found: true; patient: PatientRef; case: CaseDocument | null }
   | { found: false; reply: string };
 
+/** Shows the first few of a list and "and N more", so a fallback template stays short. */
+const joinMax = (items: string[], max = 3, sep = ', ') =>
+  items.length <= max ? items.join(sep) : `${items.slice(0, max).join(sep)} and ${items.length - max} more`;
+const clamp = (text: string) => (text.length <= MAX_ANSWER_LENGTH ? text : `${text.slice(0, MAX_ANSWER_LENGTH - 3).trimEnd()}...`);
 const plain = (template: string, extra: Partial<Draft> = {}): Draft => ({ template, facts: {}, useAi: false, ...extra });
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const minutesBetween = (later: Date | string | number, earlier: Date | string | number) => Math.round((new Date(later).getTime() - new Date(earlier).getTime()) / MINUTE_MS);
@@ -101,9 +107,11 @@ export class ChatService {
   ) {}
 
   async ask(actor: Actor, question: string): Promise<ChatAnswer> {
-    const intent = resolveQuestion(question);
+    const asked = typeof question === 'string' ? question : '';
+    let intent: ChatIntent = { kind: 'unknown' };
     let draft: Draft;
     try {
+      intent = resolveQuestion(asked);
       draft = await this.draft(intent);
     } catch (e) {
       this.logger.error(`Answering a question failed: ${(e as Error).message}`);
@@ -118,7 +126,9 @@ export class ChatService {
       aiInput = { instructions: task.instructions, input: task.input };
       try {
         const result = await this.ai.runStructured(task);
-        if (result.ok) {
+        // Off means nothing was sent, so there is nothing to record.
+        if ('failure' in result && result.failure === 'off') aiInput = null;
+        if ('value' in result) {
           text = result.value.answer;
           sample = result.sample;
         }
@@ -129,7 +139,7 @@ export class ChatService {
 
     const answer = this.display(text, draft);
     try {
-      await this.logs.create({ user: actor.id, userName: actor.name, question, intent, answer, aiInput, sample });
+      await this.logs.create({ user: actor.id, userName: actor.name, question: asked, intent, answer, aiInput, sample });
     } catch (e) {
       this.logger.error(`Logging a question failed: ${(e as Error).message}`);
     }
@@ -149,7 +159,7 @@ export class ChatService {
     }
     if (d.case) out = out.replace(/\bthe case\b/i, () => d.case!.number);
     if (d.patient && !named) out = `${d.patient.name} (${d.patient.uhid}): ${out}`;
-    return out;
+    return d.suffix ? `${out}${d.suffix}` : out;
   }
 
   private async draft(intent: ChatIntent): Promise<Draft> {
@@ -187,9 +197,9 @@ export class ChatService {
         return { found: false, reply: `I couldn't find a patient matching '${ref.value}'.` };
       }
     } else {
-      const { patients } = await this.patients.findAll({ search: ref.value, limit: 3 });
+      const { patients, total } = await this.patients.findAll({ search: ref.value, limit: 3 });
       if (patients.length === 0) return { found: false, reply: `I couldn't find a patient matching '${ref.value}'.` };
-      if (patients.length > 1) return { found: false, reply: `I found ${patients.length} patients matching '${ref.value}'. Use the UHID.` };
+      if (patients.length > 1) return { found: false, reply: `I found ${total} patients matching '${ref.value}'. Use the UHID.` };
       doc = patients[0] as any;
     }
     const patient = { id: String(doc._id), name: doc.name as string, uhid: doc.uhid as string };
@@ -223,9 +233,13 @@ export class ChatService {
     const agentNames = c.agents.map((k) => `${AGENTS.find((a) => a.key === k)?.name ?? k} Agent`);
     let template = `The case for the patient is ${c.state} (${c.kind === 'ipd' ? 'IPD' : 'ER'}, ${c.priority} priority).`;
     if (agentNames.length) template += ` ${agentNames.join(', ')} ${agentNames.length === 1 ? 'is' : 'are'} involved.`;
-    if (running.length) template += ` ${running.map((r) => `${r.label} has ${r.minutesLeft} min left`).join('; ')}.`;
+    if (running.length) template += ` ${joinMax(running.map((r) => `${r.label} has ${r.minutesLeft} min left`), 3, '; ')}.`;
+    if (last) {
+      const what = this.registry.messageType(last.type)?.description ?? last.type;
+      template += ` Last update: ${what}, ${facts.lastEvent!.minutesAgo} min ago.`;
+    }
     return {
-      template,
+      template: clamp(template),
       facts,
       useAi: true,
       patient: found.patient,
@@ -247,9 +261,10 @@ export class ChatService {
 
   private async discharge(intent: ChatIntent): Promise<Draft> {
     if (!intent.ref) {
-      const open = (await this.cases.list({ state: 'open', limit: 500 })).filter((c) => c.kind === 'ipd').length;
-      const template = `The Discharge Agent arrives in a later phase. There ${open === 1 ? 'is' : 'are'} ${plural(open, 'patient')} with an open inpatient case. Ask about one patient, e.g. 'Discharge status for MHK202500323'.`;
-      return { template, facts: { openInpatientCases: open, dischargeAgentBuilt: false }, useAi: true };
+      const open = await this.cases.countOpen('ipd');
+      const template = `The Discharge Agent arrives in a later phase. There ${open === 1 ? 'is' : 'are'} ${plural(open, 'patient')} with an open inpatient case. Ask about one patient by UHID.`;
+      // The example is added after the AI: an example UHID must never be part of what it is sent.
+      return { template, facts: { openInpatientCases: open, dischargeAgentBuilt: false }, useAi: true, suffix: " For example: 'Discharge status for MHK202500323'." };
     }
     const found = await this.lookup(intent.ref);
     if ('reply' in found) return plain(found.reply);
@@ -275,7 +290,7 @@ export class ChatService {
       const name = AGENTS.find((x) => x.key === a.agent)?.name ?? a.agent;
       return `${name} is ${a.online ? 'online' : 'offline'} with ${a.open} of ${a.capacity} open`;
     });
-    const template = `${lines.length ? `${lines.join('. ')}. ` : 'No agents are built yet. '}${plural(notBuilt, 'agent')} ${notBuilt === 1 ? 'is' : 'are'} not built yet.`;
+    const template = clamp(`${lines.length ? `${joinMax(lines, 3, '. ')}. ` : 'No agents are built yet. '}${plural(notBuilt, 'agent')} ${notBuilt === 1 ? 'is' : 'are'} not built yet.`);
     return { template, facts: { built, notBuilt }, useAi: true };
   }
 
@@ -289,7 +304,7 @@ export class ChatService {
     });
     if (!open.length) return { template: 'There are no open approvals.', facts: { open: 0, byType: [] }, useAi: true };
     const parts = byType.map((g) => `${g.count} ${g.type} from ${AGENTS.find((a) => a.key === g.agent)?.name ?? g.agent}`);
-    const template = `There ${open.length === 1 ? 'is' : 'are'} ${plural(open.length, 'open approval')}: ${parts.join(', ')}.`;
+    const template = clamp(`There ${open.length === 1 ? 'is' : 'are'} ${plural(open.length, 'open approval')}: ${joinMax(parts)}.`);
     return { template, facts: { open: open.length, byType }, useAi: true };
   }
 
@@ -309,12 +324,12 @@ export class ChatService {
     const soon = tally(
       (await this.clocks.list({ state: 'running', limit: 200 })).filter((k) => new Date(k.dueAt).getTime() - now <= DUE_SOON_MS).map((k) => label(k.def)),
     );
-    const list = (rows: { label: string; count: number }[]) => rows.map((r) => `${r.label} (${r.count})`).join(', ');
+    const list = (rows: { label: string; count: number }[]) => joinMax(rows.map((r) => `${r.label} (${r.count})`));
     const total = (rows: { count: number }[]) => rows.reduce((n, r) => n + r.count, 0);
     const parts: string[] = [];
     if (overdue.length) parts.push(`${plural(total(overdue), 'item')} overdue with an open escalation: ${list(overdue)}.`);
     if (soon.length) parts.push(`${plural(total(soon), 'item')} due within 15 minutes: ${list(soon)}.`);
-    const template = parts.length ? parts.join(' ') : 'Nothing is overdue, and nothing is due in the next 15 minutes.';
+    const template = parts.length ? clamp(parts.join(' ')) : 'Nothing is overdue, and nothing is due in the next 15 minutes.';
     return { template, facts: { overdue, dueSoon: soon }, useAi: true };
   }
 }

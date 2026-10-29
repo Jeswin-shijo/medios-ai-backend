@@ -7,10 +7,23 @@ export interface ChatIntent {
   ref?: { kind: 'uhid' | 'case' | 'name'; value: string };
 }
 
-const UHID = /MHK\d{9}/i;
+const UHID = /MHK\d{9}(?!\d)/i;
 const CASE_NUMBER = /CASE-\d+/i;
 const STOP_WORDS = new Set(['the', 'a', 'an', 'me', 'us', 'this', 'that', 'it', 'patient', 'case', 'today', 'all', 'each', 'them', 'now', 'please']);
-const TRAILING = /\s+(status|request|requests|please|now|today)$/i;
+const TRAILING_WORDS = new Set(['status', 'request', 'requests', 'please', 'now', 'today']);
+const ARTICLES = new Set(['the', 'a', 'an']);
+/** Questions are short; anything past this is ignored, which also bounds the work below. */
+const MAX_QUESTION_LENGTH = 500;
+const EDGE = new Set(['"', "'", '(', ')', '.', ',', '?', '!', ';', ':']);
+
+/** Trims whitespace and the punctuation a question wraps a name in, with no backtracking regex. */
+function trimEdges(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && (EDGE.has(text[start]) || text[start].trim() === '')) start += 1;
+  while (end > start && (EDGE.has(text[end - 1]) || text[end - 1].trim() === '')) end -= 1;
+  return text.slice(start, end);
+}
 
 /** The words after the last "for" or "of", else after "where is", trimmed. Empty when there are none. */
 function nameFrom(text: string): string {
@@ -18,14 +31,12 @@ function nameFrom(text: string): string {
     const all = [...text.matchAll(re)];
     return all.length ? text.slice((all[all.length - 1].index ?? 0) + all[all.length - 1][0].length) : null;
   };
-  let raw = afterLast(/\b(?:for|of)\s+/gi) ?? afterLast(/\bwhere is\s+/gi) ?? '';
-  raw = raw.replace(/^[\s"'(]+|[\s"'.,?!;:)]+$/g, '');
-  let previous: string;
-  do {
-    previous = raw;
-    raw = raw.replace(TRAILING, '').replace(/^(?:the|a|an)\s+/i, '').trim();
-  } while (raw !== previous);
-  return STOP_WORDS.has(raw.toLowerCase()) ? '' : raw;
+  const raw = trimEdges(afterLast(/\b(?:for|of)\s/gi) ?? afterLast(/\bwhere is\s/gi) ?? '');
+  const words = raw.split(/\s+/).filter(Boolean);
+  while (words.length && TRAILING_WORDS.has(words[words.length - 1].toLowerCase())) words.pop();
+  while (words.length && ARTICLES.has(words[0].toLowerCase())) words.shift();
+  const name = words.join(' ');
+  return STOP_WORDS.has(name.toLowerCase()) ? '' : name;
 }
 
 function kindOf(text: string): ChatIntentKind {
@@ -39,7 +50,8 @@ function kindOf(text: string): ChatIntentKind {
   return 'unknown';
 }
 
-export function resolveQuestion(text: string): ChatIntent {
+export function resolveQuestion(input: string): ChatIntent {
+  const text = (typeof input === 'string' ? input : '').slice(0, MAX_QUESTION_LENGTH);
   const kind = kindOf(text);
   if (kind === 'unknown') return { kind };
   const uhid = text.match(UHID);

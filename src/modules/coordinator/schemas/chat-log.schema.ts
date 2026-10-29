@@ -8,7 +8,7 @@ export type ChatLogDocument = ChatLog & Document;
 export class ChatLog {
   @Prop({ required: true }) user: string;
   @Prop({ required: true }) userName: string;
-  @Prop({ required: true }) question: string;
+  @Prop({ type: String, default: '' }) question: string;
   @Prop({ type: MongooseSchema.Types.Mixed, required: true }) intent: Record<string, unknown>;
   @Prop({ required: true }) answer: string;
   /** Exactly the { instructions, input } sent to the AI; null when the AI was not called. */
