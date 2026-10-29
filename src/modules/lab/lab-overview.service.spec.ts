@@ -315,6 +315,42 @@ describe('Lab close check, status, overview and settings', () => {
     assert.equal(await agentStatus().then((s) => s.onTimePct), null);
   });
 
+  test('a worklist line awaiting validation carries who entered it, by id', async () => {
+    const r = await order(['crp'], 'routine');
+    await receive(r);
+    await results.enterResults(LAB, r.lines[0].id, { CRP: 2 });
+    const w = await bench.worklist();
+    assert.equal(w.toValidate.length, 1);
+    assert.deepEqual(w.toValidate[0].enteredBy, { id: LAB.id, name: LAB.name });
+    assert.equal(w.toValidate[0].version, 0);
+    assert.equal(w.toValidate[0].validatedBy, null);
+  });
+
+  test('a released line view carries real release stamps, who entered and validated, and the version', async () => {
+    const r = await order(['crp'], 'routine');
+    await receive(r);
+    await release(r.lines[0].id, { CRP: 2 });
+    const [req] = await orders.forPatient(patientId);
+    const l = req.lines[0];
+    assert.equal(l.releasedRealAt, new Date(l.releasedRealAt!).toISOString());
+    assert.equal(l.lastReleasedRealAt, new Date(l.lastReleasedRealAt!).toISOString());
+    assert.deepEqual(l.enteredBy, { id: LAB.id, name: LAB.name });
+    assert.deepEqual(l.validatedBy, { id: PATH.id, name: PATH.name });
+    assert.equal(l.enteredByName, LAB.name);
+    assert.equal(l.version, 1);
+  });
+
+  test('after an amendment and re-release the critical row is marked amended', async () => {
+    const r = await order(['glucose']);
+    await receive(r);
+    await release(r.lines[0].id, { Glucose: 30 });
+    assert.equal((await overview.criticalList())[0].amended, false);
+    await results.amend(LAB, r.lines[0].id, { Glucose: 25 }, 'recheck');
+    await results.release(PATH, r.lines[0].id);
+    const row = (await overview.criticalList())[0];
+    assert.equal(row.amended, true);
+  });
+
   test('limitsHistory is server-only: a round-tripped settings object passes, a fake history is ignored', async () => {
     const svc = new SettingsService(m.HospitalSettings);
     await settings.saveLimits(ADMIN, { 'electrolytes.Potassium': { high: 6.5 } });

@@ -45,6 +45,8 @@ export interface LabCriticalRow {
   releasedAt: string | null;
   ackBy: string | null;
   ackAt: string | null;
+  /** True when the line has been amended (version above 1). */
+  amended: boolean;
   /** From the running critical clock; null once acknowledged. */
   dueAt: string | null;
 }
@@ -135,7 +137,7 @@ export class LabOverviewService {
         'critical.active': true,
         $or: [{ 'critical.ackAt': { $exists: false } }, { 'critical.ackAt': { $gte: midnight } }],
       })
-      .select('request test releasedAt releasedRealAt lastReleasedRealAt results history critical')
+      .select('request test releasedAt releasedRealAt lastReleasedRealAt results history critical version')
       .lean<any[]>()
       .exec();
     if (!lines.length) return [];
@@ -174,6 +176,7 @@ export class LabOverviewService {
         releasedAt: iso(l.releasedAt),
         ackBy: l.critical?.ackBy ?? null,
         ackAt: iso(l.critical?.ackAt),
+        amended: (l.version ?? 0) > 1,
         dueAt: iso(dueOf.get(String(l._id))),
       };
     });

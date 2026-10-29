@@ -65,8 +65,12 @@ export interface WorklistLine {
   tatDueAt: string;
   results: { param: string; value: string | number; unit: string; flag: string; critical: boolean }[];
   critical: boolean;
-  enteredBy: { name: string } | null;
+  enteredBy: { id: string; name: string } | null;
   enteredAt: string | null;
+  validatedBy: { id: string; name: string } | null;
+  releasedRealAt: string | null;
+  lastReleasedRealAt: string | null;
+  version: number;
   sentBack: { by: string; reason: string; at: string } | null;
 }
 
@@ -307,8 +311,12 @@ export class LabBenchService {
         tatDueAt: iso(l.tatDueAt)!,
         results: l.results ?? [],
         critical,
-        enteredBy: l.enteredBy ? { name: l.enteredBy.name } : null,
+        enteredBy: l.enteredBy ? { id: l.enteredBy.id, name: l.enteredBy.name } : null,
         enteredAt: iso(l.enteredAt),
+        validatedBy: l.validatedBy ? { id: l.validatedBy.id, name: l.validatedBy.name } : null,
+        releasedRealAt: iso(l.releasedRealAt),
+        lastReleasedRealAt: iso(l.lastReleasedRealAt),
+        version: l.version ?? 0,
         sentBack: l.sentBack ? { by: l.sentBack.by, reason: l.sentBack.reason, at: iso(l.sentBack.at)! } : null,
       };
     };

@@ -57,7 +57,15 @@ export interface LabLineView {
   results: LabLine['results'];
   version: number;
   enteredAt: string | null;
+  enteredBy: { id: string; name: string } | null;
+  /** Kept for older readers; same as enteredBy.name. */
+  enteredByName: string | null;
+  validatedBy: { id: string; name: string } | null;
   releasedAt: string | null;
+  /** Real time of the first release. */
+  releasedRealAt: string | null;
+  /** Real time of the latest release, amendments included. */
+  lastReleasedRealAt: string | null;
   cancelled: { by: string; reason: string; at: string } | null;
   critical: { active: boolean; ackBy: string | null; ackAt: string | null; ackNote: string | null } | null;
 }
@@ -567,7 +575,12 @@ export class LabOrdersService {
       results: l.results ?? [],
       version: l.version ?? 0,
       enteredAt: iso(l.enteredAt),
+      enteredBy: l.enteredBy ? { id: l.enteredBy.id, name: l.enteredBy.name } : null,
+      enteredByName: l.enteredBy?.name ?? null,
+      validatedBy: l.validatedBy ? { id: l.validatedBy.id, name: l.validatedBy.name } : null,
       releasedAt: iso(l.releasedAt),
+      releasedRealAt: iso(l.releasedRealAt),
+      lastReleasedRealAt: iso(l.lastReleasedRealAt),
       cancelled: l.cancelled ? { by: l.cancelled.by, reason: l.cancelled.reason, at: iso(l.cancelled.at)! } : null,
       critical: l.critical
         ? { active: !!l.critical.active, ackBy: l.critical.ackBy ?? null, ackAt: iso(l.critical.ackAt), ackNote: l.critical.ackNote ?? null }
