@@ -6,7 +6,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { AgentRegistry } from './agent-registry';
 import { AgentKey, PRIORITY_RANK, Priority } from './coordinator-types';
 import { MessagesService, MessageView } from './messages.service';
-import { Case, CaseDocument, CaseKind } from './schemas/case.schema';
+import { CASE_KINDS, Case, CaseDocument, CaseKind } from './schemas/case.schema';
 import { CoordinatorCounter, CoordinatorCounterDocument } from './schemas/coordinator-counter.schema';
 
 export interface OpenOrJoinInput {
@@ -25,6 +25,7 @@ export interface CaseQuery {
 }
 
 const DUPLICATE_KEY = 11000;
+const KIND_RANK: Record<CaseKind, number> = { opd: 0, er: 1, ipd: 2 };
 const isOpen = { state: 'open' } as const;
 
 /** A case is one patient's journey through the agents; at most one is open per patient. */
@@ -99,11 +100,12 @@ export class CasesService {
     return { case: created, opened: true };
   }
 
-  /** Adds the agent, lifts er to ipd (never back) and keeps the higher priority. Each step is one atomic update. */
+  /** Adds the agent, lifts the kind (opd, er, ipd; never back) and keeps the higher priority. Each step is one atomic update. */
   private async join(existing: CaseDocument, input: OpenOrJoinInput): Promise<CaseDocument> {
     const _id = existing._id;
     await this.model.updateOne({ _id, ...isOpen }, { $addToSet: { agents: input.openedBy } }).exec();
-    if (input.kind === 'ipd') await this.model.updateOne({ _id, ...isOpen, kind: 'er' }, { $set: { kind: 'ipd' } }).exec();
+    const lowerKinds = CASE_KINDS.filter((k) => KIND_RANK[k] < KIND_RANK[input.kind]);
+    if (lowerKinds.length) await this.model.updateOne({ _id, ...isOpen, kind: { $in: lowerKinds } }, { $set: { kind: input.kind } }).exec();
     const lower = (Object.keys(PRIORITY_RANK) as Priority[]).filter((p) => PRIORITY_RANK[p] > PRIORITY_RANK[input.priority]);
     await this.model.updateOne({ _id, ...isOpen, priority: { $in: lower } }, { $set: { priority: input.priority } }).exec();
     return (await this.model.findById(_id).exec()) ?? existing;

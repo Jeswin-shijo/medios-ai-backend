@@ -48,21 +48,22 @@ describe('RulesService', () => {
   test('rules list locked, switchable and coming-soon rules; locked rules refuse changes; a rule with a settingPath writes that setting (test with ai.bedAutoAllocate); non-admins are refused', async () => {
     const list = await service.list();
     assert.deepEqual(list.map((r) => r.key), [
-      'emergency-first', 'escalate-overdue', 'bed-auto-allocate', 'test-a', 'test-b', 'critical-lab-escalation', 'discharge-dependency-checks',
+      'emergency-first', 'escalate-overdue', 'bed-auto-allocate', 'test-a', 'test-b', 'discharge-dependency-checks',
     ]);
     const by = (k: string) => list.find((r) => r.key === k)!;
     assert.equal(by('emergency-first').locked, true);
     assert.equal(by('emergency-first').value, true);
     assert.equal(by('test-a').value, false);
     assert.equal(by('bed-auto-allocate').value, true);
-    assert.deepEqual(by('critical-lab-escalation'), {
-      key: 'critical-lab-escalation', agent: 'lab', label: 'Critical lab result escalation', description: '', value: false, locked: true, comingWith: 'lab',
+    assert.equal(list.some((r) => r.key === 'critical-lab-escalation'), false);
+    assert.deepEqual(by('discharge-dependency-checks'), {
+      key: 'discharge-dependency-checks', agent: 'discharge', label: 'Discharge dependency checks', description: '', value: false, locked: true, comingWith: 'discharge',
     });
 
     await assert.rejects(() => service.set(doctor, 'test-a', true), ForbiddenException);
     await assert.rejects(() => service.set(doctor, 'nope', true), ForbiddenException);
     await assert.rejects(() => service.set(admin, 'nope', true), NotFoundException);
-    await assert.rejects(() => service.set(admin, 'critical-lab-escalation', true), NotFoundException);
+    await assert.rejects(() => service.set(admin, 'discharge-dependency-checks', true), NotFoundException);
     await assert.rejects(() => service.set(admin, 'emergency-first', false), (e: unknown) => e instanceof ConflictException && e.message === 'This rule is always on.');
 
     // A rule with a settingPath writes that setting.

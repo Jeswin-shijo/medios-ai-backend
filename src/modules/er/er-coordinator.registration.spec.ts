@@ -115,7 +115,7 @@ describe('ErCoordinatorRegistration', () => {
     requests = new BedRequestsService(m.BedRequest, patients, beds, new BedAlerts(m.TaskAlertItem), bedEvents);
     const suggestions = new SuggestionsService(m.BedSuggestion, beds, patients, fakeAi() as unknown as AiService);
     agent = new BedAgentService(requests, suggestions, beds, new SettingsService(m.HospitalSettings), bedEvents);
-    bridge = new BedCoordinatorBridge(bedEvents, requests, registry, messages, cases, approvals, m.Admission, m.BedRequest);
+    bridge = new BedCoordinatorBridge(bedEvents, requests, registry, messages, cases, approvals, m.Admission, m.BedRequest, m.Bed, m.Ward);
     bridge.onModuleInit();
   });
 

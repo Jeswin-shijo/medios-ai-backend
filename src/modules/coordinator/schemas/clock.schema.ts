@@ -15,12 +15,14 @@ export class Clock {
   @Prop({ required: true, type: Date }) startedAt: Date;
   @Prop({ required: true, type: Date }) dueAt: Date;
   @Prop({ type: String, default: 'running', enum: CLOCK_STATES }) state: ClockState;
+  /** The item the clock is for (a request or a line), or null for one clock per case. */
+  @Prop({ type: String, default: null }) ref?: string | null;
   @Prop({ type: Date }) stoppedAt?: Date;
   @Prop({ type: Number }) metMinutes?: number;
   @Prop({ type: MongooseSchema.Types.ObjectId }) escalation?: Types.ObjectId;
 }
 
 export const ClockSchema = SchemaFactory.createForClass(Clock);
-// One running clock per definition and case; met and expired clocks stay as history.
-ClockSchema.index({ def: 1, case: 1 }, { unique: true, partialFilterExpression: { state: { $eq: 'running' } } });
+// One running clock per definition, case and item; met and expired clocks stay as history.
+ClockSchema.index({ def: 1, case: 1, ref: 1 }, { unique: true, partialFilterExpression: { state: { $eq: 'running' } } });
 ClockSchema.index({ state: 1, dueAt: 1 });

@@ -14,6 +14,8 @@ import { BedChange, BedEvents, BedRequestEvent } from './bed-events';
 import { BedRequestsService, BedRequestView } from './bed-requests.service';
 import { Admission, AdmissionDocument } from './schemas/admission.schema';
 import { BedRequest, BedRequestDocument } from './schemas/bed-request.schema';
+import { Bed, BedDocument } from './schemas/bed.schema';
+import { Ward, WardDocument } from './schemas/ward.schema';
 
 const CAPACITY = 20;
 const ON_TIME_MINUTES = 15;
@@ -34,11 +36,11 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
 
 const MESSAGE_TYPES: MessageTypeDef[] = [
   type('bed.request', 'A bed was requested for a patient', { requestId: 'string', requestType: 'string', priority: 'string' }),
-  type('bed.assigned', 'A patient was placed in a bed', { bedId: 'string', bedLabel: 'string', admissionId: 'string' }),
+  type('bed.assigned', 'A patient was placed in a bed', { bedId: 'string', bedLabel: 'string', admissionId: 'string', ward: 'string' }),
   type('bed.waiting', 'No bed fits yet; the request waits', { requestId: 'string' }),
   type('bed.attention', 'A bed request needs a person to decide', { requestId: 'string' }),
   type('bed.cancelled', 'A bed request was cancelled', { requestId: 'string' }),
-  type('bed.transferred', 'A patient moved to another bed', { bedId: 'string', bedLabel: 'string', fromBedLabel: 'string', admissionId: 'string' }),
+  type('bed.transferred', 'A patient moved to another bed', { bedId: 'string', bedLabel: 'string', fromBedLabel: 'string', admissionId: 'string', ward: 'string' }),
   type('bed.discharged', 'A patient left a bed', { bedId: 'string', bedLabel: 'string' }),
   type('bed.cleaned', 'A bed was cleaned and is free again', { bedId: 'string', bedLabel: 'string' }),
 ];
@@ -65,6 +67,8 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
     private readonly approvals: ApprovalsService,
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     @InjectModel(BedRequest.name) private readonly requestModel: Model<BedRequestDocument>,
+    @InjectModel(Bed.name) private readonly bedModel: Model<BedDocument>,
+    @InjectModel(Ward.name) private readonly wardModel: Model<WardDocument>,
   ) {}
 
   onModuleInit(): void {
@@ -192,6 +196,19 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** The name of the ward a bed is in, or '' when it can't be found. */
+  private async wardNameOf(bedId?: string): Promise<string> {
+    if (!bedId) return '';
+    try {
+      const bed = await this.bedModel.findById(bedId).select('ward').lean<{ ward?: unknown }>().exec();
+      if (!bed?.ward) return '';
+      const ward = await this.wardModel.findById(bed.ward).select('name').lean<{ name?: string }>().exec();
+      return ward?.name ?? '';
+    } catch {
+      return '';
+    }
+  }
+
   /** The patient's open case, or null: used to log a bed change without opening a case for it. */
   private async openCaseOf(patientId?: string): Promise<string | null> {
     if (!patientId) return null;
@@ -236,6 +253,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
           bedId: r.assignedBedId ?? '',
           bedLabel: r.assignedBedLabel ?? '',
           admissionId: r.admissionId ?? '',
+          ward: await this.wardNameOf(r.assignedBedId),
         }, `${r.patientUhid} placed in ${r.assignedBedLabel ?? 'a bed'}`);
         await this.approvals.markDone(source, 'Bed Agent');
         break;
@@ -343,7 +361,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
           type: 'bed.assigned',
           priority: 'medium',
           summary: `${c.patientUhid} admitted to ${c.bedLabel}`,
-          payload: { bedId: c.bedId, bedLabel: c.bedLabel, admissionId: c.admissionId },
+          payload: { bedId: c.bedId, bedLabel: c.bedLabel, admissionId: c.admissionId, ward: await this.wardNameOf(c.bedId) },
         });
         return;
       }
@@ -355,7 +373,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
           type: 'bed.transferred',
           priority: 'medium',
           summary: `${c.patientUhid ?? 'Patient'} moved from ${c.fromBedLabel ?? 'a bed'} to ${c.bedLabel}`,
-          payload: { bedId: c.bedId, bedLabel: c.bedLabel, fromBedLabel: c.fromBedLabel ?? '', admissionId: c.admissionId ?? '' },
+          payload: { bedId: c.bedId, bedLabel: c.bedLabel, fromBedLabel: c.fromBedLabel ?? '', admissionId: c.admissionId ?? '', ward: await this.wardNameOf(c.bedId) },
         });
         return;
       case 'discharged':

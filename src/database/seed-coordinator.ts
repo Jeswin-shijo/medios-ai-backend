@@ -3,6 +3,8 @@ import { displayDate, displayTime } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
 import { Admission, AdmissionSchema } from '../modules/beds/schemas/admission.schema';
 import { BedRequest, BedRequestSchema } from '../modules/beds/schemas/bed-request.schema';
+import { Bed, BedSchema } from '../modules/beds/schemas/bed.schema';
+import { Ward, WardSchema } from '../modules/beds/schemas/ward.schema';
 import { DEFAULT_LADDERS, DEFAULT_TITLES } from '../modules/coordinator/escalations.service';
 import { AgentMessage, AgentMessageSchema } from '../modules/coordinator/schemas/agent-message.schema';
 import { Approval, ApprovalSchema } from '../modules/coordinator/schemas/approval.schema';
@@ -211,6 +213,12 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
   plans.forEach((p, i) => (p.number = `CASE-${String(i + 1).padStart(4, '0')}`));
 
 
+  // The ward name of each assigned bed, as the bridge puts it on bed.assigned.
+  const wardNames = new Map((await model(Ward, WardSchema).find().select('name').lean<any[]>()).map((w) => [String(w._id), w.name as string]));
+  const bedWard = new Map(
+    (await model(Bed, BedSchema).find({ _id: { $in: all.flatMap((r) => (r.assignedBed ? [r.assignedBed] : [])) } }).select('ward').lean<any[]>()).map((b) => [String(b._id), wardNames.get(String(b.ward)) ?? '']),
+  );
+
   // Messages, written the way the Bed bridge writes them. Summaries carry the UHID and bed label, never a name.
   const docs: Record<string, unknown>[] = [];
   let waitMessageId: Types.ObjectId | undefined;
@@ -275,7 +283,7 @@ export async function seedCoordinator(clinicDay: string, nowMs: number = Date.no
           type: 'bed.assigned',
           priority: rp,
           summary: `${uhid} placed in ${r.assignedBedLabel ?? 'a bed'}`,
-          payload: { bedId: String(r.assignedBed ?? ''), bedLabel: r.assignedBedLabel ?? '', admissionId: String(r.admission ?? ''), requestId: String(r._id) },
+          payload: { bedId: String(r.assignedBed ?? ''), bedLabel: r.assignedBedLabel ?? '', admissionId: String(r.admission ?? ''), ward: bedWard.get(String(r.assignedBed ?? '')) ?? '', requestId: String(r._id) },
           resolves: requestedMsg,
         });
         resolveWith(id, at);

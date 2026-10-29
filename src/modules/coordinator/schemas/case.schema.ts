@@ -4,7 +4,7 @@ import type { AgentKey, Priority } from '../coordinator-types';
 
 export type CaseDocument = Case & Document;
 
-export const CASE_KINDS = ['er', 'ipd'] as const;
+export const CASE_KINDS = ['opd', 'er', 'ipd'] as const;
 export type CaseKind = (typeof CASE_KINDS)[number];
 export const CASE_STATES = ['open', 'closed'] as const;
 export type CaseState = (typeof CASE_STATES)[number];

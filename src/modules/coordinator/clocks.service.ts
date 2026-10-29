@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import type { ClockDef } from './coordinator-types';
@@ -42,7 +42,7 @@ function toView(c: any): ClockView {
 
 /** Deadline clocks: a start message begins one, a stop message meets it, checkDue expires it. Real time. */
 @Injectable()
-export class ClocksService {
+export class ClocksService implements OnModuleInit {
   private readonly logger = new Logger(ClocksService.name);
   private readonly unknownLogged = new Set<string>();
 
@@ -53,6 +53,38 @@ export class ClocksService {
     private readonly escalations: EscalationsService,
   ) {
     this.messages.onStored((m) => this.onMessage(m));
+  }
+
+  /** Drops the old one-clock-per-case index (def + case) so clocks can be one per item. */
+  async onModuleInit(): Promise<void> {
+    try {
+      const old = (await this.model.collection.indexes()).find((i) => {
+        const keys = Object.keys(i.key ?? {});
+        return keys.length === 2 && i.key.def === 1 && i.key.case === 1;
+      });
+      if (old?.name) {
+        await this.model.collection.dropIndex(old.name);
+        this.logger.log(`Dropped the old clocks index ${old.name}; clocks are now one per case and item`);
+      }
+    } catch (e) {
+      // No collection yet, or the index is already gone: nothing to migrate.
+      this.logger.debug(`Clocks index check skipped: ${(e as Error).message}`);
+    }
+  }
+
+  /** The item a message's clock is for: the definition's ref, or null when it has none or it is unusable. */
+  private refFrom(def: ClockDef, type: string, payload: Record<string, unknown>): string | null {
+    if (!def.refFrom) return null;
+    try {
+      const r = def.refFrom(type, payload);
+      return typeof r === 'string' ? r : null;
+    } catch (e) {
+      if (!this.unknownLogged.has(`refFrom:${def.key}`)) {
+        this.unknownLogged.add(`refFrom:${def.key}`);
+        this.logger.error(`refFrom of clock ${def.key} failed, using no ref: ${(e as Error).message}`);
+      }
+      return null;
+    }
   }
 
   private async onMessage(m: MessageDocument): Promise<void> {
@@ -67,14 +99,14 @@ export class ClocksService {
     };
     for (const def of this.registry.clocksStartingOn(m.type).filter(accepts)) {
       try {
-        await this.start(def, m, payload);
+        await this.start(def, m, payload, this.refFrom(def, m.type, payload));
       } catch (e) {
         this.logger.error(`Starting clock ${def.key} failed: ${(e as Error).message}`);
       }
     }
     for (const def of this.registry.clocksStoppingOn(m.type).filter(accepts)) {
       try {
-        await this.stop(def.key, m);
+        await this.stop(def.key, m, this.refFrom(def, m.type, payload));
       } catch (e) {
         this.logger.error(`Stopping clock ${def.key} failed: ${(e as Error).message}`);
       }
@@ -83,8 +115,8 @@ export class ClocksService {
       try {
         const dueAt = this.dueFrom(def, payload);
         if (!dueAt) continue;
-        // Only the running clock for this case moves; met and expired ones stay as they are.
-        await this.model.updateOne({ def: def.key, case: m.case ?? null, state: 'running' }, { $set: { dueAt } }).exec();
+        // Only the running clock for this case and item moves; met and expired ones stay as they are.
+        await this.model.updateOne({ def: def.key, case: m.case ?? null, ref: this.refFrom(def, m.type, payload), state: 'running' }, { $set: { dueAt } }).exec();
       } catch (e) {
         this.logger.error(`Moving clock ${def.key} failed: ${(e as Error).message}`);
       }
@@ -106,12 +138,13 @@ export class ClocksService {
     }
   }
 
-  private async start(def: ClockDef, m: MessageDocument, payload: Record<string, unknown>): Promise<void> {
+  private async start(def: ClockDef, m: MessageDocument, payload: Record<string, unknown>, ref: string | null): Promise<void> {
     const startedAt = m.createdAt ? new Date(m.createdAt) : new Date();
     try {
       await this.model.create({
         def: def.key,
         case: m.case ?? null,
+        ref,
         startedBy: m._id,
         startedAt,
         dueAt: this.dueFrom(def, payload) ?? new Date(startedAt.getTime() + def.minutes * MINUTE_MS),
@@ -123,9 +156,9 @@ export class ClocksService {
     }
   }
 
-  private async stop(defKey: string, m: MessageDocument): Promise<void> {
+  private async stop(defKey: string, m: MessageDocument, ref: string | null): Promise<void> {
     const at = new Date();
-    const key = { def: defKey, case: m.case ?? null };
+    const key = { def: defKey, case: m.case ?? null, ref };
     const metOf = (c: { startedAt: Date }) => Math.round((at.getTime() - new Date(c.startedAt).getTime()) / MINUTE_MS);
     const running = await this.model.findOne({ ...key, state: 'running' }).exec();
     if (running) {

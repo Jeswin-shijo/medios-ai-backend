@@ -142,7 +142,7 @@ describe('BedCoordinatorBridge', () => {
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, new CoordinatorEvents());
-    bridge = new BedCoordinatorBridge(events, requests, registry, messages, cases, approvals, Admission, BedRequest);
+    bridge = new BedCoordinatorBridge(events, requests, registry, messages, cases, approvals, Admission, BedRequest, Bed, Ward);
     bridge.onModuleInit();
   });
 
@@ -246,6 +246,20 @@ describe('BedCoordinatorBridge', () => {
     const c: any = await m.Case.findOne().lean();
     assert.equal(c.refs.admissionId, String(req.admission));
     await noNames();
+  });
+
+  test('bed.assigned carries the ward name', async () => {
+    const p = await patient();
+    const id = await ask({ patientId: p.id });
+    await agent.process(id);
+    await bridge.idle();
+    const req: any = await BedRequest.findById(id).lean();
+    assert.equal(req.state, 'assigned');
+    const [assigned] = await all('bed.assigned');
+    const placedBed: any = await Bed.findById(req.assignedBed).lean();
+    const placedWard: any = await Ward.findById(placedBed.ward).lean();
+    assert.ok(placedWard.name);
+    assert.equal(assigned.payload.ward, placedWard.name);
   });
 
   test('a retry that waits again logs one bed.waiting; a wait after attention logs a new one', async () => {

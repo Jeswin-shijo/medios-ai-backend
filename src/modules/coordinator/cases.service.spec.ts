@@ -87,6 +87,17 @@ describe('CasesService', () => {
     assert.equal(back.case.priority, 'critical');
   });
 
+  test('an opd case is lifted to er and then ipd, never back', async () => {
+    const { case: c } = await service.openOrJoin(input({ kind: 'opd', openedBy: 'lab' }));
+    assert.equal(c.kind, 'opd');
+    assert.equal((await service.openOrJoin(input({ kind: 'opd', openedBy: 'lab' }))).case.kind, 'opd');
+    assert.equal((await service.openOrJoin(input({ kind: 'er' }))).case.kind, 'er');
+    assert.equal((await service.openOrJoin(input({ kind: 'opd', openedBy: 'lab' }))).case.kind, 'er');
+    assert.equal((await service.openOrJoin(input({ kind: 'ipd', openedBy: 'bed' }))).case.kind, 'ipd');
+    assert.equal((await service.openOrJoin(input({ kind: 'er' }))).case.kind, 'ipd');
+    assert.equal((await service.openOrJoin(input({ kind: 'opd', openedBy: 'lab' }))).case.kind, 'ipd');
+  });
+
   test('evaluateClose closes only when every close check passes, and logs why', async () => {
     const { case: c } = await service.openOrJoin(input());
     const id = String(c._id);

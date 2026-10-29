@@ -19,6 +19,8 @@ export const DEFAULT_TITLES: { key: string; label: string }[] = [
   { key: 'duty-administrator', label: 'Duty administrator' },
   { key: 'cardiology-on-call', label: 'Cardiology on-call' },
   { key: 'pharmacist-on-duty', label: 'Pharmacist on duty' },
+  { key: 'lab-in-charge', label: 'Lab in charge' },
+  { key: 'duty-doctor', label: 'Duty doctor' },
 ];
 
 export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] }[] = [
@@ -40,6 +42,20 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
       { title: 'er-consultant', waitMinutes: 15 },
       { title: 'medical-superintendent', waitMinutes: 0 },
     ],
+  },
+  {
+    key: 'lab',
+    label: 'Lab',
+    steps: [
+      { title: 'lab-in-charge', waitMinutes: 15 },
+      { title: 'duty-administrator', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'lab-critical',
+    label: 'Lab critical',
+    steps: [{ title: 'duty-doctor', waitMinutes: 10 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
 ];
 

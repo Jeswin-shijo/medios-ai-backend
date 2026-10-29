@@ -67,6 +67,8 @@ export interface ClockDef {
   match?: (type: string, payload: Record<string, unknown>) => boolean;
   /** The start message sets the due time; null (or an invalid date) falls back to `minutes`. */
   dueFrom?: (payload: Record<string, unknown>) => Date | null;
+  /** Names the item a clock belongs to, so one case can run several clocks of this kind. Null (or a failure) means no ref. */
+  refFrom?: (type: string, payload: Record<string, unknown>) => string | null;
   /** Messages that move a running clock's due time to `dueFrom(payload)`. */
   updateOn?: string[];
 }
@@ -125,7 +127,6 @@ export interface AgentDefinition {
 
 /** Rules shown as "Coming with the ... Agent" until that agent is built. */
 export const COMING_RULES: { key: string; agent: AgentKey; label: string }[] = [
-  { key: 'critical-lab-escalation', agent: 'lab', label: 'Critical lab result escalation' },
   { key: 'discharge-dependency-checks', agent: 'discharge', label: 'Discharge dependency checks' },
 ];
 

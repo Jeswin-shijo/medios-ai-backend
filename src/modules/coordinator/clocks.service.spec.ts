@@ -37,6 +37,10 @@ describe('ClocksService', () => {
         { type: 'test.move', agent: 'er', description: 'moves the due time', payload: {} },
         { type: 'test.scoped', agent: 'er', description: 'matched by payload', payload: {} },
         { type: 'test.scoped.done', agent: 'er', description: 'matched stop', payload: {} },
+        { type: 'test.ref', agent: 'er', description: 'per item start', payload: {} },
+        { type: 'test.ref.done', agent: 'er', description: 'per item stop', payload: {} },
+        { type: 'test.ref.move', agent: 'er', description: 'per item update', payload: {} },
+        { type: 'test.ref.bad', agent: 'er', description: 'bad ref', payload: {} },
       ],
       clocks: [
         { key: 'test-wait', agent: 'er', label: 'Test wait', startOn: 'test.wait', stopOn: ['test.done'], minutes: 10, ladder: 'default' },
@@ -50,6 +54,30 @@ describe('ClocksService', () => {
           ladder: 'default',
           dueFrom: (p) => (typeof p.at === 'string' ? new Date(p.at) : null),
           updateOn: ['test.move'],
+        },
+        {
+          key: 'test-ref',
+          agent: 'er',
+          label: 'Test ref',
+          startOn: 'test.ref',
+          stopOn: ['test.ref.done'],
+          minutes: 10,
+          ladder: 'default',
+          refFrom: (_t, p) => (typeof p.item === 'string' ? p.item : null),
+          dueFrom: (p) => (typeof p.at === 'string' ? new Date(p.at) : null),
+          updateOn: ['test.ref.move'],
+        },
+        {
+          key: 'test-badref',
+          agent: 'er',
+          label: 'Test bad ref',
+          startOn: 'test.ref.bad',
+          stopOn: [],
+          minutes: 10,
+          ladder: 'default',
+          refFrom: () => {
+            throw new Error('boom');
+          },
         },
         {
           key: 'test-scoped',
@@ -235,5 +263,63 @@ describe('ClocksService', () => {
     assert.equal((await messages.list({ type: 'clock.expired' })).length, 0);
     await service.checkDue(new Date());
     assert.equal(await Escalation.countDocuments(), 1);
+  });
+
+  test('two clocks of one def run at once on one case when their refs differ', async () => {
+    const caseId = String(new Types.ObjectId());
+    await sendWith('test.ref', { item: 'a' }, caseId);
+    await sendWith('test.ref', { item: 'b' }, caseId);
+    await sendWith('test.ref', { item: 'a' }, caseId); // a repeat of a running ref changes nothing
+    const rows: any[] = await Clock.find({ def: 'test-ref' }).sort({ ref: 1 }).lean();
+    assert.deepEqual(rows.map((r) => [r.ref, r.state]), [['a', 'running'], ['b', 'running']]);
+  });
+
+  test('stop and update only touch the clock with the matching ref', async () => {
+    const caseId = String(new Types.ObjectId());
+    const soon = new Date(Date.now() + 25 * MIN);
+    await sendWith('test.ref', { item: 'a', at: soon.toISOString() }, caseId);
+    await sendWith('test.ref', { item: 'b', at: soon.toISOString() }, caseId);
+    const later = new Date(Date.now() + 50 * MIN);
+    await sendWith('test.ref.move', { item: 'b', at: later.toISOString() }, caseId);
+    let a: any = await Clock.findOne({ def: 'test-ref', ref: 'a' }).lean();
+    let b: any = await Clock.findOne({ def: 'test-ref', ref: 'b' }).lean();
+    assert.equal(new Date(a.dueAt).getTime(), soon.getTime());
+    assert.equal(new Date(b.dueAt).getTime(), later.getTime());
+    await sendWith('test.ref.done', { item: 'a' }, caseId);
+    a = await Clock.findOne({ def: 'test-ref', ref: 'a' }).lean();
+    b = await Clock.findOne({ def: 'test-ref', ref: 'b' }).lean();
+    assert.equal(a.state, 'met');
+    assert.equal(b.state, 'running');
+  });
+
+  test('a def without refFrom behaves as before, and a failing refFrom counts as no ref', async () => {
+    const caseId = String(new Types.ObjectId());
+    await send('test.wait', caseId);
+    await send('test.wait', caseId);
+    const rows: any[] = await Clock.find({ def: 'test-wait' }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].ref, null);
+    await send('test.done', caseId);
+    assert.equal(((await Clock.findOne({ def: 'test-wait' }).lean()) as any).state, 'met');
+
+    await sendWith('test.ref.bad', {}, caseId);
+    await sendWith('test.ref.bad', {}, caseId);
+    const bad: any[] = await Clock.find({ def: 'test-badref' }).lean();
+    assert.equal(bad.length, 1);
+    assert.equal(bad[0].ref, null);
+    // A non-string ref is also null.
+    await sendWith('test.ref', { item: 5 }, caseId);
+    assert.equal((((await Clock.findOne({ def: 'test-ref' }).lean()) as any).ref), null);
+  });
+
+  test('the old def+case index is dropped on init', async () => {
+    const coll = Clock.collection;
+    await coll.createIndex({ def: 1, case: 1 }, { name: 'def_1_case_1', unique: true, partialFilterExpression: { state: { $eq: 'running' } } });
+    assert.ok((await coll.indexes()).some((i) => i.name === 'def_1_case_1'));
+    await service.onModuleInit();
+    const left = await coll.indexes();
+    assert.ok(!left.some((i) => i.name === 'def_1_case_1'));
+    assert.ok(left.some((i) => JSON.stringify(i.key) === JSON.stringify({ def: 1, case: 1, ref: 1 })));
+    await service.onModuleInit(); // a second run finds nothing to drop
   });
 });

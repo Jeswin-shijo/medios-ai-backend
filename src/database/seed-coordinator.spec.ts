@@ -151,11 +151,11 @@ describe('seedCoordinator', () => {
 
   test('duty titles and ladders are set, the admin holds two titles', async () => {
     const titles = await m.DutyTitle.find().lean().exec();
-    assert.equal(titles.length, 6);
+    assert.equal(titles.length, 8);
     const held = titles.filter((t) => t.holders.length).map((t) => t.key).sort();
     assert.deepEqual(held, ['duty-administrator', 'medical-superintendent']);
     assert.ok(titles.filter((t) => t.holders.length).every((t) => t.holders.map(String).join() === adminId));
-    assert.deepEqual((await m.Ladder.find().lean().exec()).map((l) => l.key).sort(), ['bed-wait', 'default', 'er']);
+    assert.deepEqual((await m.Ladder.find().lean().exec()).map((l) => l.key).sort(), ['bed-wait', 'default', 'er', 'lab', 'lab-critical']);
   });
 
   test('history has 168 hourly points', async () => {

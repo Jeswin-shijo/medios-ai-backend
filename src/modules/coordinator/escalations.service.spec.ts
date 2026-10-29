@@ -279,9 +279,9 @@ describe('EscalationsService', () => {
     await service.ensureDefaults();
     await service.ensureDefaults();
     const titles = await service.titles();
-    assert.equal(titles.length, 6);
+    assert.equal(titles.length, 8);
     assert.deepEqual(titles.find((t) => t.key === 'er-consultant')!.holders, [nurse.id]);
-    assert.equal((await service.ladders()).length, 3);
+    assert.equal((await service.ladders()).length, 5);
 
     await assert.rejects(service.saveTitle(nurse, { key: 'x', label: 'x', holders: [] }), { status: 403 });
     await assert.rejects(service.saveTitle(admin, { key: 'x', label: 'x', holders: [String(new Types.ObjectId())] }), { status: 400 });
@@ -293,7 +293,23 @@ describe('EscalationsService', () => {
       { status: 400 },
     );
     await service.saveLadder(admin, { key: 'l', label: 'l', steps: [{ title: 'er-consultant', waitMinutes: 5 }, { title: 'er-consultant', waitMinutes: 0 }] });
-    assert.equal((await service.ladders()).length, 4);
+    assert.equal((await service.ladders()).length, 6);
+  });
+
+  test('the lab and lab-critical ladders and the two titles exist after seeding defaults', async () => {
+    const titles = await service.titles();
+    assert.equal(titles.find((t) => t.key === 'lab-in-charge')!.label, 'Lab in charge');
+    assert.equal(titles.find((t) => t.key === 'duty-doctor')!.label, 'Duty doctor');
+    const ladders = await service.ladders();
+    assert.deepEqual(ladders.find((l) => l.key === 'lab')!.steps, [
+      { title: 'lab-in-charge', waitMinutes: 15 },
+      { title: 'duty-administrator', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
+    assert.deepEqual(ladders.find((l) => l.key === 'lab-critical')!.steps, [
+      { title: 'duty-doctor', waitMinutes: 10 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
   });
 
   test('holders leave out inactive users', async () => {
