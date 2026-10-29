@@ -16,6 +16,7 @@
     "test": "TS_NODE_TRANSPILE_ONLY=true node --require ts-node/register --test --test-concurrency=1 \"src/**/*.spec.ts\"",
     "test:file": "TS_NODE_TRANSPILE_ONLY=true node --require ts-node/register --test --test-concurrency=1",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
+    "e2e:reception": "node scripts/e2e-reception.mjs",
     "create-user": "ts-node -r tsconfig-paths/register src/database/create-user.ts"
   },
   "dependencies": {
