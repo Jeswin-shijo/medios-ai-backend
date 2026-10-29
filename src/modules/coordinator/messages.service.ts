@@ -299,6 +299,14 @@ export class MessagesService {
     return m ? toView(m) : null;
   }
 
+  /** The oldest message of a type whose payload holds the given values (a payload that is a plain value). */
+  async findOne(type: string, payload: Record<string, string | number | boolean>): Promise<MessageView | null> {
+    const match: Record<string, unknown> = { type };
+    for (const [k, v] of Object.entries(payload)) match[`payload.${k}`] = v;
+    const m = await this.model.findOne(match).sort({ createdAt: 1, _id: 1 }).lean().exec();
+    return m ? toView(m) : null;
+  }
+
   countSince(since: Date): Promise<number> {
     return this.model.countDocuments({ createdAt: { $gte: since } }).exec();
   }

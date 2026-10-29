@@ -4,7 +4,7 @@ import { FilterQuery, Model, Types, UpdateQuery, mongo } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
 import { PatientsService } from '../patients/patients.service';
 import { Actor } from './actor';
-import { BedEvents } from './bed-events';
+import { BedChange, BedEvents } from './bed-events';
 import { BedInfo, BedState, Feature, GenderRule, Need, PatientGender, RoomClass, WardInfo, WardType } from './bed-types';
 import { HOLD_MINUTES, isFree } from './rules';
 import { Admission, AdmissionDocument } from './schemas/admission.schema';
@@ -24,6 +24,8 @@ export interface AdmitInput {
   needs: Need[];
   notes: string;
   expectedStayDays: number;
+  /** The bed request this admission answers, when the screen named one. */
+  requestId?: string;
 }
 
 export interface BedBoardWard {
@@ -386,6 +388,7 @@ export class BedsService {
 
     // 3. Then the patient record.
     await this.patients.update(String(patient._id), { status: 'Admitted', visitType: 'IPD' });
+    await this.announce('admitted', bedId, { admission, byStaff: true, requestId: input.requestId });
     return admission;
   }
 
@@ -433,7 +436,39 @@ export class BedsService {
 
     // 3. Then the patient record.
     await this.patients.update(String(patient._id), { status: 'Admitted', visitType: 'IPD' });
+    await this.announce('admitted', bedId, { admission, byStaff: false });
     return admission;
+  }
+
+  /**
+   * Tells the Coordinator bridge a bed action succeeded. Runs only after the action is done
+   * and never throws into it.
+   */
+  private async announce(
+    kind: BedChange['kind'],
+    bedId: string,
+    extra: {
+      admission?: { _id: unknown; patient: unknown; patientUhid: string; patientName: string } | null;
+      byStaff: boolean;
+      requestId?: string;
+      fromBedLabel?: string;
+    },
+  ): Promise<void> {
+    try {
+      const bed = await this.beds.findById(bedId).select('label').lean<{ label?: string }>().exec();
+      const a = extra.admission;
+      this.events.bedChanged({
+        kind,
+        bedId,
+        bedLabel: bed?.label ?? '',
+        ...(extra.fromBedLabel ? { fromBedLabel: extra.fromBedLabel } : {}),
+        ...(a ? { admissionId: String(a._id), patientId: String(a.patient), patientUhid: a.patientUhid, patientName: a.patientName } : {}),
+        byStaff: extra.byStaff,
+        ...(extra.requestId ? { requestId: extra.requestId } : {}),
+      });
+    } catch {
+      // A bed action that worked must not fail because the report did not.
+    }
   }
 
   /** Puts back a bed an agent just took (`before` is the bed as it was), if it still holds that admission. */
@@ -459,6 +494,7 @@ export class BedsService {
     toBedId: string,
     actor: Actor,
     reason: string | undefined,
+    byStaff: boolean,
     claim: (from: BedDocument, admission: AdmissionDocument, at: Date) => Promise<void>,
   ): Promise<AdmissionDocument> {
     const from = await this.beds.findById(fromBedId).exec();
@@ -497,6 +533,7 @@ export class BedsService {
       )
       .exec();
     this.events.changed();
+    await this.announce('transferred', toBedId, { admission, byStaff, fromBedLabel: from.label });
     return admission;
   }
 
@@ -506,7 +543,7 @@ export class BedsService {
     actor: Actor,
     input: { toBedId: string; suggestionId: string; reason?: string },
   ): Promise<AdmissionDocument> {
-    return this.moveAdmission(fromBedId, input.toBedId, actor, input.reason, async (from, admission, at) => {
+    return this.moveAdmission(fromBedId, input.toBedId, actor, input.reason, true, async (from, admission, at) => {
       const to = await this.beds
         .findOneAndUpdate(
           { _id: input.toBedId, state: 'held', holdBy: actor.id, holdExpiresAt: { $gt: new Date() } },
@@ -532,7 +569,7 @@ export class BedsService {
     reason?: string,
     gender?: PatientGender,
   ): Promise<AdmissionDocument> {
-    return this.moveAdmission(fromBedId, toBedId, actor, reason, async (from, admission, at) => {
+    return this.moveAdmission(fromBedId, toBedId, actor, reason, false, async (from, admission, at) => {
       const known = from.occupantGender ?? gender;
       if (!known && (await this.twinBed(toBedId))) throw new ConflictException(UNKNOWN_GENDER_ROOM);
       if (known && (await this.roommateClash(toBedId, known, new Date()))) throw new ConflictException(OTHER_GENDER_ROOM);
@@ -571,7 +608,10 @@ export class BedsService {
       throw new ConflictException(NOT_OCCUPIED);
     }
     // A sample occupant has no admission and no patient record to update.
-    if (!before.admission) return;
+    if (!before.admission) {
+      await this.announce('discharged', bedId, { byStaff: true });
+      return;
+    }
     // Matching the bed: if a transfer moved the patient meanwhile, their admission stays.
     const admission = await this.admissions
       .findOneAndUpdate(
@@ -581,6 +621,7 @@ export class BedsService {
       )
       .exec();
     if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: 'Discharged' });
+    await this.announce('discharged', bedId, { admission: admission && !admission.sample ? admission : null, byStaff: true });
   }
 
   async markCleaned(bedId: string, _actor: Actor): Promise<void> {
@@ -589,6 +630,7 @@ export class BedsService {
       { $set: { state: 'free', stateSince: clinicNow() } },
       'This bed is not waiting for cleaning.',
     );
+    await this.announce('cleaned', bedId, { byStaff: true });
   }
 
   /** Blocks a free bed, including one whose hold ran out (the board shows it as free). */

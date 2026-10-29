@@ -19,6 +19,8 @@ import { BedSnapshot, BedSnapshotSchema } from './schemas/bed-snapshot.schema';
 import { BedRequest, BedRequestSchema } from './schemas/bed-request.schema';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { AiModule } from '../ai/ai.module';
+import { CoordinatorModule } from '../coordinator/coordinator.module';
+import { BedCoordinatorBridge } from './bed-coordinator.bridge';
 import { PatientsModule } from '../patients/patients.module';
 
 @Module({
@@ -35,9 +37,10 @@ import { PatientsModule } from '../patients/patients.module';
     PatientsModule,
     TasksAlertsModule,
     SettingsModule,
+    CoordinatorModule,
   ],
   controllers: [BedRequestsController, BedOverviewController, BedsController],
-  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService, BedAgentService, BedAgentScheduler, BedOverviewService],
+  providers: [BedsService, SuggestionsService, BedEvents, BedAlerts, BedRequestsService, BedAgentService, BedAgentScheduler, BedOverviewService, BedCoordinatorBridge],
   exports: [BedsService],
 })
 export class BedsModule {}

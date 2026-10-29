@@ -129,6 +129,7 @@ export class BedsController {
       needs: log.request.needs,
       notes: log.request.notes,
       expectedStayDays: log.request.expectedStayDays,
+      requestId: dto.requestId,
     });
     await this.suggestions.recordChoice(dto.suggestionId, { bedId, admissionId: String(admission._id), ...pick(dto) });
     await this.closeRequest(dto.requestId, bedId, admission, actor, dto);
