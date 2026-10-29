@@ -149,12 +149,13 @@ export class CallsController {
 
   /**
    * Post-call results from the voice provider. Server-to-server, so no user token:
-   * the provider is given this URL with ?token=CALL_WEBHOOK_SECRET.
+   * the provider sends CALL_WEBHOOK_SECRET in the X-MediOS-Webhook-Token header, or
+   * (when it can only be given a URL) as ?token=. Error logs redact the query string.
    */
   @Public()
   @Post('webhook/:provider')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Voice provider post-call webhook (authenticated by ?token=)' })
+  @ApiOperation({ summary: 'Voice provider post-call webhook (authenticated by the X-MediOS-Webhook-Token header, or ?token=)' })
   async webhook(
     @Param('provider') provider: string,
     @Query('token') token: string,
@@ -162,9 +163,11 @@ export class CallsController {
     @Req() req: RawBodyRequest<Request>,
     @Headers('x-snapserve-signature') signature?: string,
     @Headers('x-snapserve-timestamp') timestamp?: string,
+    @Headers('x-medios-webhook-token') headerToken?: string,
   ) {
     if (provider !== 'snapserve' || this.calls.providerInfo.provider !== 'snapserve') throw new NotFoundException();
-    if (!sameSecret(String(token ?? ''), this.config.get<string>('callAgent.webhookSecret') ?? '')) {
+    // The header wins when present; the URL token is the fallback.
+    if (!sameSecret(String(headerToken ?? token ?? ''), this.config.get<string>('callAgent.webhookSecret') ?? '')) {
       throw new UnauthorizedException('Invalid webhook token');
     }
     const signingSecret = this.config.get<string>('callAgent.snapserve.signingSecret');
@@ -178,6 +181,7 @@ export class CallsController {
    * The inbound agent's mid-call tools (find_patient, find_free_slots, book_appointment…).
    * Server-to-server: SnapServe sends CALL_TOOLS_SECRET as X-Webhook-Secret. The
    * answer goes to the voice agent's language model as plain JSON (not wrapped).
+   * Off (404) unless calls are on: snapserve, or simulated in development.
    */
   @Public()
   @Post('tools/:tool')
@@ -192,14 +196,15 @@ export class CallsController {
   ) {
     const expected = this.config.get<string>('callAgent.toolsSecret');
     if (!expected) throw new NotFoundException('Inbound tools are not enabled (CALL_TOOLS_SECRET is not set).');
+    if (!['snapserve', 'simulated'].includes(this.calls.providerInfo.provider)) throw new NotFoundException('Inbound tools are off: the call agent is not configured (CALL_PROVIDER).');
     if (!sameSecret(String(secret ?? ''), expected)) throw new UnauthorizedException('Invalid tool secret');
     res.status(HttpStatus.OK).json(await this.inbound.run(tool, toolArgs(body), toolContext(body, headers)));
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'One call with its transcript' })
-  findOne(@Param('id') id: string) {
-    return this.calls.findOne(id);
+  @ApiOperation({ summary: "One call with its transcript (the provider's raw payload for admins only)" })
+  findOne(@Param('id') id: string, @CurrentUser('role') role: string) {
+    return this.calls.findOne(id, role === UserRole.ADMIN);
   }
 
   @Post(':id/cancel')

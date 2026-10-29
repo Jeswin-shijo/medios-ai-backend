@@ -251,15 +251,17 @@ const SIGNATURE_MAX_AGE_S = 10 * 60;
 
 /**
  * Checks `X-SnapServe-Signature: sha256=<hex>`: an HMAC-SHA256 with the signing
- * secret over "{timestamp}.{rawBody}" (event subscriptions) or the raw body alone.
+ * secret over "{timestamp}.{rawBody}" when a timestamp header is sent (so the
+ * timestamp cannot be swapped for a fresh one), otherwise over the raw body alone.
  */
 export function validSnapServeSignature(rawBody: Buffer | undefined, signature: string | undefined, timestamp: string | undefined, secret: string): boolean {
   if (!rawBody || !signature) return false;
   const presented = Buffer.from(signature.replace(/^sha256=/i, '').trim(), 'hex');
-  if (timestamp && Math.abs(Date.now() / 1000 - Number(timestamp)) > SIGNATURE_MAX_AGE_S) return false;
-  const payloads = timestamp ? [Buffer.concat([Buffer.from(`${timestamp}.`), rawBody]), rawBody] : [rawBody];
-  return payloads.some((payload) => {
-    const expected = createHmac('sha256', secret).update(payload).digest();
-    return expected.length === presented.length && timingSafeEqual(expected, presented);
-  });
+  if (timestamp !== undefined) {
+    const ts = timestamp.trim() ? Number(timestamp) : NaN;
+    if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > SIGNATURE_MAX_AGE_S) return false;
+  }
+  const payload = timestamp !== undefined ? Buffer.concat([Buffer.from(`${timestamp}.`), rawBody]) : rawBody;
+  const expected = createHmac('sha256', secret).update(payload).digest();
+  return expected.length === presented.length && timingSafeEqual(expected, presented);
 }
