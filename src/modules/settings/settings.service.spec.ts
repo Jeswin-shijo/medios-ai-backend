@@ -70,4 +70,29 @@ describe('SettingsService', () => {
     await settings.updateSettings({ coordinator: { rules: { x: true } } } as any, ADMIN);
     assert.deepEqual((await settings.getSettings() as any).coordinator.rules, { x: true });
   });
+
+  test('only an admin can change changes by phone or the public address; a doctor can save the rest', async () => {
+    const callAgent = async () => (await settings.getSettings() as any).callAgent;
+    await assert.rejects(
+      () => settings.updateSettings({ callAgent: { inboundChanges: false } } as any, DOCTOR),
+      (err: unknown) => err instanceof ForbiddenException && err.message === 'Only an admin can turn appointment changes by phone on or off.',
+    );
+    await assert.rejects(
+      () => settings.updateSettings({ callAgent: { publicApiUrl: 'https://evil.example.com' } } as any, DOCTOR),
+      (err: unknown) => err instanceof ForbiddenException && err.message === "Only an admin can change the API's public address.",
+    );
+    assert.equal((await callAgent()).inboundChanges, true);
+    assert.equal((await callAgent()).publicApiUrl, '');
+
+    await settings.updateSettings({ callAgent: { inboundChanges: false, publicApiUrl: 'https://medios-api.onrender.com/api/' } } as any, ADMIN);
+    // The web app sends the whole section back as the server resolved it.
+    await settings.updateSettings({ callAgent: { ...(await callAgent()), publicApiUrl: 'https://medios-api.onrender.com', agentName: 'Meena' } } as any, DOCTOR);
+    await settings.updateSettings({ callAgent: { agentName: 'Meena' } } as any, DOCTOR);
+    const saved = await callAgent();
+    assert.equal(saved.agentName, 'Meena');
+    assert.equal(saved.inboundChanges, false);
+
+    await assert.rejects(() => settings.updateSettings({ callAgent: { inboundChanges: true } } as any, DOCTOR), ForbiddenException);
+    await assert.rejects(() => settings.updateSettings({ callAgent: { publicApiUrl: '' } } as any, DOCTOR), ForbiddenException);
+  });
 });

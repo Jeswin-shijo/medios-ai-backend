@@ -3,7 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { isDeepStrictEqual } from 'node:util';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
-import { DEFAULT_CALL_AGENT_SETTINGS } from '../calls/call-agent-settings';
+import { DEFAULT_CALL_AGENT_SETTINGS, resolveCallAgentSettings } from '../calls/call-agent-settings';
 import { DEFAULT_QUEUE_SETTINGS } from '../queue/queue-settings';
 import { UserRole } from '../users/schemas/user.schema';
 
@@ -98,8 +98,9 @@ export class SettingsService {
 
   /**
    * Merges each supplied section over the stored one, key by key; unknown sections are ignored.
-   * Only an admin may change "Allocate beds automatically": a save from anyone else that
-   * carries the stored value (or leaves it out) goes through.
+   * Only an admin may change "Allocate beds automatically", coordination rules, pathway
+   * targets, changes by phone and the call agent's public address: a save from anyone
+   * else that carries the stored value (or leaves it out) goes through.
    */
   async updateSettings(updates: Partial<HospitalSettings>, by: { role: string }): Promise<HospitalSettings> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
@@ -120,6 +121,18 @@ export class SettingsService {
       const stored = settings.get('er')?.targets ?? {};
       if (erPatch.targets !== undefined && !isDeepStrictEqual(erPatch.targets, stored)) {
         throw new ForbiddenException('Only an admin can change pathway targets.');
+      }
+    }
+    const callAgentPatch = (updates as any)?.callAgent;
+    if (by?.role !== UserRole.ADMIN && callAgentPatch && typeof callAgentPatch === 'object') {
+      // Compared as the server reads them: the web app sends back the resolved values.
+      const stored = resolveCallAgentSettings(settings.get('callAgent'));
+      const wanted = resolveCallAgentSettings({ ...stored, ...callAgentPatch });
+      if ('inboundChanges' in callAgentPatch && wanted.inboundChanges !== stored.inboundChanges) {
+        throw new ForbiddenException('Only an admin can turn appointment changes by phone on or off.');
+      }
+      if ('publicApiUrl' in callAgentPatch && wanted.publicApiUrl !== stored.publicApiUrl) {
+        throw new ForbiddenException("Only an admin can change the API's public address.");
       }
     }
     for (const section of SECTIONS) {
