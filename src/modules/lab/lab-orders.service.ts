@@ -118,6 +118,25 @@ const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const earliest = (dates: Date[]) => new Date(Math.min(...dates.map((d) => d.getTime())));
 const pad = (n: number, w: number) => String(n).padStart(w, '0');
 
+/**
+ * When the turnaround clock escalates (ruling F1): the later of the earliest open line's due (order or
+ * scheduled time + target) and the first receipt + that line's target, so a sample drawn late inside its
+ * collection window is not escalated the moment it arrives. Before any receipt, the due itself. Null when
+ * no line is open. The on-time figures keep using `tatDueAt`.
+ */
+export function escalateAt(
+  request: { createdAt?: Date; scheduledFor?: Date | null; firstReceivedAt?: Date | null },
+  open: { tatDueAt: Date }[],
+): Date | null {
+  if (!open.length) return null;
+  const due = Math.min(...open.map((l) => new Date(l.tatDueAt).getTime()));
+  if (!request.firstReceivedAt) return new Date(due);
+  const start = new Date(request.scheduledFor ?? request.createdAt ?? due).getTime();
+  // Targets are whole minutes; the order time is a moment before the request was stored.
+  const target = Math.max(0, Math.round((due - start) / MIN_MS)) * MIN_MS;
+  return new Date(Math.max(due, new Date(request.firstReceivedAt).getTime() + target));
+}
+
 /** "LR-0001: Complete blood count, Troponin I (STAT)", cut with "+N more" to fit a message summary. */
 export function orderSummary(number: string, labels: string[], priority: Priority): string {
   const tail = ` (${priority.toUpperCase()})`;
@@ -445,6 +464,7 @@ export class LabOrdersService {
     }
 
     const stillOpen = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).select('tatDueAt').lean<{ tatDueAt: Date }[]>().exec();
+    const fresh = (await this.requests.findById(request._id).select('createdAt scheduledFor firstReceivedAt').lean<LabRequest & { createdAt: Date }>().exec()) ?? request;
     await this.messages.send({
       case: String(request.case),
       from: 'lab',
@@ -457,6 +477,7 @@ export class LabOrdersService {
         lineId: String(line._id),
         test: line.test,
         tatDueAt: stillOpen.length ? earliest(stillOpen.map((l) => l.tatDueAt)) : line.tatDueAt,
+        escalateAt: escalateAt(fresh, stillOpen) ?? line.tatDueAt,
       },
     });
   }

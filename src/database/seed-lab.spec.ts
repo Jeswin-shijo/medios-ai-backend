@@ -201,8 +201,10 @@ describe('seedLab', () => {
         assert.equal(String(c.case), String(r.case));
       }
       if (r.firstReceivedAt) {
+        // The later of the earliest open due and the first receipt plus that line's target (ruling F1).
         const due = Math.min(...lines.filter((l) => String(l.request) === String(r._id) && l.status !== 'released' && l.status !== 'cancelled').map((l) => l.tatDueAt.getTime()));
-        assert.equal(own.find((c) => c.def === 'lab-tat')!.dueAt.getTime(), due, `${r.number} lab-tat due`);
+        const target = Math.round((due - r.createdAt.getTime()) / MINUTE) * MINUTE;
+        assert.equal(own.find((c) => c.def === 'lab-tat')!.dueAt.getTime(), Math.max(due, r.firstReceivedAt.getTime() + target), `${r.number} lab-tat due`);
       }
     }
     assert.ok(checked >= 15);

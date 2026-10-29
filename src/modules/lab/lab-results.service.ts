@@ -11,7 +11,7 @@ import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-rep
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { LabAiService } from './lab-ai';
 import { LabTestDef, effectiveLimits, flagValue, optionsMessage, testByKey, textOption } from './lab-catalogue';
-import { LabOrdersService, RECONCILE_BATCH, RECONCILE_GRACE_MS } from './lab-orders.service';
+import { LabOrdersService, RECONCILE_BATCH, RECONCILE_GRACE_MS, escalateAt } from './lab-orders.service';
 import { writeLabReport } from './lab-report-writer';
 import { LabSettingsService } from './lab-settings.service';
 import { LabLine, LabLineDocument, LabResultRow } from './schemas/lab-line.schema';
@@ -151,6 +151,7 @@ export class LabResultsService {
 
     const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).select('tatDueAt').lean<{ tatDueAt: Date }[]>().exec();
     const tatDueAt = open.length ? new Date(Math.min(...open.map((l) => l.tatDueAt.getTime()))) : line.tatDueAt;
+    const escalate = escalateAt(request as unknown as { createdAt?: Date; scheduledFor?: Date; firstReceivedAt?: Date }, open) ?? line.tatDueAt;
     const flag = criticals.length ? 'critical' : line.results.some((r) => r.flag !== 'normal') ? 'abnormal' : 'normal';
     await this.messages.send({
       case: String(request.case),
@@ -159,7 +160,7 @@ export class LabResultsService {
       type: 'lab.resulted',
       priority: CASE_PRIORITY[request.priority],
       summary: cut(`${request.number}: ${def.label} released${flag === 'normal' ? '' : ` (${flag})`}`),
-      payload: { requestId: String(request._id), lineId: String(line._id), test: line.test, flag, version, tatDueAt },
+      payload: { requestId: String(request._id), lineId: String(line._id), test: line.test, flag, version, tatDueAt, escalateAt: escalate },
       dedupeKey: `lab.resulted:${line._id}:${version}`,
     });
 

@@ -50,8 +50,19 @@ describe('LabCoordinatorRegistration', () => {
     assert.equal(tat.match!('lab.received', { firstReceive: true }), true);
     assert.equal(tat.match!('lab.resulted', {}), true);
     assert.deepEqual(tat.updateOn, ['lab.resulted', 'lab.cancelled']);
+    // The turnaround clock escalates at escalateAt (ruling F1), not at tatDueAt.
     const due = new Date(Date.now() + 60_000);
-    assert.equal(tat.dueFrom!({ tatDueAt: due.toISOString() })!.getTime(), due.getTime());
+    assert.equal(tat.dueFrom!({ escalateAt: due.toISOString(), tatDueAt: new Date(0).toISOString() })!.getTime(), due.getTime());
+    assert.equal(tat.dueFrom!({ tatDueAt: due.toISOString() }), null);
+    // A critical has one acknowledgement path: its escalation rides on the line's alert and closes with the result.
+    const critical = registry.clock('lab-critical')!;
+    assert.equal(critical.resolveEscalationOnStop, true);
+    assert.equal(critical.alertLink!('l1'), 'lab-line:l1');
+    assert.equal(critical.detailFrom!({ requestNumber: 'LR-0003', test: 'cbc', parameter: 'Platelets' }), 'LR-0003 · Complete blood count · Platelets');
+    for (const k of ['lab-collect', 'lab-recollect', 'lab-tat']) {
+      assert.equal(registry.clock(k)!.resolveEscalationOnStop, undefined, k);
+      assert.equal(registry.clock(k)!.detailFrom!({ requestNumber: 'LR-0003', tests: ['cbc', 'crp', 'rft', 'lft'] }), 'LR-0003 · Complete blood count, CRP, Kidney function +1 more', k);
+    }
     assert.ok(registry.clocksStoppingOn('lab.request-done').length >= 3);
     for (const t of ['er.arrived', 'bed.assigned', 'bed.transferred', 'er.left', 'bed.discharged']) {
       assert.ok(registry.subscribers(t).some((s) => s.agent === 'lab'), t);

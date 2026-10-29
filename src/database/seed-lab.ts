@@ -14,7 +14,7 @@ import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabTestReport, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { COLLECT_MINUTES, Priority, TUBE_LABEL, TubeKey, flagValue, groupIntoTubes, targetMinutes, testByKey } from '../modules/lab/lab-catalogue';
 import { LAB_CLOCKS } from '../modules/lab/lab-coordinator.registration';
-import { orderSummary } from '../modules/lab/lab-orders.service';
+import { escalateAt, orderSummary } from '../modules/lab/lab-orders.service';
 import { writeLabReport } from '../modules/lab/lab-report-writer';
 import { LabLine, LabLineSchema, LabResultRow } from '../modules/lab/schemas/lab-line.schema';
 import { LabLocation, LabLocationSchema } from '../modules/lab/schemas/lab-location.schema';
@@ -513,6 +513,9 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
     const waitingNow = live.some((s) => s.doc.status === 'waiting');
     const collectionDone = lastDoneMs !== undefined && !waitingNow;
     const firstReceivedMs = live.some((s) => s.receivedMs !== undefined) ? Math.min(...live.filter((s) => s.receivedMs !== undefined).map((s) => s.receivedMs!)) : undefined;
+    /** As the services work it out at `ms`: the turnaround clock escalates at the later of the due and the first receipt plus the target. */
+    const escalateFor = (ls: LineBuild[], ms: number, fallback: Date) =>
+      ls.length ? escalateAt({ createdAt: orderReal, firstReceivedAt: firstReceivedMs !== undefined && firstReceivedMs <= ms ? new Date(firstReceivedMs) : undefined }, ls) ?? fallback : fallback;
     const doneMs = lastClosed !== undefined ? lastClosed + (allCancelled ? 2000 : 1000) : undefined;
     const cap = (ms: number) => Math.min(nowMs, ms);
 
@@ -556,6 +559,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
           seen.firstReceive = true;
           const id = msg('lab.received', s.receivedMs! + 500, `${number}: ${s.doc.number} received (${TUBE_LABEL[s.doc.tube as TubeKey]})`, {
             requestId: String(requestId), requestNumber: number, sampleId: String(s.doc._id), firstReceive: first, tests: openAt(s.receivedMs!).map((l) => l.spec.test), tatDueAt: earliestTat(openAt(s.receivedMs!)),
+            escalateAt: escalateFor(openAt(s.receivedMs!), s.receivedMs!, earliestTat(openAt(s.receivedMs!))),
           }, { dedupeKey: `lab.received:${s.doc._id}` });
           if (first) seen.firstReceiveMsg = id;
         });
@@ -588,6 +592,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
         defer(l.closedMs!, () =>
           msg('lab.cancelled', l.closedMs!, `${number}: ${def.label} cancelled`, {
             requestId: String(requestId), lineId: String(l._id), test: s.test, tatDueAt: openAt(l.closedMs!).length ? earliestTat(openAt(l.closedMs!)) : l.tatDueAt,
+            escalateAt: escalateFor(openAt(l.closedMs!), l.closedMs!, l.tatDueAt),
           }),
         );
         return;
@@ -599,6 +604,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
         const open = openAt(l.releasedMs!);
         msg('lab.resulted', l.releasedMs! + 200, `${number}: ${def.label} released${flag === 'normal' ? '' : ` (${flag})`}`, {
           requestId: String(requestId), lineId: String(l._id), test: s.test, flag, version: 1, tatDueAt: open.length ? earliestTat(open) : l.tatDueAt,
+          escalateAt: escalateFor(open, l.releasedMs!, l.tatDueAt),
         }, { dedupeKey: `lab.resulted:${l._id}:1` });
         const criticalIds: Types.ObjectId[] = [];
         for (const c of criticals) {
@@ -650,6 +656,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
           const aflag = l.rows!.some((r) => r.flag !== 'normal') ? 'abnormal' : 'normal';
           msg('lab.resulted', ms + 200, `${number}: ${def.label} released${aflag === 'normal' ? '' : ` (${aflag})`}`, {
             requestId: String(requestId), lineId: String(l._id), test: s.test, flag: aflag, version: 2, tatDueAt: openAt(ms).length ? earliestTat(openAt(ms)) : l.tatDueAt,
+            escalateAt: escalateFor(openAt(ms), ms, l.tatDueAt),
           }, { dedupeKey: `lab.resulted:${l._id}:2` });
         });
       }
@@ -679,7 +686,7 @@ export async function seedLab(clinicDay: string, nowMs: number = Date.now()): Pr
       const open = lb.filter((l) => l.closedMs === undefined);
       addClock({
         def: 'lab-tat', case: caseId, ref: String(requestId), startedBy: seen.firstReceiveMsg, startedAt: new Date(cap(firstReceivedMs + 500)),
-        dueAt: open.length ? earliestTat(open) : new Date(Math.max(...lb.filter((l) => l.spec.stage !== 'cancelled').map((l) => l.tatDueAt.getTime()))),
+        dueAt: escalateFor(open, nowMs, new Date(Math.max(...lb.filter((l) => l.spec.stage !== 'cancelled').map((l) => l.tatDueAt.getTime())))),
         ...(seen.requestDone ? { stoppedAt: new Date(seen.requestDone.ms) } : {}),
       });
     }

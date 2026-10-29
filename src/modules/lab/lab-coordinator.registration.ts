@@ -19,14 +19,15 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
 const MESSAGE_TYPES: MessageTypeDef[] = [
   type('lab.ordered', 'Lab tests were ordered', { requestId: 'string', requestNumber: 'string', priority: 'string', tests: 'string[]', collectBy: 'date', tatDueAt: 'date' }),
   // The free-text reason stays on the line, never in a message.
-  type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', tatDueAt: 'date' }),
+  type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', tatDueAt: 'date', escalateAt: 'date' }),
   type('lab.collected', 'A sample was collected', { requestId: 'string', sampleId: 'string', sampleNumber: 'string', tube: 'string', tests: 'string[]' }),
   type('lab.collection-done', 'Every sample for a request was collected', { requestId: 'string' }),
   // `tests` here: the request's open tests, which its turnaround clock covers.
-  type('lab.received', 'A sample reached the lab', { requestId: 'string', requestNumber: 'string', sampleId: 'string', firstReceive: 'boolean', tests: 'string[]', tatDueAt: 'date' }),
+  type('lab.received', 'A sample reached the lab', { requestId: 'string', requestNumber: 'string', sampleId: 'string', firstReceive: 'boolean', tests: 'string[]', tatDueAt: 'date', escalateAt: 'date' }),
   // `tests` here: the tests to recollect.
   type('lab.rejected', 'A sample was rejected and needs recollecting', { requestId: 'string', requestNumber: 'string', sampleId: 'string', newSampleId: 'string', reason: 'string', tests: 'string[]', recollectBy: 'date' }),
-  type('lab.resulted', 'A lab result was released', { requestId: 'string', lineId: 'string', test: 'string', flag: 'string', version: 'number', tatDueAt: 'date' }),
+  // tatDueAt: the earliest open line's due (the on-time figure); escalateAt: when the turnaround clock escalates.
+  type('lab.resulted', 'A lab result was released', { requestId: 'string', lineId: 'string', test: 'string', flag: 'string', version: 'number', tatDueAt: 'date', escalateAt: 'date' }),
   type('lab.request-done', 'Every test on a request is finished', { requestId: 'string' }),
   type('lab.critical', 'A critical lab value was found', { requestId: 'string', requestNumber: 'string', lineId: 'string', test: 'string', parameter: 'string', value: 'string', unit: 'string', version: 'number' }),
   type('lab.critical-acked', 'A doctor acknowledged a critical value', { lineId: 'string' }),
@@ -97,7 +98,8 @@ export const LAB_CLOCKS: ClockDef[] = [
     ladder: 'lab',
     // match gates start, stop and update alike: only the first receive starts the clock.
     match: (t, p) => t !== 'lab.received' || p.firstReceive === true,
-    dueFrom: date('tatDueAt'),
+    // Ruling F1: escalate at the later of the due and the first receipt plus the target.
+    dueFrom: date('escalateAt'),
     refFrom: byRequest,
     updateOn: ['lab.resulted', 'lab.cancelled'],
     detailFrom: requestDetail,

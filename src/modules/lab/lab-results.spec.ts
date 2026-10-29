@@ -469,6 +469,11 @@ describe('LabResultsService', () => {
     const resulted = (await sent('lab.resulted'))[0];
     const open = (await line(lineId('electrolytes'))).tatDueAt;
     assert.equal(new Date(resulted.payload.tatDueAt).getTime(), open.getTime(), 'the earliest still-open line');
+    // The turnaround clock follows escalateAt: the later of that due and the first receipt plus its target.
+    const req: any = await m.LabRequest.findById(r.id).lean();
+    const target = Math.round((open.getTime() - req.createdAt.getTime()) / MIN) * MIN;
+    assert.equal(new Date(resulted.payload.escalateAt).getTime(), Math.max(open.getTime(), req.firstReceivedAt.getTime() + target));
+    assert.equal((await clockOf('lab-tat', caseId))[0].dueAt.getTime(), new Date(resulted.payload.escalateAt).getTime());
     await results.enterResults(LAB, lineId('electrolytes'), NORMAL);
     await results.release(PATH, lineId('electrolytes'));
     assert.equal((await sent('lab.request-done')).length, 1);

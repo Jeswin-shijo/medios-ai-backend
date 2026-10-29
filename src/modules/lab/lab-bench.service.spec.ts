@@ -224,7 +224,7 @@ describe('LabBenchService', () => {
     const id = new Types.ObjectId(requestId);
     const r: any = await m.LabRequest.findById(id).lean();
     const move = (d?: Date) => (d ? new Date(new Date(d).getTime() + ms) : d);
-    await m.LabRequest.collection.updateOne({ _id: id }, { $set: { scheduledFor: move(r.scheduledFor), collectBy: move(r.collectBy) } });
+    await m.LabRequest.collection.updateOne({ _id: id }, { $set: { scheduledFor: move(r.scheduledFor), collectBy: move(r.collectBy), createdAt: move(r.createdAt) } });
     for (const s of (await m.LabSample.find({ request: id }).lean()) as any[]) await m.LabSample.collection.updateOne({ _id: s._id }, { $set: { collectBy: move(s.collectBy) } });
     for (const l of (await m.LabLine.find({ request: id }).lean()) as any[]) await m.LabLine.collection.updateOne({ _id: l._id }, { $set: { tatDueAt: move(l.tatDueAt) } });
     for (const c of (await m.Clock.find({ ref: requestId }).lean()) as any[]) await m.Clock.collection.updateOne({ _id: c._id }, { $set: { dueAt: move(c.dueAt) } });
@@ -266,6 +266,50 @@ describe('LabBenchService', () => {
     assert.equal(new Date(later.notBefore!).getTime(), new Date(out[1].scheduledFor!).getTime() - 15 * MIN);
     assert.equal(new Date(later.collectBy).getTime(), new Date(out[1].scheduledFor!).getTime() + 240 * MIN);
     assert.equal(later.overdue, false);
+  });
+
+  const tatClock = (requestId: string) => m.Clock.findOne({ def: 'lab-tat', ref: requestId }).lean().exec() as Promise<any>;
+  const near = (a: Date | string, b: number) => Math.abs(new Date(a).getTime() - b) < 5_000;
+
+  test("a routine CBC collected at 230 minutes doesn't escalate on receipt", async () => {
+    const r = await order(['cbc'], 'routine');
+    await shift(r.id, -230 * MIN); // ordered 230 minutes ago: inside its 240-minute collection window, past its 120-minute target
+    await bench.collect(NURSE, r.samples[0].number);
+    await bench.receive(LAB, r.samples[0].id);
+    const [msg] = await sent('lab.received');
+    assert.ok(near(msg.payload.tatDueAt, Date.now() - 110 * MIN), 'the on-time due still counts from the order');
+    assert.ok(near(msg.payload.escalateAt, Date.now() + 120 * MIN), 'the escalation counts from the receipt');
+    assert.ok(near((await tatClock(r.id)).dueAt, Date.now() + 120 * MIN));
+    await clocks.checkDue(new Date());
+    assert.equal(await escalationsOn('lab'), 0);
+  });
+
+  test('a STAT troponin received at 20 minutes escalates at 80 minutes, not 60', async () => {
+    const r = await order(['troponin'], 'stat');
+    await shift(r.id, -20 * MIN);
+    const t0 = Date.now() - 20 * MIN;
+    await bench.collect(NURSE, r.samples[0].number);
+    await bench.receive(LAB, r.samples[0].id);
+    assert.ok(near((await tatClock(r.id)).dueAt, t0 + 80 * MIN));
+    await clocks.checkDue(new Date(t0 + 79 * MIN));
+    assert.equal(await escalationsOn('lab'), 0, 'not at 60 minutes, nor at 79');
+    await clocks.checkDue(new Date(t0 + 81 * MIN));
+    assert.equal(await escalationsOn('lab'), 1);
+    assert.match(((await m.Escalation.findOne({ ladder: 'lab' }).lean()) as any).reason, /^Lab turnaround overdue — LR-\d{4} · Troponin I$/);
+  });
+
+  test('a result or cancel moves the turnaround escalation by the same rule, for the next open line', async () => {
+    const r = await order(['cbc', 'troponin'], 'stat'); // STAT targets: CBC 30, troponin 60 minutes
+    await shift(r.id, -20 * MIN);
+    const t0 = Date.now() - 20 * MIN;
+    for (const s of r.samples) await bench.collect(NURSE, s.number);
+    for (const s of r.samples) await bench.receive(LAB, s.id);
+    assert.ok(near((await tatClock(r.id)).dueAt, t0 + 50 * MIN), 'CBC first: the receipt at 20 plus 30');
+    await orders.cancelLine(DOC, r.lines.find((l) => l.test === 'cbc')!.id, 'Not needed');
+    const [cancelled] = await sent('lab.cancelled');
+    assert.ok(near(cancelled.payload.tatDueAt, t0 + 60 * MIN));
+    assert.ok(near(cancelled.payload.escalateAt, t0 + 80 * MIN));
+    assert.ok(near((await tatClock(r.id)).dueAt, t0 + 80 * MIN), 'then troponin: the receipt at 20 plus 60');
   });
 
   test('two concurrent collects of the last two samples send one lab.collection-done and stop lab-collect', async () => {

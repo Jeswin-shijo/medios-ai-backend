@@ -6,7 +6,7 @@ import type { Actor } from '../beds/actor';
 import type { Priority as CasePriority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { COLLECT_MINUTES, Priority, TUBE_LABEL, testByKey } from './lab-catalogue';
-import { LabOrdersService } from './lab-orders.service';
+import { LabOrdersService, escalateAt } from './lab-orders.service';
 import { LabLine, LabLineDocument } from './schemas/lab-line.schema';
 import { LabArea } from './schemas/lab-location.schema';
 import { LabRequest, LabRequestDocument } from './schemas/lab-request.schema';
@@ -162,9 +162,12 @@ export class LabBenchService {
 
     const request = await this.requests.findById(claimed.request).exec();
     if (!request) throw new NotFoundException('Lab request not found');
-    const first = await this.requests.findOneAndUpdate({ _id: request._id, firstReceivedAt: { $exists: false } }, { $set: { firstReceivedAt: new Date() } }).exec();
+    const receivedAt = new Date();
+    const first = await this.requests.findOneAndUpdate({ _id: request._id, firstReceivedAt: { $exists: false } }, { $set: { firstReceivedAt: receivedAt } }).exec();
     const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).sort({ _id: 1 }).select('test tatDueAt').lean<{ test: string; tatDueAt: Date }[]>().exec();
     const tatDueAt = open.length ? new Date(Math.min(...open.map((l) => l.tatDueAt.getTime()))) : new Date();
+    const firstReceivedAt = first ? receivedAt : request.firstReceivedAt;
+    const escalate = escalateAt({ createdAt: (request as unknown as { createdAt?: Date }).createdAt, scheduledFor: request.scheduledFor, firstReceivedAt }, open) ?? tatDueAt;
     await this.messages.send({
       case: String(request.case),
       from: 'lab',
@@ -172,7 +175,7 @@ export class LabBenchService {
       type: 'lab.received',
       priority: CASE_PRIORITY[request.priority],
       summary: cut(`${request.number}: ${claimed.number} received (${TUBE_LABEL[claimed.tube]})`),
-      payload: { requestId: String(request._id), requestNumber: request.number, sampleId: String(claimed._id), firstReceive: !!first, tests: open.map((l) => l.test), tatDueAt },
+      payload: { requestId: String(request._id), requestNumber: request.number, sampleId: String(claimed._id), firstReceive: !!first, tests: open.map((l) => l.test), tatDueAt, escalateAt: escalate },
       dedupeKey: `lab.received:${claimed._id}`,
     });
   }
