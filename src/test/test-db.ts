@@ -19,6 +19,9 @@ import { Clock, ClockDocument, ClockSchema } from '../modules/coordinator/schema
 import { Approval, ApprovalDocument, ApprovalSchema } from '../modules/coordinator/schemas/approval.schema';
 import { CoordinatorSnapshot, CoordinatorSnapshotDocument, CoordinatorSnapshotSchema } from '../modules/coordinator/schemas/coordinator-snapshot.schema';
 import { ChatLog, ChatLogDocument, ChatLogSchema } from '../modules/coordinator/schemas/chat-log.schema';
+import { ErVisit, ErVisitDocument, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
+import { ErExpected, ErExpectedDocument, ErExpectedSchema } from '../modules/er/schemas/er-expected.schema';
+import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
@@ -63,6 +66,9 @@ export function models() {
     Approval: model(Approval, ApprovalSchema) as Model<ApprovalDocument>,
     CoordinatorSnapshot: model(CoordinatorSnapshot, CoordinatorSnapshotSchema) as Model<CoordinatorSnapshotDocument>,
     ChatLog: model(ChatLog, ChatLogSchema) as Model<ChatLogDocument>,
+    ErVisit: model(ErVisit, ErVisitSchema) as Model<ErVisitDocument>,
+    ErExpected: model(ErExpected, ErExpectedSchema) as Model<ErExpectedDocument>,
+    PatientCard: model(PatientCard, PatientCardSchema) as Model<PatientCardDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
   };

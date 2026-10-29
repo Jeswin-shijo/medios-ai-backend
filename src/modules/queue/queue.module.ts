@@ -27,6 +27,6 @@ import { SettingsModule } from '../settings/settings.module';
   ],
   controllers: [QueueController],
   providers: [QueueService, QueueDisplaysService, PatientCardsService, QueueEvents],
-  exports: [QueueService],
+  exports: [QueueService, PatientCardsService],
 })
 export class QueueModule {}

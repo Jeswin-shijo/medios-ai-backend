@@ -80,8 +80,17 @@ export class Patient {
   @Prop({ required: true, enum: ['Male', 'Female', 'Other'] })
   gender: string;
 
-  @Prop({ required: true })
+  /** Required unless the patient came in through the ER without any details yet. */
+  @Prop({
+    required: function (this: { detailsPending?: boolean }) {
+      return !this.detailsPending;
+    },
+  })
   phone: string;
+
+  /** An unidentified ER patient: name and phone are filled in later. */
+  @Prop({ default: false })
+  detailsPending?: boolean;
 
   /** "12 Mar 1991"; optional because older records only have an age. */
   @Prop()

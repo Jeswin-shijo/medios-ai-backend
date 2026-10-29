@@ -67,6 +67,13 @@ export class PatientCardsService {
     return { id, removed: true };
   }
 
+  /** The UHID a card is linked to. Reads only: no token, and `lastUsedAt` is left alone. */
+  async findUhid(rawCardId: string): Promise<string> {
+    const card = await this.cards.findOne({ cardId: normalizeCardId(rawCardId) }).exec();
+    if (!card) throw new NotFoundException('This card is not registered. Please go to the front desk.');
+    return card.uhid;
+  }
+
   /**
    * A card tapped on a reader: today's token for its patient, issued or (if they
    * already hold one) returned. Unknown cards are refused with 404.
