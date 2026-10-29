@@ -216,4 +216,36 @@ describe('LabBenchService', () => {
     await bench.collect(NURSE, list[0].sampleNumber);
     assert.deepEqual((await bench.collectionList()).map((i) => i.requestNumber), ['LR-0001']);
   });
+
+  test('two concurrent collects of the last two samples send one lab.collection-done and stop lab-collect', async () => {
+    const r = await order(['cbc', 'rft']);
+    assert.equal(r.samples.length, 2);
+    await Promise.all(r.samples.map((x) => bench.collect(NURSE, x.number)));
+    assert.equal((await sent('lab.collection-done')).length, 1);
+    assert.equal((await clockOf('lab-collect', r.caseId))[0].state, 'met');
+  });
+
+  test('two concurrent cancels of the last two lines send one lab.request-done', async () => {
+    const r = await order(['cbc', 'rft']);
+    await Promise.all(r.lines.map((l) => orders.cancelLine(DOC, l.id, 'Not needed')));
+    assert.equal((await sent('lab.request-done')).length, 1);
+    assert.equal((await sent('lab.collection-done')).length, 1);
+  });
+
+  test('two concurrent receives give one firstReceive and one running lab-tat', async () => {
+    const r = await order(['cbc', 'rft']);
+    for (const x of r.samples) await bench.collect(NURSE, x.number);
+    await Promise.all(r.samples.map((x) => bench.receive(LAB, x.id)));
+    const received = await sent('lab.received');
+    assert.equal(received.filter((x) => x.payload.firstReceive === true).length, 1);
+    assert.equal((await clockOf('lab-tat', r.caseId)).filter((c) => c.state === 'running').length, 1);
+  });
+
+  test('rejecting a sample with nothing left to recollect is refused', async () => {
+    const r = await order(['cbc']);
+    await bench.collect(NURSE, r.samples[0].number);
+    await m.LabLine.updateMany({ request: r.id }, { status: 'released' });
+    await assert.rejects(() => bench.reject(LAB, r.samples[0].id, 'clotted'), { status: 409, message: 'Nothing left to recollect on this sample.' });
+    assert.equal(await m.LabSample.countDocuments({ request: r.id }), 1);
+  });
 });

@@ -81,7 +81,7 @@ export class LabBenchService {
     });
 
     const fresh = await this.requests.findById(request._id).exec();
-    if (fresh && !fresh.collectionDoneAt && !(await this.samples.exists({ request: fresh._id, status: 'waiting' }).exec())) {
+    if (fresh && !(await this.samples.exists({ request: fresh._id, status: 'waiting' }).exec())) {
       await this.orders.announceDone(fresh._id as Types.ObjectId, 'lab.collection-done');
     }
   }
@@ -100,8 +100,7 @@ export class LabBenchService {
 
     const request = await this.requests.findById(claimed.request).exec();
     if (!request) throw new NotFoundException('Lab request not found');
-    // Rejected samples keep their `received` stamp, so a rejected-then-recollected request is not "first" again.
-    const earlier = await this.samples.exists({ request: request._id, _id: { $ne: claimed._id }, received: { $exists: true } }).exec();
+    const first = await this.requests.findOneAndUpdate({ _id: request._id, firstReceivedAt: { $exists: false } }, { $set: { firstReceivedAt: new Date() } }).exec();
     const open = await this.lines.find({ request: request._id, status: { $nin: CLOSED_LINE } }).select('tatDueAt').lean<{ tatDueAt: Date }[]>().exec();
     const tatDueAt = open.length ? new Date(Math.min(...open.map((l) => l.tatDueAt.getTime()))) : new Date();
     await this.messages.send({
@@ -111,7 +110,7 @@ export class LabBenchService {
       type: 'lab.received',
       priority: CASE_PRIORITY[request.priority],
       summary: cut(`${request.number}: ${claimed.number} received (${TUBE_LABEL[claimed.tube]})`),
-      payload: { requestId: String(request._id), sampleId: String(claimed._id), firstReceive: !earlier, tatDueAt },
+      payload: { requestId: String(request._id), sampleId: String(claimed._id), firstReceive: !!first, tatDueAt },
       dedupeKey: `lab.received:${claimed._id}`,
     });
   }
@@ -125,6 +124,8 @@ export class LabBenchService {
     const sample = await this.sampleById(sampleId);
     const cannot = () => new ConflictException('Only a collected or received sample can be rejected.');
     if (sample.status !== 'collected' && sample.status !== 'received') throw cannot();
+    const redoable = await this.lines.exists({ _id: { $in: sample.lines }, status: { $in: ['collected', 'received'] } }).exec();
+    if (!redoable) throw new ConflictException('Nothing left to recollect on this sample.');
     const claimed = await this.samples
       .findOneAndUpdate(
         { _id: sample._id, status: { $in: ['collected', 'received'] } },

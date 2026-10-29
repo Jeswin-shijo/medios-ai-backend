@@ -189,14 +189,17 @@ describe('LabOrdersService', () => {
     await assert.rejects(service.notCollected(NURSE, v.id, ''), { status: 400 });
   });
 
-  test('two lab.collection-done sends for one request within a second are both stored', async () => {
+  test('a done message is claimed once; after the flag is cleared (a rejection) it can be sent again', async () => {
     const [v] = await service.order(DOC, { patientId, tests: ['cbc'], priority: 'stat' });
     await service.announceDone(v.id, 'lab.collection-done');
     await service.announceDone(v.id, 'lab.collection-done');
     await service.announceDone(v.id, 'lab.request-done');
     await service.announceDone(v.id, 'lab.request-done');
-    assert.equal((await sent('lab.collection-done')).length, 2);
-    assert.equal((await sent('lab.request-done')).length, 2);
+    assert.equal((await sent('lab.collection-done')).length, 1);
+    assert.equal((await sent('lab.request-done')).length, 1);
+    await m.LabRequest.updateOne({ _id: v.id }, { $unset: { collectionDoneAt: '' } });
+    await service.announceDone(v.id, 'lab.collection-done');
+    assert.equal((await sent('lab.collection-done')).length, 2, 'a repeat within a minute is not dropped by the dedupe key');
   });
 
   test('a repeat troponin ordered in the ER shows under the ward after bed.assigned arrives for the case', async () => {

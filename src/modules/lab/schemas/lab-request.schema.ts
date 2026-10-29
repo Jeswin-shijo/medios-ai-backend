@@ -26,6 +26,8 @@ export class LabRequest {
   @Prop({ type: Date }) announcedAt?: Date;
   @Prop({ type: Date }) collectionDoneAt?: Date;
   @Prop({ type: Date }) doneAt?: Date;
+  /** Real time: set by the first sample received, so only one receipt starts the turnaround clock. */
+  @Prop({ type: Date }) firstReceivedAt?: Date;
 }
 
 export const LabRequestSchema = SchemaFactory.createForClass(LabRequest);

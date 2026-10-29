@@ -228,20 +228,28 @@ export class LabOrdersService {
    * so a second "done" within a minute (after a quick recollection) is not dropped.
    */
   async announceDone(requestId: string | Types.ObjectId, type: 'lab.collection-done' | 'lab.request-done'): Promise<void> {
-    const request = await this.requests.findById(requestId).exec();
-    if (!request) throw new NotFoundException('Lab request not found');
-    await this.messages.send({
-      case: String(request.case),
-      from: 'lab',
-      to: ['coordinator'],
-      type,
-      priority: CASE_PRIORITY[request.priority],
-      summary: `${request.number}: ${type === 'lab.collection-done' ? 'all samples collected' : 'all tests finished'}`,
-      payload: { requestId: String(request._id) },
-      dedupeKey: `${type}:${request._id}:${new Types.ObjectId()}`,
-    });
-    const field = type === 'lab.collection-done' ? 'collectionDoneAt' : 'doneAt';
-    await this.requests.updateOne({ _id: request._id }, { [field]: new Date() }).exec();
+    const flag = type === 'lab.collection-done' ? 'collectionDoneAt' : 'doneAt';
+    // Claim the flag first: of two racing callers only one wins and sends.
+    const request = await this.requests.findOneAndUpdate({ _id: requestId, [flag]: { $exists: false } }, { $set: { [flag]: new Date() } }, { new: true }).exec();
+    if (!request) {
+      if (!(await this.requests.exists({ _id: requestId }).exec())) throw new NotFoundException('Lab request not found');
+      return; // already announced
+    }
+    try {
+      await this.messages.send({
+        case: String(request.case),
+        from: 'lab',
+        to: ['coordinator'],
+        type,
+        priority: CASE_PRIORITY[request.priority],
+        summary: `${request.number}: ${type === 'lab.collection-done' ? 'all samples collected' : 'all tests finished'}`,
+        payload: { requestId: String(request._id) },
+        dedupeKey: `${type}:${request._id}:${new Types.ObjectId()}`,
+      });
+    } catch (e) {
+      await this.requests.updateOne({ _id: request._id }, { $unset: { [flag]: '' } }).exec().catch(() => undefined);
+      throw e;
+    }
   }
 
   // ---------- cancelling ----------
@@ -318,10 +326,10 @@ export class LabOrdersService {
   private async finishIfNothingLeft(request: LabRequestDocument): Promise<void> {
     const fresh = await this.requests.findById(request._id).exec();
     if (!fresh) return;
-    if (!fresh.collectionDoneAt && !(await this.samples.exists({ request: fresh._id, status: 'waiting' }).exec())) {
+    if (!(await this.samples.exists({ request: fresh._id, status: 'waiting' }).exec())) {
       await this.announceDone(fresh._id as Types.ObjectId, 'lab.collection-done');
     }
-    if (!fresh.doneAt && !(await this.lines.exists({ request: fresh._id, status: { $nin: CLOSED_LINE } }).exec())) {
+    if (!(await this.lines.exists({ request: fresh._id, status: { $nin: CLOSED_LINE } }).exec())) {
       await this.announceDone(fresh._id as Types.ObjectId, 'lab.request-done');
     }
   }
