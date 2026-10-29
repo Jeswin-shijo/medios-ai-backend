@@ -10,6 +10,9 @@ import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { Error as MongooseError, mongo } from 'mongoose';
 
+/** Fields of an HttpException's response object that reach the client besides `message`. */
+const PASSED_THROUGH = ['code', 'attemptsLeft', 'resendAfterSeconds', 'token'] as const;
+
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
@@ -23,6 +26,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     let status: number = HttpStatus.INTERNAL_SERVER_ERROR;
     let message: any = 'Internal server error';
+    // Machine-readable fields a client acts on (the kiosk reads `code`, `token`...).
+    const extra: Record<string, unknown> = {};
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -31,6 +36,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
         typeof exceptionResponse === 'string'
           ? exceptionResponse
           : (exceptionResponse as any).message || exceptionResponse;
+      if (exceptionResponse && typeof exceptionResponse === 'object') {
+        for (const key of PASSED_THROUGH) {
+          if (key in exceptionResponse) extra[key] = (exceptionResponse as Record<string, unknown>)[key];
+        }
+      }
     } else if (exception instanceof MongooseError.ValidationError) {
       // Missing required fields or values outside a schema enum are client errors.
       status = HttpStatus.BAD_REQUEST;
@@ -57,6 +67,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       timestamp: new Date().toISOString(),
       path: request.url,
       message,
+      ...extra,
     });
   }
 }
