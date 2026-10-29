@@ -172,12 +172,13 @@ const CALLER_REF = { name: 'caller_ref', type: 'string', description: 'The calle
 const INBOUND_TOOLS: AgentTool[] = [
   {
     name: 'find_patient',
-    description: 'Verify the caller before sharing anything. Call it with the registered mobile number, the patient name and date of birth. Returns caller_ref and their upcoming appointments.',
+    description:
+      "Verify the caller before sharing anything. Call it only after collecting the registered mobile number, the patient's full name and the patient's date of birth. Returns caller_ref and their upcoming appointments.",
     preToolMessage: 'Let me find your details. One moment.',
     parameters: [
       { name: 'phone', type: 'string', description: 'The 10-digit mobile number registered with the hospital.', required: true },
-      { name: 'patient_name', type: 'string', description: "The patient's full name as the caller says it.", required: true },
-      { name: 'date_of_birth', type: 'string', description: "The patient's date of birth as YYYY-MM-DD.", required: false },
+      { name: 'patient_name', type: 'string', description: "The patient's full name, spelt in English letters (e.g. Rekha Suresh), whatever language the call is in.", required: true },
+      { name: 'date_of_birth', type: 'string', description: "The patient's date of birth as the caller says it, in any form (e.g. 14 March 1992). Always ask for it.", required: true },
     ],
   },
   {
@@ -259,10 +260,11 @@ WHAT YOU CAN DO
   request_callback so the front desk calls back.
 
 VERIFY THE CALLER FIRST
-1. Ask for the patient's name, the mobile number registered with the hospital,
-   and the patient's date of birth.
-2. Call find_patient with them (date as YYYY-MM-DD). Share nothing about any
-   patient or appointment until it returns verified: true.
+1. Ask for the patient's full name, the mobile number registered with the
+   hospital, and the patient's date of birth. Always collect all three.
+2. Call find_patient with them. Spell the name in English letters, even when
+   the call is in another language; the date of birth can be in any form.
+   Share nothing about any patient or appointment until it returns verified: true.
 3. If it is not verified, follow its message. Never say which detail was wrong.
 4. Pass the caller_ref it returns to every other tool.
 

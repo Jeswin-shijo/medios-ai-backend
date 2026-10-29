@@ -18,19 +18,41 @@ import { appointmentStart, clinicNow, clockMinutes, displayDate, displayDateTime
 
 // The inbound agent: a patient phones the hospital and the voice agent (SnapServe)
 // calls these tools mid-call. Nothing about an appointment is shared until
-// find_patient has matched the caller to a patient record:
-//   - the registered mobile number, and
-//   - the date of birth when one is on file, otherwise the patient's name.
+// find_patient has matched the caller to a patient record by the registered mobile
+// number and the patient's full name, plus:
+//   - calling from that number (caller ID): the date of birth when one is on file;
+//   - from any other number, or with no caller ID: a date of birth on file, which
+//     must match. Without one the caller cannot be verified on the line, and staff
+//     call back the number on record.
 // The match opens a session whose code (caller_ref) every other tool must quote,
 // so changes only ever touch the verified patient's appointments. Answers carry
 // first names, dates, times and the doctor; never clinical details.
 // Every answer is { ok, message, ...data }: `message` tells the agent what to do next.
 
-const SESSION_MINUTES = 60;
+const SESSION_MINUTES = 20;
 const MAX_FAILURES = 3;
-const LOCK_MINUTES = 30;
+/** The failure count lapses this long after the last failure. */
+const FAILURE_MINUTES = 30;
+/** Each lock within LOCK_MEMORY_HOURS lasts longer: 30 minutes, 2 hours, then 24 hours. */
+const LOCK_MINUTES = [30, 120, 24 * 60];
+const LOCK_MEMORY_HOURS = 24;
 const UPCOMING = 3;
 const SLOT_OFFERS = 3;
+/** The furthest ahead a caller can book. */
+const MAX_DAYS_AHEAD = 90;
+/** Slack around a call's start and end when its result is matched to a session by number. */
+const MATCH_MARGIN_MS = 2 * 60_000;
+const DAY_MS = 86_400_000;
+/** The agent's verdicts that outrank whatever the call changed. */
+const PROVIDER_FIRST: CallOutcome[] = ['escalated', 'wrong_number', 'unverified'];
+
+// The replies to a failed check never say which detail was wrong.
+const ASK_DOB = "Ask the caller for the patient's date of birth, then try again.";
+const NO_MATCH =
+  "Those details do not match our records. Ask the caller to check the registered mobile number, the patient's full name and date of birth and try once more, or offer a call back from the front desk (request_callback). Never say which detail was wrong.";
+const LOCKED_NOW = 'Those details do not match our records. Do not share anything. Tell the caller the front desk will call them back, then end politely.';
+const LOCKED = 'Too many unsuccessful checks for this number. Do not share any details. Tell the caller the front desk will call them back, then end politely.';
+const NO_SESSION = 'Verify the caller first with find_patient, then pass the caller_ref it returns.';
 /** Codes avoid look-alike characters (0/O, 1/I) so they survive being read aloud. */
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -68,27 +90,61 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
 const pad = (n: number) => String(n).padStart(2, '0');
 const str = (value: unknown, max = 200) => (typeof value === 'string' || typeof value === 'number' ? String(value).trim().slice(0, max) : '');
 
+/** "92" → 1992, "14" → 2014: this century unless that is still to come. */
+const fullYear = (y: string) => {
+  if (y.length === 4) return Number(y);
+  const thisCentury = 2000 + Number(y);
+  return thisCentury <= new Date().getFullYear() ? thisCentury : thisCentury - 100;
+};
+
 /** A date of birth in any common spoken or written form → YYYY-MM-DD; null if unreadable. */
 export function parseBirthDate(raw: unknown): string | null {
-  const s = str(raw).toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, '$1').replace(/,/g, ' ');
+  const s = str(raw)
+    .toLowerCase()
+    .replace(/^(\d{4}-\d{2}-\d{2})t[\d:.]+(z|[+-][\d:]+)?$/, '$1') // an imported ISO timestamp
+    .replace(/(\d)(st|nd|rd|th)\b/g, '$1')
+    .replace(/,/g, ' ')
+    .replace(/\s+of\s+/g, ' ')
+    .trim();
   let y: number, m: number, d: number;
   let match: RegExpExecArray | null;
   if ((match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(s))) [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  else if ((match = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(s))) [d, m, y] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  else if ((match = /^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/.exec(s))) [d, m, y] = [Number(match[1]), MONTHS.indexOf(match[2].slice(0, 3)) + 1, Number(match[3])];
-  else if ((match = /^([a-z]+)\s+(\d{1,2})\s+(\d{4})$/.exec(s))) [m, d, y] = [MONTHS.indexOf(match[1].slice(0, 3)) + 1, Number(match[2]), Number(match[3])];
+  else if ((match = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4}|\d{2})$/.exec(s))) [d, m, y] = [Number(match[1]), Number(match[2]), fullYear(match[3])];
+  else if ((match = /^(\d{1,2})\s+([a-z]+)\s+(\d{4}|\d{2})$/.exec(s))) [d, m, y] = [Number(match[1]), MONTHS.indexOf(match[2].slice(0, 3)) + 1, fullYear(match[3])];
+  else if ((match = /^([a-z]+)\s+(\d{1,2})\s+(\d{4}|\d{2})$/.exec(s))) [m, d, y] = [MONTHS.indexOf(match[1].slice(0, 3)) + 1, Number(match[2]), fullYear(match[3])];
   else return null;
   const date = new Date(y, m - 1, d);
   if (m < 1 || date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d || y < 1900) return null;
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
-const nameWords = (name: string) => name.toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter((w) => w.length > 1);
+/** Titles said before a name; ignored on both sides. */
+const HONORIFICS = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'smt', 'shri', 'sri', 'thiru', 'selvi', 'master', 'baby']);
+/** Words the caller may say beyond the name on record ("Rekha Suresh Kumar" for "Rekha Suresh"). */
+const MAX_EXTRA_WORDS = 2;
 
-/** The caller's version of the name includes the patient's first name ("Rekha" for "Rekha S"). */
+const nameWords = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w && !HONORIFICS.has(w));
+
+/** Whether the name has any Latin letters: names must be spelt in English letters. */
+export const readableName = (name: string) => /[a-z]/i.test(name);
+
+/**
+ * The caller said the patient's full name: every word on record longer than one
+ * letter (initials such as the "P" in "Suresh P" are optional), with at most two
+ * extra words, so a list of common names does not match.
+ */
 export function nameMatches(onRecord: string, spoken: string): boolean {
-  const [first] = nameWords(onRecord);
-  return !!first && nameWords(spoken).includes(first);
+  const record = nameWords(onRecord);
+  const required = record.filter((w) => w.length > 1);
+  const said = new Set(nameWords(spoken));
+  if (!required.length || !required.every((w) => said.has(w))) return false;
+  const extra = [...said].filter((w) => !record.includes(w));
+  return extra.length <= MAX_EXTRA_WORDS;
 }
 
 const firstName = (name: string) => name.trim().split(/\s+/)[0] ?? name;
@@ -140,56 +196,48 @@ export class InboundService {
   // ---------------------------------------------------------------- identity
 
   private async findPatient(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolReply> {
-    const phone = toE164India(str(args.phone)) ?? toE164India(ctx.callerNumber);
+    const callerId = toE164India(ctx.callerNumber);
+    const phone = toE164India(str(args.phone)) ?? callerId;
     if (!phone) throw new Refusal('Ask for the 10-digit mobile number registered with the hospital, then call find_patient again.');
     const name = str(args.patient_name, 80);
-    const dob = parseBirthDate(args.date_of_birth);
-    if (!name) throw new Refusal("Ask for the patient's full name (and date of birth), then call find_patient again.");
+    if (!name) throw new Refusal("Ask for the patient's full name and date of birth, then call find_patient again.");
 
     const lookup = await this.lookups.findOne({ phone }).exec();
-    if (lookup?.lockedUntil && lookup.lockedUntil > new Date()) {
-      throw new Refusal('Too many unsuccessful checks for this number. Do not share any details. Tell the caller the front desk will call them back, then end politely.', {
-        verified: false,
-        locked: true,
-      });
-    }
+    if (lookup?.lockedUntil && lookup.lockedUntil > new Date()) throw new Refusal(LOCKED, { verified: false, locked: true });
+    if (!readableName(name)) throw new Refusal('Ask the caller to spell the name in English letters, then call find_patient again.', { verified: false });
 
-    const tail = phone.slice(-5);
-    const candidates = (await this.patients.find({ phone: { $regex: tail } }).exec()).filter((p) => toE164India(p.phone) === phone);
-    const byName = candidates.filter((p) => nameMatches(p.name, name));
-    // A date of birth on file must be given and must match; otherwise the name decides.
-    const needsDob = byName.some((p) => p.dob);
-    if (needsDob && !dob) {
-      throw new Refusal("Ask for the patient's date of birth (day, month and year), then call find_patient again with it.", { verified: false });
-    }
-    const matched = byName.filter((p) => (p.dob ? parseBirthDate(p.dob) === dob : true));
+    // Calling from the registered number itself, the full name is enough when no date
+    // of birth is on file. From any other number a date of birth on file must match.
+    const fromRecordNumber = callerId === phone;
+    const dob = parseBirthDate(args.date_of_birth);
+    const candidates = await this.patientsOn(phone);
+    // Decided before the name is looked at, so this reply says nothing about who matched.
+    if (!dob && (!fromRecordNumber || candidates.some((p) => p.birthDate))) throw new Refusal(ASK_DOB, { verified: false });
 
-    if (matched.length !== 1) {
+    // Full name first, then the date of birth (ignored for a patient with none on file).
+    let matched = candidates.filter((p) => nameMatches(p.name, name) && (!p.birthDate || p.birthDate === dob));
+    const exact = matched.filter((p) => dob && p.birthDate === dob);
+    if (matched.length > 1 && exact.length === 1) matched = exact;
+    if (matched.length > 1) throw new Refusal(ASK_DOB, { verified: false });
+    if (!matched.length) {
       const attemptsLeft = await this.recordFailure(phone);
-      if (attemptsLeft === 0) {
-        throw new Refusal('The details still do not match. Do not share anything. Tell the caller the front desk will call them back, then end politely.', {
-          verified: false,
-          locked: true,
-        });
-      }
-      throw new Refusal(
-        matched.length > 1
-          ? "Several patients match. Ask for the patient's full name and date of birth, then try again."
-          : 'The details do not match our records. Ask the caller to repeat the mobile number, name and date of birth once. Never say which detail was wrong.',
-        { verified: false, attempts_left: attemptsLeft },
-      );
+      if (attemptsLeft === 0) throw new Refusal(LOCKED_NOW, { verified: false, locked: true });
+      throw new Refusal(NO_MATCH, { verified: false, attempts_left: attemptsLeft });
     }
 
     const patient = matched[0];
-    await this.lookups.deleteOne({ phone }).exec();
+    if (!fromRecordNumber && !patient.birthDate) {
+      // Nothing on file to check from another number: staff call back the number on record.
+      throw new Refusal(NO_MATCH, { verified: false, attempts_left: this.attemptsLeft(lookup) });
+    }
     const session = await this.sessions.create({
       code: this.newCode(),
       uhid: patient.uhid,
       patientName: patient.name,
       phone,
-      verifiedBy: patient.dob ? 'date of birth' : 'name',
+      verifiedBy: !fromRecordNumber ? 'name and date of birth' : patient.birthDate ? 'caller ID, name and date of birth' : 'caller ID and name',
       providerCallId: ctx.providerCallId,
-      callerNumber: toE164India(ctx.callerNumber) ?? undefined,
+      callerNumber: callerId ?? undefined,
       expiresAt: new Date(Date.now() + SESSION_MINUTES * 60_000),
     });
     const listed = await this.listAppointments(session);
@@ -201,42 +249,99 @@ export class InboundService {
       patient_first_name: firstName(patient.name),
       ...(patient.age < 18 && { note: 'The patient is a child: you are probably speaking with a parent or guardian.' }),
       today: `${spokenDay(now)} ${now.getFullYear()}`,
-      message: `Verified. Use caller_ref ${session.code} in every other tool. ${listed.message}`,
+      message: `Verified. Pass caller_ref to every other tool, and never read it aloud. ${listed.message}`,
     };
   }
 
-  /** Counts a failed check; returns the attempts left (0 = now locked). */
+  /** Patients registered on this number, with the date of birth on file read (null when none, or unreadable). */
+  private async patientsOn(phone: string) {
+    const tail = phone.slice(-5);
+    const found = await this.patients.find({ phone: { $regex: tail } }, { uhid: 1, name: 1, phone: 1, dob: 1, age: 1 }).lean().exec();
+    return found
+      .filter((p) => toE164India(p.phone) === phone)
+      .map((p) => {
+        const birthDate = p.dob ? parseBirthDate(p.dob) : null;
+        if (p.dob && !birthDate) this.logger.warn(`Patient ${p.uhid}: the date of birth on file cannot be read, so it is ignored. Correct it in the patient record.`);
+        return { ...p, birthDate };
+      });
+  }
+
+  /** Attempts left before a lock, without counting one. */
+  private attemptsLeft(lookup: CallerLookupDocument | null): number {
+    const counting = lookup?.failuresUntil && lookup.failuresUntil > new Date();
+    return Math.max(MAX_FAILURES - (counting ? lookup.failures : 0), 0);
+  }
+
+  /**
+   * Counts a failed check; returns the attempts left (0 = now locked). A success never
+   * clears the count: it lapses 30 minutes after the last failure.
+   */
   private async recordFailure(phone: string): Promise<number> {
-    const lookup = await this.lookups
-      .findOneAndUpdate(
-        { phone },
-        { $inc: { failures: 1 }, $set: { expiresAt: new Date(Date.now() + LOCK_MINUTES * 60_000) } },
-        { upsert: true, new: true },
-      )
-      .exec();
-    const left = Math.max(MAX_FAILURES - lookup!.failures, 0);
-    if (left === 0) {
-      await this.lookups.updateOne({ phone }, { $set: { lockedUntil: new Date(Date.now() + LOCK_MINUTES * 60_000) } }).exec();
-      await this.task(`Inbound caller not verified: ${phone}`, `Identity check failed ${MAX_FAILURES} times on a call to the hospital line. Call back on ${phone} to help.`, 'Medium', '');
-    }
+    const now = new Date();
+    await this.lookups.updateOne({ phone, failuresUntil: { $lte: now } }, { $set: { failures: 0 } }).exec();
+    const failuresUntil = new Date(now.getTime() + FAILURE_MINUTES * 60_000);
+    const lookup = (await this.lookups
+      .findOneAndUpdate({ phone }, { $inc: { failures: 1 }, $set: { failuresUntil }, $max: { expiresAt: failuresUntil } }, { upsert: true, new: true })
+      .exec())!;
+    const left = Math.max(MAX_FAILURES - lookup.failures, 0);
+    if (left === 0) await this.lock(lookup);
     return left;
   }
 
+  /** Locks lookups for the number; each lock within 24 hours lasts longer, and repeats alert an admin. */
+  private async lock(lookup: CallerLookupDocument) {
+    const now = Date.now();
+    const locks = lookup.locksUntil && lookup.locksUntil.getTime() > now ? (lookup.locks ?? 0) + 1 : 1;
+    const minutes = LOCK_MINUTES[Math.min(locks, LOCK_MINUTES.length) - 1];
+    const lockedUntil = new Date(now + minutes * 60_000);
+    const locksUntil = new Date(now + LOCK_MEMORY_HOURS * 3_600_000);
+    await this.lookups
+      .updateOne({ _id: lookup._id }, { $set: { failures: 0, locks, lockedUntil, locksUntil }, $max: { expiresAt: lockedUntil > locksUntil ? lockedUntil : locksUntil } })
+      .exec();
+    const { phone } = lookup;
+    await this.task(`Inbound caller not verified: ${phone}`, `Identity check failed ${MAX_FAILURES} times on a call to the hospital line. Call back on ${phone} to help.`, 'Medium', '');
+    if (locks < 2) return;
+    // Never the full number or a name: this goes to whoever reads the alert list.
+    await this.tasks.create({
+      title: `Repeated failed caller checks from …${phone.slice(-4)}`,
+      subtitle: `Lock ${locks} in 24 hours on the hospital line: checks for this number are paused for ${minutes >= 60 ? `${minutes / 60} hours` : `${minutes} minutes`}. Someone may be guessing a patient's details.`,
+      patientName: '',
+      uhid: '',
+      type: 'System',
+      priority: 'High',
+      category: 'System',
+      dueDateTime: displayDateTime(clinicNow()),
+      status: 'Pending',
+    });
+  }
+
   private async session(args: Record<string, unknown>, ctx: ToolContext): Promise<InboundSessionDocument> {
+    const session = await this.liveSession(args, ctx);
+    if (!session) throw new Refusal(NO_SESSION);
+    return session;
+  }
+
+  /**
+   * The caller_ref's session, when this call may use it. A session is bound to the
+   * first call id it sees, or to the caller's number while no call id has come.
+   */
+  private async liveSession(args: Record<string, unknown>, ctx: ToolContext): Promise<InboundSessionDocument | null> {
     const code = str(args.caller_ref, 20).toUpperCase();
     const session = code ? await this.sessions.findOne({ code, expiresAt: { $gt: new Date() } }).exec() : null;
-    if (!session) throw new Refusal('Verify the caller first with find_patient, then pass the caller_ref it returns.');
-    let changed = false;
-    if (ctx.providerCallId && !session.providerCallId) {
-      session.providerCallId = ctx.providerCallId;
-      changed = true;
-    }
-    if (ctx.callerNumber && !session.callerNumber) {
-      session.callerNumber = toE164India(ctx.callerNumber) ?? undefined;
-      changed = true;
-    }
-    if (changed) await session.save();
-    return session;
+    if (!session) return null;
+    const callId = ctx.providerCallId;
+    const caller = toE164India(ctx.callerNumber) ?? undefined;
+    if (session.providerCallId) return callId === session.providerCallId ? session : null;
+    if (session.callerNumber && caller !== session.callerNumber) return null;
+    if (!callId && (!caller || session.callerNumber)) return session;
+    // First sight of the call: bind to it (unless another call got there first).
+    return this.sessions
+      .findOneAndUpdate(
+        { _id: session._id, providerCallId: { $exists: false } },
+        { $set: { ...(callId && { providerCallId: callId }), ...(caller && !session.callerNumber && { callerNumber: caller }) } },
+        { new: true },
+      )
+      .exec();
   }
 
   private newCode() {
@@ -278,6 +383,7 @@ export class InboundService {
     if (!ref) throw new Refusal('Unknown appointment_id. Call list_appointments and use one of the ids it returns.');
     const apt = await this.appointments.findOne({ _id: ref.appointmentId, uhid: session.uhid }).exec();
     if (!apt || apt.status !== 'Scheduled') throw new Refusal('That appointment can no longer be changed. Call list_appointments again.');
+    if (appointmentStart(apt.date, apt.time) <= clinicNow()) throw new Refusal('That appointment time has already passed, so it cannot be changed. Call list_appointments again.');
     return apt;
   }
 
@@ -285,6 +391,9 @@ export class InboundService {
     const { cfg } = await this.context();
     const now = clinicNow();
     const preferred = /^\d{4}-\d{2}-\d{2}$/.test(str(args.preferred_date)) ? parseIsoDay(str(args.preferred_date)) : null;
+    if (preferred && preferred.getTime() > now.getTime() + MAX_DAYS_AHEAD * DAY_MS) {
+      throw new Refusal(`Appointments can be booked up to ${MAX_DAYS_AHEAD} days ahead. Ask for an earlier day, or offer a call back from the front desk (request_callback).`);
+    }
     const from = preferred && preferred > now ? preferred : now;
     const offered = await this.slots.findFree(cfg, from, SLOT_OFFERS);
     session.slots = offered.map((s, i) => ({ code: `S${i + 1}`, date: s.date, time: s.time, label: s.label }));
@@ -337,8 +446,8 @@ export class InboundService {
       notes: reason ? `Booked by phone (AI): ${reason}` : 'Booked by phone (AI).',
       tags: patient.conditions ?? [],
     });
-    await this.patients.updateOne({ uhid: patient.uhid }, { nextAppointment: `${displayDate(parseIsoDay(slot.date))} ${slot.time}` }).exec();
-    await this.note(session, 'booked', `Booked ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, String(apt._id));
+    await this.refreshNextAppointment(patient.uhid);
+    await this.note(session, `Booked ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, { outcome: 'booked', appointmentId: String(apt._id) });
     return { ok: true, message: `Booked for ${slot.label}. Read it back to the caller and ask them to arrive 10 minutes early.` };
   }
 
@@ -355,7 +464,8 @@ export class InboundService {
     apt.confirmedAt = new Date();
     apt.notes = [apt.notes, `Moved by phone (AI) from ${before}.`].filter(Boolean).join(' ');
     await apt.save();
-    await this.note(session, 'rescheduled', `Moved from ${before} to ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, String(apt._id));
+    await this.refreshNextAppointment(apt.uhid);
+    await this.note(session, `Moved from ${before} to ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, { outcome: 'rescheduled', appointmentId: String(apt._id) });
     return { ok: true, message: `Moved to ${slot.label}. Read the new time back to the caller.` };
   }
 
@@ -369,7 +479,10 @@ export class InboundService {
     apt.notes = [apt.notes, `Cancelled by phone (AI)${reason ? `: ${reason}` : ''}.`].filter(Boolean).join(' ');
     await apt.save();
     this.appointmentEvents.statusChanged({ id: String(apt._id), status: 'Canceled' });
-    await this.note(session, 'cancelled', `Cancelled ${displayDate(parseIsoDay(apt.date))}, ${apt.time}${reason ? ` (${reason})` : ''}.`, String(apt._id));
+    const when = `${displayDate(parseIsoDay(apt.date))}, ${apt.time}`;
+    // The same front-desk alert as a cancellation on an outbound call.
+    await this.task(`Appointment cancelled by ${session.patientName}`, [`The ${when} slot is free again.`, reason && `Reason: ${reason}.`].filter(Boolean).join(' '), 'Low', session.uhid, session.patientName);
+    await this.note(session, `Cancelled ${when}${reason ? ` (${reason})` : ''}.`, { outcome: 'cancelled', appointmentId: String(apt._id) });
     return { ok: true, message: 'Cancelled. Tell the caller, and that they can call again to book.' };
   }
 
@@ -378,20 +491,19 @@ export class InboundService {
     apt.confirmation = 'Confirmed';
     apt.confirmedAt = new Date();
     await apt.save();
-    await this.note(session, 'confirmed', `Confirmed ${displayDate(parseIsoDay(apt.date))}, ${apt.time}.`, String(apt._id));
+    await this.note(session, `Confirmed ${displayDate(parseIsoDay(apt.date))}, ${apt.time}.`, { outcome: 'confirmed', appointmentId: String(apt._id) });
     return { ok: true, message: 'Confirmed. Thank the caller and ask them to arrive 10 minutes early.' };
   }
 
   private async requestCallback(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolReply> {
-    const code = str(args.caller_ref, 20).toUpperCase();
-    const session = code ? await this.sessions.findOne({ code, expiresAt: { $gt: new Date() } }).exec() : null;
+    const session = await this.liveSession(args, ctx);
     const phone = session?.phone ?? toE164India(str(args.phone)) ?? toE164India(ctx.callerNumber);
     if (!phone) throw new Refusal('Ask for a 10-digit mobile number to call back on, then call request_callback again.');
     const urgent = args.urgent === true || str(args.urgent).toLowerCase() === 'true';
     const reason = str(args.reason, 300) || 'Asked for a call back.';
     const who = session?.patientName ?? `caller ${phone}`;
     await this.task(urgent ? `Call back urgently: ${who}` : `Call back ${who}`, `${reason} (inbound AI call, ${phone})`, urgent ? 'High' : 'Medium', session?.uhid ?? '', session?.patientName);
-    if (session) await this.note(session, undefined, `Call back requested${urgent ? ' (urgent)' : ''}: ${reason}`);
+    if (session) await this.note(session, `Call back requested${urgent ? ' (urgent)' : ''}: ${reason}`, urgent ? { urgent: true } : undefined);
     return {
       ok: true,
       message: urgent
@@ -400,10 +512,15 @@ export class InboundService {
     };
   }
 
-  private async note(session: InboundSessionDocument, outcome: string | undefined, action: string, appointmentId?: string) {
-    await this.sessions
-      .updateOne({ _id: session._id }, { $push: { actions: action }, ...(outcome && { $set: { outcome, ...(appointmentId && { appointmentId }) } }) })
-      .exec();
+  /** Records what the call did; `set` holds the last change (outcome, appointmentId) or the urgent flag. */
+  private async note(session: InboundSessionDocument, action: string, set?: { outcome?: string; appointmentId?: string; urgent?: boolean }) {
+    await this.sessions.updateOne({ _id: session._id }, { $push: { actions: action }, ...(set && { $set: set }) }).exec();
+  }
+
+  /** The patient's next visit, as the patient record shows it: the earliest upcoming one. */
+  private async refreshNextAppointment(uhid: string) {
+    const [next] = await this.upcoming(uhid);
+    if (next) await this.patients.updateOne({ uhid }, { nextAppointment: `${displayDate(parseIsoDay(next.date))} ${next.time}` }).exec();
   }
 
   // ---------------------------------------------------------------- the call log
@@ -411,52 +528,87 @@ export class InboundService {
   /**
    * Logs an inbound call when its post-call result arrives. The changes made during
    * the call come from the caller's session (matched by call id or caller number);
-   * an unverified caller is logged without a patient.
+   * an unverified caller is logged without a patient. The agent's "Needs staff",
+   * "Wrong number" and "Not verified" outrank what the call changed. A result
+   * delivered twice is logged once (a unique index on the provider's call id).
    */
   async recordCall(result: CallResult, provider: string): Promise<{ matched: boolean; duplicate?: boolean }> {
     const providerCallId = result.providerCallId != null ? String(result.providerCallId) : undefined;
     if (providerCallId && (await this.calls.exists({ providerCallId, provider }))) return { matched: true, duplicate: true };
 
     const caller = toE164India(result.fromNumber) ?? undefined;
-    const recent = { createdAt: { $gt: new Date(Date.now() - 2 * 3_600_000) } };
-    const session =
-      (providerCallId ? await this.sessions.findOne({ providerCallId }).exec() : null) ??
-      (caller ? await this.sessions.findOne({ $or: [{ callerNumber: caller }, { phone: caller }], ...recent }).sort({ createdAt: -1 }).exec() : null);
-
-    let outcome: CallOutcome = (session?.outcome as CallOutcome) ?? result.outcome;
-    if (!session?.outcome && result.unrecognised) outcome = 'enquiry';
     const ended = result.endedAt ?? new Date();
     const started = new Date(ended.getTime() - (result.durationSec ?? 0) * 1000);
-    let action = session?.actions.length ? session.actions.join(' ') : 'No changes made.';
-    if (outcome === 'escalated' && !session?.actions.some((a) => a.startsWith('Call back'))) {
-      await this.task(`Call back urgently: ${session?.patientName ?? `caller ${caller ?? 'unknown'}`}`, result.notes || result.summary || 'Asked for a person during an AI call to the hospital line.', 'High', session?.uhid ?? '', session?.patientName);
-      action += ' Care team alerted (high priority) to call back.';
-    }
+    const session = await this.sessionOfCall(providerCallId, caller, result.durationSec != null ? started : undefined, ended);
 
-    await this.calls.create({
-      purpose: 'inbound',
-      status: 'completed',
-      outcome,
-      uhid: session?.uhid ?? '',
-      patientName: session?.patientName ?? 'Unverified caller',
-      phone: caller ?? result.fromNumber ?? 'unknown',
-      appointmentId: session?.appointmentId,
-      scheduledFor: started,
-      startedAt: started,
-      endedAt: ended,
-      durationSec: result.durationSec,
-      trigger: 'inbound',
-      requestedBy: 'Caller',
-      provider,
-      providerCallId,
-      summary: result.summary,
-      transcript: result.transcript,
-      result: { notes: result.notes },
-      actionTaken: session ? `Verified by ${session.verifiedBy}. ${action}` : action,
-      ...(result.raw && { rawResult: result.raw }),
-    });
+    const outcome: CallOutcome =
+      !result.unrecognised && PROVIDER_FIRST.includes(result.outcome)
+        ? result.outcome
+        : ((session?.outcome as CallOutcome | undefined) ?? (result.unrecognised ? 'enquiry' : result.outcome));
+    let action = session?.actions.length ? session.actions.join(' ') : 'No changes made.';
+    // The backup for an agent that ended with "Needs staff" without raising an urgent callback.
+    const backupAlert = outcome === 'escalated' && !session?.urgent;
+    if (backupAlert) action += ' Care team alerted (high priority) to call back.';
+
+    try {
+      await this.calls.create({
+        purpose: 'inbound',
+        status: 'completed',
+        outcome,
+        uhid: session?.uhid ?? '',
+        patientName: session?.patientName ?? 'Unverified caller',
+        phone: caller ?? result.fromNumber ?? 'unknown',
+        appointmentId: session?.appointmentId,
+        scheduledFor: started,
+        startedAt: started,
+        endedAt: ended,
+        durationSec: result.durationSec,
+        trigger: 'inbound',
+        requestedBy: 'Caller',
+        provider,
+        providerCallId,
+        summary: result.summary,
+        transcript: result.transcript,
+        result: { notes: result.notes },
+        actionTaken: session ? `Verified by ${session.verifiedBy}. ${action}` : action,
+        ...(result.raw && { rawResult: result.raw }),
+      });
+    } catch (err) {
+      if ((err as { code?: number }).code === 11000) return { matched: true, duplicate: true };
+      throw err;
+    }
+    // The call is over: its session ends with it.
+    if (session) await this.sessions.updateOne({ _id: session._id }, { $set: { loggedAt: new Date(), expiresAt: new Date() } }).exec();
+    if (backupAlert) {
+      await this.task(`Call back urgently: ${session?.patientName ?? `caller ${caller ?? 'unknown'}`}`, result.notes || result.summary || 'Asked for a person during an AI call to the hospital line.', 'High', session?.uhid ?? '', session?.patientName);
+    }
     this.logger.log(`Inbound call ${providerCallId ?? ''} logged: ${outcome}`);
     return { matched: true };
+  }
+
+  /**
+   * The session a call's result belongs to: the one bound to its call id, else one
+   * from the caller's number that is not bound to another call, not yet logged, and
+   * opened during the call (start and end ± 2 minutes; the start is known from the
+   * call's length).
+   */
+  private async sessionOfCall(providerCallId: string | undefined, caller: string | undefined, started: Date | undefined, ended: Date) {
+    const unlogged = { loggedAt: { $exists: false } };
+    if (providerCallId) {
+      const own = await this.sessions.findOne({ providerCallId, ...unlogged }).exec();
+      if (own) return own;
+    }
+    if (!caller) return null;
+    const from = started ? new Date(started.getTime() - MATCH_MARGIN_MS) : new Date(ended.getTime() - 2 * 3_600_000);
+    return this.sessions
+      .findOne({
+        $or: [{ callerNumber: caller }, { phone: caller }],
+        providerCallId: providerCallId ? { $in: [null, providerCallId] } : null,
+        createdAt: { $gte: from, $lte: new Date(ended.getTime() + MATCH_MARGIN_MS) },
+        ...unlogged,
+      })
+      .sort({ createdAt: -1 })
+      .exec();
   }
 
   // ---------------------------------------------------------------- helpers

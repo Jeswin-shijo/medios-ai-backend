@@ -26,6 +26,11 @@ import { ErSnapshot, ErSnapshotDocument, ErSnapshotSchema } from '../modules/er/
 import { VitalsRecord, VitalsRecordDocument, VitalsRecordSchema } from '../modules/vitals/schemas/vitals.schema';
 import { PatientCard, PatientCardDocument, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
+import { Appointment, AppointmentDocument, AppointmentSchema } from '../modules/appointments/schemas/appointment.schema';
+import { FollowUpItem, FollowUpDocument, FollowUpItemSchema } from '../modules/follow-ups/schemas/follow-up.schema';
+import { AgentCall, AgentCallDocument, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
+import { InboundSession, InboundSessionDocument, InboundSessionSchema } from '../modules/calls/schemas/inbound-session.schema';
+import { CallerLookup, CallerLookupDocument, CallerLookupSchema } from '../modules/calls/schemas/caller-lookup.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -77,6 +82,11 @@ export function models() {
     PatientCard: model(PatientCard, PatientCardSchema) as Model<PatientCardDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
+    Appointment: model(Appointment, AppointmentSchema) as Model<AppointmentDocument>,
+    FollowUpItem: model(FollowUpItem, FollowUpItemSchema) as Model<FollowUpDocument>,
+    AgentCall: model(AgentCall, AgentCallSchema) as Model<AgentCallDocument>,
+    InboundSession: model(InboundSession, InboundSessionSchema) as Model<InboundSessionDocument>,
+    CallerLookup: model(CallerLookup, CallerLookupSchema) as Model<CallerLookupDocument>,
   };
 }
 

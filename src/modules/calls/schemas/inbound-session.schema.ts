@@ -28,7 +28,8 @@ export class SessionCode {
  * One verified caller on an inbound call. find_patient creates it after the identity
  * check and hands the agent its `code` (the caller_ref); every later tool must quote
  * it, so actions are bound to the verified patient rather than to whatever the
- * language model passes. Expires after an hour.
+ * language model passes. It is bound to the first call id it sees (or the caller's
+ * number when there is none), lasts 20 minutes, and ends when the call is logged.
  */
 @Schema({ timestamps: true })
 export class InboundSession {
@@ -45,7 +46,7 @@ export class InboundSession {
   @Prop({ required: true, index: true })
   phone: string;
 
-  /** "date of birth" or "name": what matched beyond the phone number. */
+  /** What verified the caller, e.g. "caller ID and name" or "name and date of birth". */
   @Prop({ required: true })
   verifiedBy: string;
 
@@ -72,6 +73,14 @@ export class InboundSession {
 
   @Prop()
   appointmentId?: string;
+
+  /** request_callback was used with urgent: staff are already alerted. */
+  @Prop()
+  urgent?: boolean;
+
+  /** Set when the call's result was logged; the session then ends. */
+  @Prop()
+  loggedAt?: Date;
 
   @Prop({ required: true })
   expiresAt: Date;

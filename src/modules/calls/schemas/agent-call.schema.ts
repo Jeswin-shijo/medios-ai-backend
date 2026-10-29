@@ -171,3 +171,5 @@ export class AgentCall {
 export const AgentCallSchema = SchemaFactory.createForClass(AgentCall);
 AgentCallSchema.index({ activeKey: 1 }, { unique: true, partialFilterExpression: { activeKey: { $type: 'string' } } });
 AgentCallSchema.index({ createdAt: -1 });
+// One log row per provider call: a result delivered twice (even at once) is logged once.
+AgentCallSchema.index({ provider: 1, providerCallId: 1 }, { unique: true, partialFilterExpression: { providerCallId: { $type: 'string' } } });
