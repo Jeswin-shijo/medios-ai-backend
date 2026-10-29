@@ -64,7 +64,7 @@ describe('Lab close check, status, overview and settings', () => {
     orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, settings, m.LabTestReport);
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
-    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings, noAi);
+    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, settings, noAi, m.Clock);
     overview = new LabOverviewService(m.LabSnapshot, m.LabRequest, m.LabLine, m.LabSample, m.Clock, settings);
     const p = await m.Patient.create({ uhid: 'MHK202600902', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000002' });
     patientId = String(p._id);

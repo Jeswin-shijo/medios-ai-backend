@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -22,8 +22,8 @@ const MIN_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const SUMMARY_MAX = 140;
 /** An order younger than this is still being placed; the reconcile pass leaves it alone. */
-const RECONCILE_GRACE_MS = 30_000;
-const RECONCILE_BATCH = 50;
+export const RECONCILE_GRACE_MS = 30_000;
+export const RECONCILE_BATCH = 50;
 const RECONCILE_WINDOW = 500;
 const CLOSED_LINE: LabLineStatus[] = ['released', 'cancelled'];
 const CASE_PRIORITY: Record<Priority, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
@@ -132,6 +132,8 @@ export function orderSummary(number: string, labels: string[], priority: Priorit
 
 @Injectable()
 export class LabOrdersService {
+  private readonly logger = new Logger(LabOrdersService.name);
+
   constructor(
     @InjectModel(LabRequest.name) private readonly requests: Model<LabRequestDocument>,
     @InjectModel(LabLine.name) private readonly lines: Model<LabLineDocument>,
@@ -230,28 +232,41 @@ export class LabOrdersService {
     return request;
   }
 
-  /** Sends lab.ordered for a request the Coordinator has not heard about, then records that it did. */
-  private async announceOrdered(request: LabRequestDocument): Promise<void> {
-    if (request.announcedAt) return;
-    const lines = await this.lines.find({ request: request._id }).sort({ _id: 1 }).exec();
-    await this.messages.send({
-      case: String(request.case),
-      from: 'lab',
-      to: ['coordinator'],
-      type: 'lab.ordered',
-      priority: CASE_PRIORITY[request.priority],
-      summary: orderSummary(request.number, lines.map((l) => testByKey(l.test)?.label ?? l.test), request.priority),
-      payload: {
-        requestId: String(request._id),
-        requestNumber: request.number,
-        priority: request.priority,
-        tests: lines.map((l) => l.test),
-        collectBy: request.collectBy,
-        tatDueAt: earliest(lines.map((l) => l.tatDueAt)),
-      },
-    });
-    request.announcedAt = new Date();
-    await this.requests.updateOne({ _id: request._id }, { announcedAt: request.announcedAt }).exec();
+  /**
+   * Sends lab.ordered for a request the Coordinator has not heard about. Like announceDone it claims
+   * `announcedAt` first, so of two racing callers only one sends, and releases the claim if the send fails.
+   * Returns whether it sent.
+   */
+  private async announceOrdered(request: LabRequestDocument): Promise<boolean> {
+    if (request.announcedAt) return false;
+    const claimed = await this.requests
+      .findOneAndUpdate({ _id: request._id, announcedAt: { $exists: false } }, { $set: { announcedAt: new Date() } }, { new: true })
+      .exec();
+    if (!claimed) return false;
+    try {
+      const lines = await this.lines.find({ request: claimed._id }).sort({ _id: 1 }).exec();
+      await this.messages.send({
+        case: String(claimed.case),
+        from: 'lab',
+        to: ['coordinator'],
+        type: 'lab.ordered',
+        priority: CASE_PRIORITY[claimed.priority],
+        summary: orderSummary(claimed.number, lines.map((l) => testByKey(l.test)?.label ?? l.test), claimed.priority),
+        payload: {
+          requestId: String(claimed._id),
+          requestNumber: claimed.number,
+          priority: claimed.priority,
+          tests: lines.map((l) => l.test),
+          collectBy: claimed.collectBy,
+          tatDueAt: earliest(lines.map((l) => l.tatDueAt)),
+        },
+      });
+    } catch (e) {
+      await this.requests.updateOne({ _id: claimed._id }, { $unset: { announcedAt: '' } }).exec().catch(() => undefined);
+      throw e;
+    }
+    request.announcedAt = claimed.announcedAt;
+    return true;
   }
 
   /**
@@ -285,11 +300,23 @@ export class LabOrdersService {
 
   // ---------- reconcile ----------
 
+  /** Runs one reconcile item; a failure is logged and never stops the rest of the pass. */
+  private async item(what: string, fn: () => Promise<boolean | void>): Promise<boolean> {
+    try {
+      return (await fn()) !== false;
+    } catch (e) {
+      this.logger.error(`Reconcile: ${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
   /**
    * The safety net the scheduler runs every minute. It repairs what a crash between "do the work" and
    * "tell the Coordinator" can leave behind, each branch bounded:
    * (a) lab.ordered never sent, (b) all samples collected but no collection-done, (c) every line closed
-   * but no request-done, (d) a released line that has no report. Returns how many each branch fixed.
+   * but no request-done, (d) a released line that has no report. Branches (e) and (f), for critical
+   * results, are LabResultsService.reconcileCriticals. Each item has its own try/catch, so one bad row
+   * never stops the pass. Returns how many each branch fixed.
    */
   async reconcile(): Promise<{ ordered: number; collectionDone: number; requestDone: number; reports: number }> {
     const out = { ordered: 0, collectionDone: 0, requestDone: 0, reports: 0 };
@@ -301,8 +328,7 @@ export class LabOrdersService {
       .limit(RECONCILE_BATCH)
       .exec();
     for (const r of stale) {
-      await this.announceOrdered(r);
-      out.ordered++;
+      if (await this.item(`announcing ${r.number}`, () => this.announceOrdered(r))) out.ordered++;
     }
 
     // (b) and (c) look at requests that are not finished, oldest first, in a bounded window.
@@ -338,13 +364,11 @@ export class LabOrdersService {
       for (const r of open) {
         const s = sById.get(String(r._id));
         if (!r.collectionDoneAt && s && s.taken > 0 && s.waiting === 0) {
-          await this.announceDone(r._id, 'lab.collection-done');
-          out.collectionDone++;
+          if (await this.item(`collection-done for request ${r._id}`, () => this.announceDone(r._id, 'lab.collection-done'))) out.collectionDone++;
         }
         const l = lById.get(String(r._id));
         if (l && l.total > 0 && l.open === 0) {
-          await this.announceDone(r._id, 'lab.request-done');
-          out.requestDone++;
+          if (await this.item(`request-done for request ${r._id}`, () => this.announceDone(r._id, 'lab.request-done'))) out.requestDone++;
         }
       }
     }
@@ -356,11 +380,13 @@ export class LabOrdersService {
       .limit(RECONCILE_BATCH)
       .exec();
     for (const line of unreported) {
-      const request = await this.requests.findById(line.request).exec();
-      const def = testByKey(line.test);
-      if (!request || !def) continue;
-      await writeLabReport(this.reports, this.lines, line, request, def, line.version || 1);
-      out.reports++;
+      const wrote = await this.item(`the report for lab line ${line._id}`, async () => {
+        const request = await this.requests.findById(line.request).exec();
+        const def = testByKey(line.test);
+        if (!request || !def) return false;
+        await writeLabReport(this.reports, this.lines, line, request, def, line.version || 1);
+      });
+      if (wrote) out.reports++;
     }
     return out;
   }

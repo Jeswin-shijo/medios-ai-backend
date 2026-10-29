@@ -6,11 +6,12 @@ import { clinicNow, displayDateTime } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import type { Priority as CasePriority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
+import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { LabAiService } from './lab-ai';
 import { LabTestDef, effectiveLimits, flagValue, testByKey } from './lab-catalogue';
-import { LabOrdersService } from './lab-orders.service';
+import { LabOrdersService, RECONCILE_BATCH, RECONCILE_GRACE_MS } from './lab-orders.service';
 import { writeLabReport } from './lab-report-writer';
 import { LabSettingsService } from './lab-settings.service';
 import { LabLine, LabLineDocument, LabResultRow } from './schemas/lab-line.schema';
@@ -24,6 +25,20 @@ const CASE_PRIORITY: Record<string, CasePriority> = { stat: 'high', urgent: 'med
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
 const cut = (s: string) => s.slice(0, SUMMARY_MAX);
 
+/**
+ * The critical values a line still waits on: those of its latest released version, or (after an
+ * amendment to normal that kept an unacknowledged critical open) of the last version that had any.
+ * `latest` says which. Null when no released version had a critical value.
+ */
+export function lastCritical(line: Pick<LabLine, 'history'>): { rows: LabResultRow[]; version: number; latest: boolean } | null {
+  const history = line.history ?? [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const rows = (history[i].results ?? []).filter((r) => r.critical);
+    if (rows.length) return { rows, version: history[i].version, latest: i === history.length - 1 };
+  }
+  return null;
+}
+
 /** Entering, validating and releasing results; critical values; amendments. */
 @Injectable()
 export class LabResultsService {
@@ -36,6 +51,7 @@ export class LabResultsService {
     private readonly messages: MessagesService,
     private readonly labSettings: LabSettingsService,
     private readonly labAi: LabAiService,
+    @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
   ) {}
 
   private readonly logger = new Logger(LabResultsService.name);
@@ -110,6 +126,16 @@ export class LabResultsService {
       .exec();
     if (!released) throw cannot();
 
+    // The critical work comes first, so a failure further on never leaves a critical result unannounced.
+    if (keepOpen) {
+      const was = (line.history[line.history.length - 1]?.results ?? []).filter((r) => r.critical);
+      await this.amendAlert(request, line._id as Types.ObjectId, def, was, line.results);
+    }
+    if (criticals.length) {
+      await this.sendCriticals(request, line, def, criticals, version);
+      await this.raiseAlert(request, line, def, criticals[0]);
+    }
+
     const reportId = await this.writeReport(released, request, def, version);
     // The AI never delays or blocks a release: the template is already on the report, and a valid AI summary replaces it later.
     void this.labAi
@@ -136,27 +162,116 @@ export class LabResultsService {
       dedupeKey: `lab.resulted:${line._id}:${version}`,
     });
 
-    if (keepOpen) {
-      const was = (line.history[line.history.length - 1]?.results ?? []).filter((r) => r.critical);
-      await this.amendAlert(request, line._id as Types.ObjectId, def, was, line.results);
+    if (!open.length) await this.orders.announceDone(request._id as Types.ObjectId, 'lab.request-done');
+  }
+
+  /** One lab.critical per critical value of a released version; the key per line, version and parameter. */
+  private async sendCriticals(request: LabRequestDocument, line: LabLineDocument, def: LabTestDef, criticals: LabResultRow[], version: number): Promise<void> {
+    for (const c of criticals) {
+      await this.messages.send({
+        case: String(request.case),
+        from: 'lab',
+        to: ['coordinator'],
+        type: 'lab.critical',
+        priority: 'high',
+        summary: cut(`${request.number}: ${def.label} critical (${c.param})`),
+        payload: { requestId: String(request._id), requestNumber: request.number, lineId: String(line._id), test: line.test, parameter: c.param, value: String(c.value), unit: c.unit, version },
+        dedupeKey: `lab.critical:${line._id}:${version}:${c.param}`,
+      });
     }
-    if (criticals.length) {
-      for (const c of criticals) {
-        await this.messages.send({
-          case: String(request.case),
-          from: 'lab',
-          to: ['coordinator'],
-          type: 'lab.critical',
-          priority: 'high',
-          summary: cut(`${request.number}: ${def.label} critical (${c.param})`),
-          payload: { requestId: String(request._id), requestNumber: request.number, lineId: String(line._id), test: line.test, parameter: c.param, value: String(c.value), unit: c.unit, version },
-          dedupeKey: `lab.critical:${line._id}:${version}:${c.param}`,
-        });
+  }
+
+  private async sendAcked(request: LabRequestDocument, line: LabLineDocument): Promise<void> {
+    await this.messages.send({
+      case: String(request.case),
+      from: 'lab',
+      to: ['coordinator'],
+      type: 'lab.critical-acked',
+      priority: 'high',
+      summary: cut(`${request.number}: ${testByKey(line.test)?.label ?? line.test} critical acknowledged`),
+      payload: { lineId: String(line._id) },
+      dedupeKey: `lab.critical-acked:${line._id}:${line.version}`,
+    });
+  }
+
+  // ---------- reconcile ----------
+
+  /**
+   * The critical-result branches of the reconcile pass the scheduler runs every minute (after
+   * LabOrdersService.reconcile's (a) to (d)), for a crash between the work and the message:
+   * (e) an unacknowledged critical with no acknowledgement clock for its latest release (none running,
+   * none escalating, none started since that release) gets lab.critical again with the same keys, and its
+   * alert; (f) an acknowledged critical whose clock still runs or escalates gets lab.critical-acked again.
+   * Lines touched in the last 30 seconds are left to the request in flight. Each line has its own try/catch.
+   */
+  async reconcileCriticals(): Promise<{ critical: number; acked: number }> {
+    const out = { critical: 0, acked: 0 };
+    const settled = new Date(Date.now() - RECONCILE_GRACE_MS);
+    const item = async (what: string, fn: () => Promise<boolean>): Promise<boolean> => {
+      try {
+        return await fn();
+      } catch (e) {
+        this.logger.error(`Reconcile: ${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
       }
-      await this.raiseAlert(request, line, def, criticals[0]);
+    };
+
+    // (e)
+    const waiting = await this.lines
+      .find({ 'critical.active': true, 'critical.ackAt': { $exists: false }, updatedAt: { $lt: settled } })
+      .sort({ _id: 1 })
+      .limit(RECONCILE_BATCH)
+      .exec();
+    for (const line of waiting) {
+      if (await item(`resending the critical of lab line ${line._id}`, () => this.resendCritical(line))) out.critical++;
     }
 
-    if (!open.length) await this.orders.announceDone(request._id as Types.ObjectId, 'lab.request-done');
+    // (f)
+    const open = await this.clocks
+      .find({ def: 'lab-critical', $or: [{ state: 'running' }, { state: 'expired', stoppedAt: { $exists: false } }] })
+      .select('ref')
+      .lean<{ ref?: string | null }[]>()
+      .exec();
+    const refs = [...new Set(open.map((c) => c.ref).filter((r): r is string => !!r && isValidObjectId(r)))];
+    const acked = refs.length
+      ? await this.lines
+          .find({ _id: { $in: refs }, 'critical.ackAt': { $exists: true }, updatedAt: { $lt: settled } })
+          .sort({ _id: 1 })
+          .limit(RECONCILE_BATCH)
+          .exec()
+      : [];
+    for (const line of acked) {
+      const sent = await item(`resending the acknowledgement of lab line ${line._id}`, async () => {
+        const request = await this.requests.findById(line.request).exec();
+        if (!request) return false;
+        await this.sendAcked(request, line);
+        return true;
+      });
+      if (sent) out.acked++;
+    }
+    return out;
+  }
+
+  /** (e) for one line. True when it resent. */
+  private async resendCritical(line: LabLineDocument): Promise<boolean> {
+    const since = line.lastReleasedRealAt ? new Date(line.lastReleasedRealAt).getTime() : 0;
+    const clocks = await this.clocks
+      .find({ def: 'lab-critical', ref: String(line._id) })
+      .select('state startedAt stoppedAt')
+      .lean<{ state: string; startedAt: Date; stoppedAt?: Date }[]>()
+      .exec();
+    const covered = clocks.some((c) => c.state === 'running' || (c.state === 'expired' && !c.stoppedAt) || new Date(c.startedAt).getTime() >= since);
+    if (covered) return false;
+    const request = await this.requests.findById(line.request).exec();
+    const def = testByKey(line.test);
+    const source = lastCritical(line);
+    if (!request || !def || !source) return false;
+    await this.sendCriticals(request, line, def, source.rows, source.version);
+    // An acknowledgement that landed meanwhile must not reopen the alert.
+    if (!(await this.lines.exists({ _id: line._id, 'critical.ackAt': { $exists: false } }).exec())) return true;
+    if (source.latest) await this.raiseAlert(request, line, def, source.rows[0]);
+    else await this.amendAlert(request, line._id as Types.ObjectId, def, source.rows, line.history[line.history.length - 1]?.results ?? [], true);
+    return true;
   }
 
   // ---------- acknowledging ----------
@@ -176,16 +291,7 @@ export class LabResultsService {
     await this.alerts.updateOne({ link: `lab-line:${line._id}` }, { $set: { status: 'Completed' } }).exec();
     const request = await this.requests.findById(line.request).exec();
     if (!request) throw new NotFoundException('Lab request not found');
-    await this.messages.send({
-      case: String(request.case),
-      from: 'lab',
-      to: ['coordinator'],
-      type: 'lab.critical-acked',
-      priority: 'high',
-      summary: cut(`${request.number}: ${testByKey(line.test)?.label ?? line.test} critical acknowledged`),
-      payload: { lineId: String(line._id) },
-      dedupeKey: `lab.critical-acked:${line._id}:${line.version}`,
-    });
+    await this.sendAcked(request, line);
   }
 
   // ---------- amending ----------
@@ -240,14 +346,21 @@ export class LabResultsService {
     return writeLabReport(this.reports, this.lines, line, request, def, version);
   }
 
-  /** The earlier critical was amended to normal but is still unacknowledged: say so on its alert. */
-  private async amendAlert(request: LabRequestDocument, lineId: Types.ObjectId, def: LabTestDef, was: LabResultRow[], now: LabResultRow[]): Promise<void> {
+  /** The earlier critical was amended to normal but is still unacknowledged: say so on its alert (made, with `upsert`, when the reconcile pass finds it missing). */
+  private async amendAlert(request: LabRequestDocument, lineId: Types.ObjectId, def: LabTestDef, was: LabResultRow[], now: LabResultRow[], upsert = false): Promise<void> {
     const old = was.map((r) => `${r.param} ${r.value} ${r.unit}`.trim()).join(', ');
     const nowText = now.map((r) => `${r.param} ${r.value}`).join(', ');
+    const link = `lab-line:${lineId}`;
     await this.alerts
       .updateOne(
-        { link: `lab-line:${lineId}` },
-        { $set: { title: `Critical (amended): ${def.label} — acknowledge the correction`, subtitle: `Was ${old}; now ${nowText} · For ${request.orderedBy.name}`, status: 'Pending' } },
+        { link },
+        {
+          $set: { title: `Critical (amended): ${def.label} — acknowledge the correction`, subtitle: `Was ${old}; now ${nowText} · For ${request.orderedBy.name}`, status: 'Pending' },
+          ...(upsert
+            ? { $setOnInsert: { link, patientName: request.patientName, uhid: request.patientUhid, type: 'Lab Alert', category: 'Critical', priority: 'High', dueDateTime: displayDateTime(new Date(clinicNow().getTime() + ACK_MINUTES * 60_000)) } }
+            : {}),
+        },
+        { upsert },
       )
       .exec();
   }

@@ -69,7 +69,7 @@ describe('LabResultsService', () => {
     orders = new LabOrdersService(m.LabRequest, m.LabLine, m.LabSample, m.LabLocation, m.CoordinatorCounter, new PatientsService(m.Patient), cases, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), m.LabTestReport);
     new LabCoordinatorRegistration(registry, orders, messages, m.LabRequest, m.LabLine).onModuleInit();
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, orders, messages);
-    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), noAi);
+    results = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, orders, messages, new LabSettingsService(new SettingsService(m.HospitalSettings)), noAi, m.Clock);
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 52, gender: 'Male', phone: '9100000001' });
     patientId = String(p._id);
   });
@@ -270,6 +270,20 @@ describe('LabResultsService', () => {
     assert.ok(edta);
     const details = (await m.Clock.find().lean()).map((c: any) => c.detail ?? '').join(' ');
     assert.ok(!details.includes('Ravi'));
+  });
+
+  test('release raises the critical before writing the report: a report failure leaves the critical announced and alerted', async () => {
+    const { lineId } = await received(['electrolytes']);
+    const id = lineId('electrolytes');
+    await results.enterResults(LAB, id, K);
+    const real = (results as any).reports;
+    (results as any).reports = { findByIdAndUpdate: real.findByIdAndUpdate.bind(real), create: async () => { throw new Error('disk full'); } };
+    await assert.rejects(() => results.release(PATH, id), /disk full/);
+    (results as any).reports = real;
+    assert.equal((await line(id)).status, 'released');
+    assert.equal((await sent('lab.critical')).length, 1);
+    assert.equal((await alerts()).length, 1);
+    assert.equal((await sent('lab.resulted')).length, 0, 'the report and lab.resulted come after');
   });
 
   test('acknowledging a non-critical line is refused', async () => {

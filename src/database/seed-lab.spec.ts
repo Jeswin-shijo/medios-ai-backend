@@ -309,6 +309,9 @@ describe('seedLab', () => {
     const lines = await m.LabLine.find().lean().exec();
     const reports = await m.LabTestReport.countDocuments().exec();
     assert.deepEqual(await service.reconcile(), { ordered: 0, collectionDone: 0, requestDone: 0, reports: 0 });
+    const { LabResultsService } = await import('../modules/lab/lab-results.service');
+    const criticals = new LabResultsService(m.LabRequest, m.LabLine, m.LabTestReport, m.TaskAlertItem, service, messages, null as any, null as any, m.Clock);
+    assert.deepEqual(await criticals.reconcileCriticals(), { critical: 0, acked: 0 });
     assert.equal(sent.length, 0);
     assert.deepEqual(await m.LabRequest.find().lean().exec(), requests, 'no request changed');
     assert.deepEqual(await m.LabLine.find().lean().exec(), lines, 'no line changed');

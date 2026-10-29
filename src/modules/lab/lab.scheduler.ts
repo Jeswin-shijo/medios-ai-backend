@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { LabOrdersService } from './lab-orders.service';
 import { LabOverviewService } from './lab-overview.service';
+import { LabResultsService } from './lab-results.service';
 
 const TICK_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -12,7 +13,7 @@ export const untilNextSnapshot = (now: number): number => HOUR_MS - (now % HOUR_
 
 /**
  * The Lab agent's time-based work: a snapshot at start-up, then every minute the reconcile pass
- * (lost messages, missing reports) and an hourly snapshot. Each step logs its own failure and never
+ * (lost messages, missing reports, critical results) and an hourly snapshot. Each step logs its own failure and never
  * stops the others.
  */
 @Injectable()
@@ -26,6 +27,7 @@ export class LabScheduler implements OnApplicationBootstrap, OnModuleDestroy {
   constructor(
     private readonly orders: LabOrdersService,
     private readonly overview: LabOverviewService,
+    private readonly results: LabResultsService,
   ) {}
 
   onApplicationBootstrap() {
@@ -61,6 +63,7 @@ export class LabScheduler implements OnApplicationBootstrap, OnModuleDestroy {
     this.running = true;
     try {
       await this.step('Reconcile lab requests', () => this.orders.reconcile());
+      await this.step('Reconcile critical lab results', () => this.results.reconcileCriticals());
     } finally {
       this.running = false;
     }
