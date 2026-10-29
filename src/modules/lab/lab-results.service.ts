@@ -115,7 +115,8 @@ export class LabResultsService {
     void this.labAi
       .summarise(String(released._id))
       .then(async (summary) => {
-        const { sample, ...aiSummary } = summary;
+        const { sample, ...rest } = summary;
+        const aiSummary = { ...rest, sample };
         const still = await this.lines.exists({ _id: released._id, version }).exec();
         if (still) await this.reports.updateOne({ _id: reportId }, { $set: { aiSummary } }).exec();
       })
@@ -256,9 +257,12 @@ export class LabResultsService {
       groups: [{ category: def.label, parameters }],
       labLine: String(line._id),
       amended: version > 1,
-      aiSummary: templateSummary(
+      aiSummary: {
+        sample: false,
+        ...templateSummary(
         line.results.map((r, i) => ({ name: r.param, value: r.value, unit: r.unit, referenceRange: parameters[i].referenceRange, flag: r.flag, critical: r.critical })),
-      ),
+        ),
+      },
     };
     let report = line.reportId ? await this.reports.findByIdAndUpdate(line.reportId, { $set: fields }, { new: true }).exec() : null;
     if (!report) {

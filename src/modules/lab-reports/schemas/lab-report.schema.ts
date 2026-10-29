@@ -50,6 +50,10 @@ export class LabAiSummary {
 
   @Prop({ type: [String], default: [] })
   recommendations: string[];
+
+  /** True when a sample (canned) AI wrote this; false for the template and real AI answers. */
+  @Prop()
+  sample?: boolean;
 }
 
 @Schema({ timestamps: true })

@@ -116,11 +116,13 @@ export class LabAiService {
       flag: r.flag,
       critical: r.critical,
     }));
+    const textual = new Set((def?.params ?? []).filter((p) => p.text).map((p) => p.name));
     const template = templateSummary(facts);
     // Built from a whitelist, never by spreading the line, request or patient.
     const input = {
       test: def?.label ?? found.test,
-      parameters: facts.map((f) => ({ name: f.name, value: f.value, unit: f.unit, referenceRange: f.referenceRange, flag: f.flag, critical: f.critical })),
+      // Typed text (culture growth, urine findings) never leaves the system: only the flag word is sent.
+      parameters: facts.map((f) => ({ name: f.name, value: textual.has(f.name) ? (f.flag === 'normal' ? 'normal' : 'abnormal') : f.value, unit: f.unit, referenceRange: f.referenceRange, flag: f.flag, critical: f.critical })),
       patient: { age: typeof patient?.age === 'number' ? patient.age : null, sex: sexOf(patient?.gender) },
     };
 

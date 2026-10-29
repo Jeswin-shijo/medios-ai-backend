@@ -376,12 +376,13 @@ describe('LabResultsService', () => {
     const report: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
     assert.deepEqual(report.aiSummary.findings, ['Potassium 6.4 mmol/L — high (critical)']);
     assert.equal(report.aiSummary.interpretation, '1 value(s) outside the reference range; 1 critical.');
+    assert.equal(report.aiSummary.sample, false);
   });
 
   test('a valid AI summary replaces the template on the report', async () => {
     const { lineId } = await received(['electrolytes']);
     await results.enterResults(LAB, lineId('electrolytes'), K);
-    aiImpl = async () => ({ findings: ['Potassium is high.'], interpretation: 'Raised potassium.', recommendations: ['Repeat the test.'], sample: false });
+    aiImpl = async () => ({ findings: ['Potassium is high.'], interpretation: 'Raised potassium.', recommendations: ['Repeat the test.'], sample: true });
     await results.release(PATH, lineId('electrolytes'));
     for (let i = 0; i < 50; i++) {
       const r: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
@@ -391,6 +392,7 @@ describe('LabResultsService', () => {
     const report: any = await m.LabTestReport.findOne({ labLine: lineId('electrolytes') }).lean();
     assert.deepEqual({ ...report.aiSummary, _id: undefined }.findings, ['Potassium is high.']);
     assert.equal(report.aiSummary.interpretation, 'Raised potassium.');
+    assert.equal(report.aiSummary.sample, true);
   });
 
   test('an AI failure leaves the template and does not fail the release', async () => {
