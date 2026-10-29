@@ -45,3 +45,10 @@ services:
       # 24+ characters, letters and digits only (it travels in the webhook URL): openssl rand -hex 24
       - key: CALL_WEBHOOK_SECRET
         sync: false
+      # Reception kiosk: simulated payments and SMS for the demo only. Never use with real patients (see DEPLOY.md).
+      - key: PAYMENT_PROVIDER
+        value: sample
+      - key: SMS_PROVIDER
+        value: sample
+      - key: PUBLIC_WEB_URL
+        value: https://medi-os-ai.vercel.app

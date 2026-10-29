@@ -90,6 +90,14 @@ To fix it, put both under one domain you own:
 
 The API refuses to start if `CALL_PROVIDER=snapserve` is set without these values. The error message names the missing one.
 
+## 7. Reception kiosk (before real patients)
+
+1. **Payments and SMS.** `render.yaml` sets `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample` for the demo. In sample mode payments are simulated and OTP codes appear on the kiosk, so it must **never** be used with real patients (the API logs a loud warning in production). Connect a real payment gateway and SMS provider first, then switch the settings.
+2. **HTTPS.** The API must be served over HTTPS: kiosk keys travel in request headers.
+3. **`PUBLIC_WEB_URL`** must be the web app's address (set to `https://medi-os-ai.vercel.app` for the demo); the tracking links use it.
+4. **Tablet setup.** In the web app, open Token Queue > Displays & Settings, create a kiosk device and scan its setup QR from the tablet app. Removing the device revokes its key.
+5. **New collections.** The reception module adds `departments`, `opdoctors`, `opvisits`, `opsequences`, `receptionsessions` and `otpchallenges`. They are created on first use; no migration is needed.
+
 ## Mobile app
 
 Build the Expo app with `EXPO_PUBLIC_API_URL=https://<api-address>/api`.

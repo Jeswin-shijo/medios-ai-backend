@@ -101,6 +101,9 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID`, `SNAPSERVE_BOOKING_AGENT_ID` | — | Required with `CALL_PROVIDER=snapserve` |
 | `CALL_WEBHOOK_SECRET` | — | Required with `snapserve` (24+ characters); authenticates the post-call webhook |
 | `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
+| `PAYMENT_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk payments: `sample` (simulated, marked SAMPLE) or `none` |
+| `SMS_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk OTP and tracking messages: `sample` or `none` |
+| `PUBLIC_WEB_URL` | unset | Base address of the web app, used for the public `/track` links (http or https) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 
@@ -234,6 +237,27 @@ Check-in gives the patient a numbered token for the day. Staff call tokens to a 
 - `printSlips` per kiosk: the kiosk prints an 80 mm slip after each new token. The tap response carries the current value, so switching it applies from the next tap.
 - Taps at the front desk use `POST /api/queue/cards/tap` with a staff session. An unknown card answers 404, and the web app then offers to link it.
 - The seed links three demo cards: `04A1B2C3` (Rekha S), `0004567890` (David Raj) and `04C8D9E0F1A2B3` (Selvi A). Cards linked by hand survive a reseed.
+
+---
+
+## Reception Kiosk
+
+A patient registers or books an OP visit on a tablet kiosk, pays, and gets a token. The modules are `src/modules/reception` (kiosk and staff routes, providers) and `src/modules/opd` (departments, OP doctors, availability).
+
+- **Departments and OP doctors** are managed in the web app under Settings > Departments.
+- **Kiosk devices** are added in Token Queue > Displays & Settings. Creating one shows a setup QR for the tablet app (it carries the address and the key once).
+- **Cash payments** are confirmed by staff on the Token Queue. The token is issued on confirmation.
+- **Tracking page.** A patient can follow a visit on the public `/track` page of the web app. Links use `PUBLIC_WEB_URL`.
+- **Sample providers.** With `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample`, payments are simulated and OTP codes are shown on the kiosk. In production this is allowed but logs a loud warning. Never use it with real patients.
+- **New collections:** `departments`, `opdoctors`, `opvisits`, `opsequences`, `receptionsessions`, `otpchallenges`.
+
+**End-to-end check.** With a local API running (sample providers), run:
+
+```bash
+API=http://localhost:4500/api npm run e2e:reception
+```
+
+It exercises every kiosk path and creates an all-day "Dr. E2E Test" doctor. Reseed (`npm run seed`) before running it again.
 
 ---
 
