@@ -121,6 +121,7 @@ const LEFT_SPECS: Spec[] = [
 
 /** The visit with chest pressure, and the facts about its patient that the Pharmacy Agent's demo needs. */
 const CHEST_PAIN_KEY = 'o5';
+const CHEST_PAIN_NAME = 'Mohan Raj';
 const CHEST_PAIN_MAN = { age: 62, gender: 'Male', weightKg: 64 } as const;
 
 /** Made-up people for the patients the demo data has too few of. */
@@ -128,7 +129,7 @@ const EXTRA_PEOPLE: { name: string; age: number; gender: 'Male' | 'Female'; weig
   { name: 'Karthik Subramanian', age: 41, gender: 'Male' },
   { name: 'Lakshmi Devi', age: 63, gender: 'Female' },
   // The man with chest pressure (spec o5): the Pharmacy story needs his age, sex and weight (eGFR 28 at creatinine 2.5).
-  { name: 'Mohan Raj', age: 62, gender: 'Male', weightKg: 64 },
+  { name: CHEST_PAIN_NAME, age: 62, gender: 'Male', weightKg: 64 },
   { name: 'Selvi Murugan', age: 36, gender: 'Female' },
   { name: 'Joseph Antony', age: 57, gender: 'Male' },
   { name: 'Fathima Beevi', age: 48, gender: 'Female' },
@@ -290,16 +291,21 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
     .filter((p) => !admitted.has(String(p._id)) && !busy.has(String(p._id)) && !p.detailsPending && (p.department ?? ER_DEPARTMENT) === ER_DEPARTMENT)
     .slice(0, 6);
 
-  const needPerson = specs.filter((s) => !s.reuse && !s.placeholder);
+  // The chest-pressure visit is reserved for the made-up Mohan Raj before the others are handed out, so nobody else is moved and no demo patient is changed.
+  const chestSpec = specs.find((s) => s.key === CHEST_PAIN_KEY && !s.reuse && !s.placeholder);
+  const needPerson = specs.filter((s) => !s.reuse && !s.placeholder && s !== chestSpec);
+  const chestPerson = EXTRA_PEOPLE.find((p) => p.name === CHEST_PAIN_NAME)!;
+  const sharedPeople = EXTRA_PEOPLE.filter((p) => p !== chestPerson);
   const extrasNeeded = Math.max(0, needPerson.length - demoFree.length);
-  if (extrasNeeded > EXTRA_PEOPLE.length) throw new Error('ER seed: not enough made-up people for the visits.');
+  if (extrasNeeded > sharedPeople.length) throw new Error('ER seed: not enough made-up people for the visits.');
   const prefix = `MHK${new Date(nowMs).getFullYear()}`;
   const lastUhid = await patients.findOne({ uhid: { $regex: `^${prefix}\\d{5}$` } }).sort({ uhid: -1 }).select('uhid').lean<any>();
   let serial = lastUhid ? Number(String(lastUhid.uhid).slice(prefix.length)) : 0;
   const nextUhid = () => `${prefix}${String(++serial).padStart(5, '0')}`;
   const stamp = { createdAt: new Date(nowMs), updatedAt: new Date(nowMs) };
   const made = await patients.insertMany([
-    ...EXTRA_PEOPLE.slice(0, extrasNeeded).map((p, i) => ({ uhid: nextUhid(), name: p.name, age: p.age, gender: p.gender, phone: `90000092${String(i).padStart(2, '0')}`, address: MARKER, doctor: 'Dr. Shajin', department: ER_DEPARTMENT, ...(p.weightKg ? { vitals: { weightKg: p.weightKg } } : {}), ...stamp })),
+    ...(chestSpec ? [{ uhid: nextUhid(), name: chestPerson.name, age: chestPerson.age, gender: chestPerson.gender, phone: '9000009299', address: MARKER, doctor: 'Dr. Shajin', department: ER_DEPARTMENT, vitals: { weightKg: chestPerson.weightKg }, ...stamp }] : []),
+    ...sharedPeople.slice(0, extrasNeeded).map((p, i) => ({ uhid: nextUhid(), name: p.name, age: p.age, gender: p.gender, phone: `90000092${String(i).padStart(2, '0')}`, address: MARKER, doctor: 'Dr. Shajin', department: ER_DEPARTMENT, ...(p.weightKg ? { vitals: { weightKg: p.weightKg } } : {}), ...stamp })),
     ...OPEN_SPECS.concat(LEFT_SPECS)
       .filter((s) => s.placeholder)
       .map((s) => ({
@@ -313,7 +319,8 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
         ...stamp,
       })),
   ]);
-  const extras = made.filter((p) => p.address === MARKER);
+  const chestMade = chestSpec ? made.find((p) => p.name === CHEST_PAIN_NAME) : undefined;
+  const extras = made.filter((p) => p.address === MARKER && p !== chestMade);
   const placeholders = made.filter((p) => p.detailsPending);
   const pool = [...demoFree, ...extras];
   // The patient waiting for a bed is a man: the demo's one free bed is in the women's ward, so the live Bed Agent leaves the request waiting.
@@ -324,17 +331,15 @@ export async function seedEr(clinicDay: string, nowMs: number = Date.now()): Pro
     const earlier = pool.findIndex((p, i) => i < waitingAt && p.gender === 'Male');
     if (earlier >= 0) [pool[waitingAt], pool[earlier]] = [pool[earlier], pool[waitingAt]];
   }
-  // The chest-pressure man should be the made-up Mohan Raj, not a demo patient: swap him in, unless that would move the patient waiting for a bed.
-  const chestAt = needPerson.findIndex((s) => s.key === CHEST_PAIN_KEY);
-  const mohanAt = pool.findIndex((p) => p.name === 'Mohan Raj');
-  if (chestAt >= 0 && mohanAt >= 0 && chestAt !== mohanAt && chestAt !== waitingAt && mohanAt !== waitingAt) [pool[chestAt], pool[mohanAt]] = [pool[mohanAt], pool[chestAt]];
   const patientOf = new Map<string, any>();
   needPerson.forEach((s, i) => patientOf.set(s.key, pool[i]));
+  if (chestSpec && chestMade) patientOf.set(chestSpec.key, chestMade);
+  else if (chestSpec) throw new Error('ER seed: the chest-pressure patient could not be made.');
   specs.filter((s) => s.placeholder).forEach((s, i) => patientOf.set(s.key, placeholders[i]));
   for (const s of specs.filter((x) => x.reuse)) patientOf.set(s.key, patientOf.get(s.reuse!));
-  // Whoever the chest-pressure visit belongs to is a man of 62 and 64 kg, so his kidney dose check works out the same on every seed.
+  // He is a man of 62 and 64 kg, so his kidney dose check works out the same on every seed. Only a seed-made patient is ever set.
   const chestMan = patientOf.get(CHEST_PAIN_KEY);
-  if (chestMan) await patients.updateOne({ _id: chestMan._id }, { $set: { age: CHEST_PAIN_MAN.age, gender: CHEST_PAIN_MAN.gender, 'vitals.weightKg': CHEST_PAIN_MAN.weightKg } });
+  if (chestMan && chestMan.address === MARKER) await patients.updateOne({ _id: chestMan._id }, { $set: { age: CHEST_PAIN_MAN.age, gender: CHEST_PAIN_MAN.gender, 'vitals.weightKg': CHEST_PAIN_MAN.weightKg } });
 
   // ---- Case numbers and ids ---------------------------------------------------------------
   const first = (await counters.findOne({ key: 'case' }).lean<any>())?.last ?? 0;

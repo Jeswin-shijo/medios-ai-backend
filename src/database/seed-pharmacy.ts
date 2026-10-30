@@ -11,6 +11,8 @@ import { Escalation, EscalationSchema } from '../modules/coordinator/schemas/esc
 import { Ladder, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
 import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabTestReport, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
+import { flagValue, rangeText, testByKey } from '../modules/lab/lab-catalogue';
+import { templateSummary } from '../modules/lab/lab-ai';
 import { Patient, PatientSchema } from '../modules/patients/schemas/patient.schema';
 import {
   Frequency,
@@ -29,7 +31,7 @@ import { PHARMACY_CLOCKS } from '../modules/pharmacy/pharmacy-coordinator.regist
 import { PharmacyPatientsService, PatientFactsView } from '../modules/pharmacy/pharmacy-patients.service';
 import { PHARMACY_AGENT } from '../modules/pharmacy/pharmacy-queries.service';
 import { CASE_PRIORITY, LineMessageType, lineSummary, medicineLabel, orderSummary } from '../modules/pharmacy/pharmacy-rounds';
-import { CheckLine, Flag, checkLine } from '../modules/pharmacy/pharmacy-rules';
+import { CheckLine, Flag, checkLine, egfr } from '../modules/pharmacy/pharmacy-rules';
 import { DEFAULT_TARGETS } from '../modules/pharmacy/pharmacy-settings.service';
 import { prescriptionLine } from '../modules/pharmacy/pharmacy-prescriptions.service';
 import { PharmacyBatch, PharmacyBatchSchema } from '../modules/pharmacy/schemas/pharmacy-batch.schema';
@@ -51,6 +53,8 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const SUMMARY_MAX = 140;
+/** Marks the made-up Patient records of this seed (never a demo patient). */
+const PHARMACY_MARK = 'Seed: pharmacy demo';
 const CLOSE_NOTE = 'Opened by the pharmacy agent';
 /** Marks the prescriptions this seed makes, so a rerun clears them and nothing else. */
 export const PHARMACY_DEMO_RX = 'Pharmacy demo';
@@ -108,14 +112,14 @@ interface OS {
   key: string;
   area: Area;
   /** ER: text in the visit's complaint. Ward: 'pen' for the penicillin patient, else the n-th other ward case. OPD: the n-th counter patient. */
-  who: RegExp | 'pen' | number;
+  who: RegExp | 'pen' | 'k1' | 'k2' | number;
   pri: Pri;
   t: number;
   note?: string;
   lines?: LS[];
   /** A prescription order: `fixture` is the existing one; its items are listed in the prescription's order. */
   rx?: { fixture?: boolean; items: RxItem[] };
-  /** The eGFR this order's patient is worked out with (a kidney result the seed does not otherwise store). */
+  /** The eGFR this order's patient has: the seed stores a released Kidney function report whose creatinine gives it. */
   egfr?: number;
 }
 
@@ -172,7 +176,7 @@ const WARD_ORDERS: OS[] = [
     ],
   },
   {
-    key: 'w2', area: 'Ward', who: 0, pri: 'routine', t: 200, egfr: 26,
+    key: 'w2', area: 'Ward', who: 'k1', pri: 'routine', t: 200, egfr: 26,
     lines: [
       L('enoxaparin', 40, 'OD', 'issued', { route: 'sc', days: 5, a: 10, i: 30, q: { kind: 'kidney', by: 'agent', at: 60, ans: { outcome: 'keep', at: 75, reason: 'Already once daily; renal dose reviewed with the ward doctor' } } }),
       L('ramipril', 5, 'OD', 'issued', { days: 30, a: 11, i: 31 }),
@@ -197,7 +201,7 @@ const WARD_ORDERS: OS[] = [
     ],
   },
   {
-    key: 'w8', area: 'Ward', who: 6, pri: 'routine', t: 100, egfr: 27,
+    key: 'w8', area: 'Ward', who: 'k2', pri: 'routine', t: 100, egfr: 27,
     lines: [
       L('metformin', 500, 'BD', 'stopped', { days: 30, a: 10, i: 25, q: { kind: 'kidney', by: 'agent', at: 55, ans: { outcome: 'stop', at: 70, reason: 'eGFR 27: metformin stopped, insulin to be reviewed' } } }),
       L('amlodipine', 5, 'OD', 'issued', { days: 30, a: 11, i: 26 }),
@@ -387,6 +391,423 @@ interface OB {
   prescription?: { _id: Types.ObjectId };
 }
 
+interface StockPlan {
+  batchBuilds: BatchBuild[];
+  pairs: Map<string, BatchBuild[]>;
+  levelRows: { product: string; store: Store; reorderLevel: number }[];
+  movementDocs: Record<string, any>[];
+  takeStock: (l: LB, store: Store, ms: number) => { batch: string; batchNo: string; expiry: string; qty: number }[];
+}
+
+/** The pharmacy stock: two batches per stocked pair, the three low pairs, ER ticagrelor at 0, and the near-expiry and expired batches. Issues take from the oldest usable batch. */
+function planStock(clinicMs: number, clinicOf: (ms: number) => Date, pharmacistBy: { id: string; name: string }): StockPlan {
+  const allProducts = MEDICINES.flatMap((m) => m.products);
+  const batchBuilds: BatchBuild[] = [];
+  const pairs = new Map<string, BatchBuild[]>();
+  let batchSerial = 0;
+  const rr = rng(30102026);
+  const addBatch = (product: ProductDef, store: Store, days: number, final: number, first = false): BatchBuild => {
+    const b: BatchBuild = {
+      _id: new Types.ObjectId(),
+      product,
+      store,
+      batchNo: `${product.medicine.replace(/[^a-z]/g, '').slice(0, 3).toUpperCase()}-${1000 + ++batchSerial}`,
+      expiry: isoOf(clinicMs + days * DAY),
+      final,
+      taken: 0,
+      receivedAt: new Date(clinicMs - (14 + Math.floor(rr() * 40)) * DAY),
+      ...(first ? { first: true } : {}),
+    };
+    batchBuilds.push(b);
+    const k = `${product.key}|${store}`;
+    pairs.set(k, [...(pairs.get(k) ?? []), b]);
+    return b;
+  };
+  const levelRows: { product: string; store: Store; reorderLevel: number }[] = [];
+  for (const p of allProducts) {
+    for (const store of ['main', 'er'] as Store[]) {
+      if (store === 'er' && !erStocked(p)) continue;
+      if (store === 'er' && p.key === OUT.product) {
+        levelRows.push({ product: p.key, store, reorderLevel: OUT.level });
+        continue;
+      }
+      const low = LOW[`${p.key}|${store}`];
+      const base = (store === 'main' ? BASE_MAIN : BASE_ER)[p.form];
+      const total = low ? low.left : base;
+      const older = Math.max(1, Math.round(total * 0.4));
+      const newer = total - older;
+      const d0 = 150 + Math.floor(rr() * 90);
+      addBatch(p, store, d0, older, true);
+      if (newer > 0) addBatch(p, store, d0 + 180, newer);
+      levelRows.push({ product: p.key, store, reorderLevel: low ? low.level : Math.max(2, Math.floor(total * 0.2)) });
+    }
+  }
+  for (const x of NEAR_EXPIRY) addBatch(productByKey(x.product)!, x.store, x.days, x.qty);
+  for (const x of EXPIRED) addBatch(productByKey(x.product)!, x.store, x.days, x.qty);
+
+  const movementDocs: Record<string, any>[] = [];
+  const takeStock = (l: LB, store: Store, ms: number): { batch: string; batchNo: string; expiry: string; qty: number }[] => {
+    const qty = l.quantity ?? 0;
+    const pair = pairs.get(`${l.product}|${store}`)?.find((b) => b.first);
+    if (!pair) throw new Error(`Pharmacy seed: ${l.order.number} issues ${l.product} from ${store}, which stocks none.`);
+    pair.taken += qty;
+    movementDocs.push({
+      _id: new Types.ObjectId(), batch: pair._id, product: pair.product.key, store, change: -qty, kind: 'issued', reason: 'issued', line: l._id,
+      by: pharmacistBy, at: clinicOf(ms), createdAt: new Date(ms), updatedAt: new Date(ms),
+    });
+    return [{ batch: String(pair._id), batchNo: pair.batchNo, expiry: pair.expiry, qty }];
+  };
+  return { batchBuilds, pairs, levelRows, movementDocs, takeStock };
+}
+
+/** The batch, reorder-level, movement and low-stock alert documents of a stock plan, once every issue has taken its quantity. */
+function stockDocuments(stock: StockPlan, nowMs: number, clinicMs: number, clinicOf: (ms: number) => Date, pharmacistBy: { id: string; name: string }) {
+  const { batchBuilds, pairs, levelRows, movementDocs } = stock;
+  const alertDocs: Record<string, any>[] = [];
+  const batchDocs = batchBuilds.map((b) => ({
+    _id: b._id, product: b.product.key, medicine: b.product.medicine, store: b.store, batchNo: b.batchNo, expiry: b.expiry, quantity: b.final, receivedBy: pharmacistBy,
+    receivedAt: b.receivedAt, takes: [], createdAt: b.receivedAt, updatedAt: b.receivedAt,
+  }));
+  for (const b of batchBuilds) {
+    if (b.taken > 0 && !b.first) throw new Error('Pharmacy seed: an issue reached a batch that is not the oldest usable one.');
+    movementDocs.push({
+      _id: new Types.ObjectId(), batch: b._id, product: b.product.key, store: b.store, change: b.final + b.taken, kind: 'received', reason: `Received batch ${b.batchNo}`, by: pharmacistBy,
+      at: b.receivedAt, createdAt: b.receivedAt, updatedAt: b.receivedAt,
+    });
+  }
+  for (const x of [...NEAR_EXPIRY, ...EXPIRED]) if ((pairs.get(`${x.product}|${x.store}`) ?? []).some((b) => b.taken > 0 && !b.first)) throw new Error('Pharmacy seed: an issue reached a special batch.');
+  const lowKeys = [...Object.keys(LOW), `${OUT.product}|${OUT.store}`];
+  const lowAt = lowKeys.map((_, i) => new Date(nowMs - (95 + i * 47) * MIN));
+  const levelDocs = levelRows.map((r) => {
+    const k = `${r.product}|${r.store}`;
+    const i = lowKeys.indexOf(k);
+    return { ...r, ...(i >= 0 ? { lowAlertedAt: lowAt[i] } : {}), createdAt: new Date(clinicMs - 30 * DAY), updatedAt: i >= 0 ? lowAt[i] : new Date(clinicMs - 30 * DAY) };
+  });
+  lowKeys.forEach((k, i) => {
+    const [product, store] = k.split('|') as [string, Store];
+    const left = k === `${OUT.product}|${OUT.store}` ? 0 : LOW[k].left;
+    const level = levelRows.find((r) => r.product === product && r.store === store)!.reorderLevel;
+    alertDocs.push({
+      _id: new Types.ObjectId(), title: `Low stock: ${productByKey(product)!.label} (${STORE_LABEL[store]})`, subtitle: `${left} left · reorder level ${level}`, lowAlertedAt: lowAt[i],
+      type: 'Medication Alert', category: 'Medication', priority: 'Medium', status: 'Pending', dueDateTime: displayDateTime(clinicOf(lowAt[i].getTime())),
+      link: `pharmacy-stock:${product}:${store}`, patientName: '', uhid: '', createdAt: lowAt[i], updatedAt: lowAt[i],
+    });
+  });
+  return { batchDocs, levelDocs, lowKeys, lowAlerts: alertDocs };
+}
+
+/** The Pharmacy agent's five card values at every hour of the last week, ending with the real counts now. */
+function buildSnapshots(orderDocs: Record<string, any>[], lineDocs: Record<string, any>[], lowStock: number, nowMs: number, midnight: Date): Record<string, any>[] {
+  const openQuery = (l: Record<string, any>) => ['to-check', 'query', 'approved', 'issued'].includes(l.status) && l.query && !l.query.answer;
+  const today = {
+    ordersToday: orderDocs.filter((o) => o.createdAt.getTime() >= midnight.getTime()).length,
+    toCheck: lineDocs.filter((l) => l.status === 'to-check').length,
+    openQueries: lineDocs.filter(openQuery).length,
+    issuedToday: lineDocs.filter((l) => l.issued && l.issued.realAt.getTime() >= midnight.getTime()).length,
+    lowStock,
+  };
+  const r = rng(26092026);
+  const busyAt = (h: number) => Math.max(0.08, Math.sin(((h - 6) / 24) * 2 * Math.PI));
+  const cum = (h: number) => Array.from({ length: h + 1 }, (_, k) => busyAt(k)).reduce((a, b) => a + b, 0);
+  const lastHour = hourOf(new Date(nowMs)).getTime();
+  const hnow = new Date(lastHour).getHours();
+  return Array.from({ length: 168 }, (_, k) => {
+    const i = 167 - k;
+    const hour = new Date(lastHour - i * HOUR);
+    const h = hour.getHours();
+    if (i === 0) return { hour, at: new Date(nowMs), ...today };
+    const sameDay = hour.getTime() >= midnight.getTime();
+    const share = sameDay ? cum(h) / cum(hnow) : cum(h) / cum(23);
+    const scale = (full: number, jitter: number) => Math.max(0, Math.round(full * share * (1 + (r() - 0.5) * jitter)));
+    const dayTotal = (base: number) => (sameDay ? base : Math.round(base * (0.85 + r() * 0.35)));
+    return {
+      hour,
+      at: new Date(Math.min(nowMs, hour.getTime() + 59 * MIN)),
+      ordersToday: scale(dayTotal(Math.max(today.ordersToday, 25)), 0.1),
+      toCheck: Math.max(1, Math.round(3 + 6 * busyAt(h) + (r() - 0.5) * 3)),
+      openQueries: Math.max(0, Math.round(1 + 3 * busyAt(h) + (r() - 0.5) * 2)),
+      issuedToday: scale(dayTotal(Math.max(today.issuedToday, 25)), 0.1),
+      lowStock: Math.max(2, 3 + Math.round((r() - 0.3) * 2)),
+    };
+  });
+}
+
+interface SimContext {
+  nowMs: number;
+  targets: typeof DEFAULT_TARGETS;
+  doctor: { id: string; name: string };
+  pharmacistBy: { id: string; name: string };
+  clinicOf: (ms: number) => Date;
+  takeStock: StockPlan['takeStock'];
+  messageDocs: Record<string, any>[];
+  touchedCases: Map<string, number>;
+  clockDocs: Record<string, any>[];
+  alertDocs: Record<string, any>[];
+  lineDocs: Record<string, any>[];
+  orderDocs: Record<string, any>[];
+}
+
+const earliest = (xs: number[]): number | null => (xs.length ? Math.min(...xs) : null);
+
+/**
+ * One order's day, in time order: what each line did, the check and issue rounds that follow, the messages and
+ * clocks the Coordinator would hold, the query and rejection alerts, and the line and order documents.
+ */
+function simulateOrder(ob: OB, ctx: SimContext): void {
+  const { nowMs, targets, doctor, pharmacistBy, clinicOf, takeStock, messageDocs, touchedCases, clockDocs, alertDocs, lineDocs, orderDocs } = ctx;
+  const spec = ob.spec;
+  const sq = ob.sq;
+  const pri = spec.pri;
+  const orderId = ob._id;
+  const created = ob.t0;
+  const at = (off: number): number => Math.min(nowMs - MIN, ob.t0 + off * sq * MIN);
+  const announcedMs = created + 1000;
+
+  const round = { check: { n: 0, open: false, due: null as number | null }, issue: { n: 0, open: false, due: null as number | null } };
+  const running = new Map<string, Record<string, any>>();
+  const push = (type: string, ms: number, summary: string, payload: Record<string, unknown>, dedupeKey: string): Types.ObjectId => {
+    const _id = new Types.ObjectId();
+    messageDocs.push({
+      _id, case: ob.caseId, from: 'pharmacy', to: ['coordinator'], type, priority: CASE_PRIORITY[pri], summary: cut(summary), payload,
+      dueBy: null, needsPerson: false, opensWork: false, hop: 0, attempts: 0, state: 'delivered', dedupeKey, createdAt: new Date(ms),
+    });
+    touchedCases.set(String(ob.caseId), Math.max(touchedCases.get(String(ob.caseId)) ?? 0, ms));
+    return _id;
+  };
+  const startClock = (def: string, ref: string, msgId: Types.ObjectId, ms: number, dueMs: number, payload: Record<string, unknown>) => {
+    const detail = PHARMACY_CLOCKS.find((c) => c.key === def)?.detailFrom?.(payload);
+    const c = { _id: new Types.ObjectId(), def, case: ob.caseId, ref, startedBy: msgId, startedAt: new Date(ms), dueAt: new Date(dueMs), state: 'running', ...(detail ? { detail } : {}), createdAt: new Date(ms), updatedAt: new Date(ms) };
+    running.set(ref, c);
+    clockDocs.push(c);
+  };
+  const stopClock = (ref: string, ms: number) => {
+    const c = running.get(ref);
+    if (!c) return;
+    c.state = 'met';
+    c.stoppedAt = new Date(ms);
+    c.metMinutes = Math.round((ms - c.startedAt.getTime()) / MIN);
+    c.updatedAt = new Date(ms);
+    running.delete(ref);
+  };
+
+  /** Opens, moves or closes the order's rounds to match what waits now; returns what a message carries and the rounds this call closed. */
+  const sync = (): { state: Record<string, unknown>; closed: { check?: number; issue?: number } } => {
+    const closed: { check?: number; issue?: number } = {};
+    const dueC = earliest(ob.lines.filter((l) => l.status === 'to-check').map((l) => l.enteredMs + targets.check[pri] * MIN));
+    const dueI = ob.setting === 'OPD' ? null : earliest(ob.lines.filter((l) => l.status === 'approved').map((l) => (l.issueFromMs ?? created) + targets.issue[pri] * MIN));
+    for (const [k, due] of [['check', dueC], ['issue', dueI]] as const) {
+      const r = round[k];
+      if (due !== null && !r.open) Object.assign(r, { n: r.n + 1, open: true, due });
+      else if (due !== null) r.due = due;
+      else if (r.open) {
+        r.open = false;
+        closed[k] = r.n;
+      }
+    }
+    return {
+      state: {
+        checkRound: round.check.n, checkDueAt: new Date(round.check.due ?? created), issueRound: round.issue.n, issueDueAt: new Date(round.issue.due ?? created),
+      },
+      closed,
+    };
+  };
+  const refOf = (k: 'check' | 'issue', n: number) => `${orderId}:${k === 'check' ? 'c' : 'i'}${n}`;
+
+  interface Ev { type: LineMessageType; line: LB; extra?: Record<string, unknown>; dedupeKey: string }
+  /** One publish: the rounds are synced first, then every event carries the state, then each closed round says so. */
+  const publish = (ms: number, events: Ev[]): void => {
+    const { state, closed } = sync();
+    let k = 0;
+    const next = () => ms + 100 * k++;
+    for (const ev of events) {
+      const l = ev.line;
+      const when = next();
+      const payload: Record<string, unknown> = {
+        orderId: String(orderId), orderNumber: ob.number, lineId: String(l._id), medicine: l.medicine ?? 'unlisted', priority: pri, setting: ob.setting, version: 1, ...state,
+      };
+      const q = l.query;
+      if (ev.type === 'pharmacy.query') Object.assign(payload, { querySeq: q!.seq, kind: q!.kind, queryDueAt: q!.dueAt });
+      if (ev.type === 'pharmacy.query-answered') Object.assign(payload, { querySeq: q!.seq, outcome: q!.answer.outcome });
+      if (ev.type === 'pharmacy.issued') Object.assign(payload, { store: l.issued!.store, quantity: l.issued!.quantity });
+      if (ev.type === 'pharmacy.cancelled' || ev.type === 'pharmacy.stopped') Object.assign(payload, { querySeq: l.querySeq });
+      Object.assign(payload, ev.extra ?? {});
+      const id = push(ev.type, when, lineSummary(ob.number, { medicine: l.medicine, dose: l.dose, unit: l.unit }, ev.type, pri), payload, ev.dedupeKey);
+      l.lastMs = Math.max(l.lastMs, when);
+      // What the Coordinator's clocks do with it.
+      const cRef = refOf('check', round.check.n);
+      const iRef = refOf('issue', round.issue.n);
+      for (const [ref, due] of [[cRef, state.checkDueAt], [iRef, state.issueDueAt]] as const) {
+        if (ref === iRef && ob.setting === 'OPD') continue;
+        const c = running.get(ref);
+        if (c) {
+          c.dueAt = due;
+          c.updatedAt = new Date(when);
+        }
+      }
+      if (ev.type === 'pharmacy.to-check' && !running.has(cRef)) startClock('pharmacy-check', cRef, id, when, (state.checkDueAt as Date).getTime(), payload);
+      if (ev.type === 'pharmacy.to-issue' && ob.setting !== 'OPD' && !running.has(iRef)) startClock('pharmacy-issue', iRef, id, when, (state.issueDueAt as Date).getTime(), payload);
+      if (ev.type === 'pharmacy.query') startClock('pharmacy-query', `${l._id}:q${q!.seq}`, id, when, new Date(q!.dueAt).getTime(), payload);
+      if (['pharmacy.query-answered', 'pharmacy.cancelled', 'pharmacy.stopped'].includes(ev.type)) stopClock(`${l._id}:q${l.querySeq}`, when);
+    }
+    for (const [kind, n] of [['check', closed.check], ['issue', closed.issue]] as const) {
+      if (n === undefined) continue;
+      const when = next();
+      const type = kind === 'check' ? 'pharmacy.check-done' : 'pharmacy.issue-done';
+      push(type, when, `${ob.number}: ${kind === 'check' ? 'all medicines checked' : 'all medicines issued'} (${pri.toUpperCase()})`, { orderId: String(orderId), orderNumber: ob.number, [kind === 'check' ? 'checkRound' : 'issueRound']: n }, `${type}:${orderId}:${n}`);
+      stopClock(refOf(kind, n), when);
+    }
+  };
+
+  // The order: pharmacy.ordered, then every line waits to be checked.
+  push('pharmacy.ordered', announcedMs, orderSummary(ob.number, ob.lines.map((l) => medicineLabel(l.medicine)), pri), {
+    orderId: String(orderId), orderNumber: ob.number, priority: pri, setting: ob.setting, source: ob.source, medicines: ob.lines.map((l) => l.medicine ?? 'unlisted'),
+  }, `pharmacy.ordered:${orderId}`);
+  for (const l of ob.lines) l.status = 'to-check';
+  publish(created + 1500, ob.lines.map((l) => ({ type: 'pharmacy.to-check' as const, line: l, dedupeKey: `pharmacy.to-check:${l._id}:${l.enteredMs}` })));
+
+  // Then what each line did, in time order.
+  interface Op { off: number; line: LB; kind: 'approve' | 'pquery' | 'aquery' | 'reject' | 'cancel' | 'issue' | 'answer' }
+  const ops: Op[] = [];
+  for (const l of ob.lines) {
+    const s = l.spec;
+    if (['approved', 'issued', 'stopped'].includes(l.state)) ops.push({ off: s.a!, line: l, kind: 'approve' });
+    if (l.state === 'rejected') ops.push({ off: s.a!, line: l, kind: 'reject' });
+    if (l.state === 'cancelled') ops.push({ off: s.a!, line: l, kind: 'cancel' });
+    if (['issued', 'stopped'].includes(l.state)) ops.push({ off: s.i!, line: l, kind: 'issue' });
+    if (s.q) {
+      ops.push({ off: s.q.at, line: l, kind: s.q.by === 'pharm' ? 'pquery' : 'aquery' });
+      if (s.q.ans) ops.push({ off: s.q.ans.at, line: l, kind: 'answer' });
+    }
+    if (['approved', 'issued', 'stopped', 'rejected', 'cancelled'].includes(l.state) && s.a === undefined) throw new Error(`Pharmacy seed: ${ob.number} ${s.med} has no action time.`);
+  }
+  ops.sort((a, b) => a.off - b.off || a.line.idx - b.line.idx);
+  for (const op of ops) {
+    const l = op.line;
+    const ms = at(op.off);
+    const s = l.spec;
+    if (op.kind === 'approve') {
+      l.status = 'approved';
+      l.approvedMs = ms;
+      l.checkedMs = ms;
+      l.issueFromMs = ms;
+      const ev: Ev[] = [{ type: 'pharmacy.approved', line: l, dedupeKey: `pharmacy.approved:${l._id}:1:${ms}` }];
+      if (ob.setting !== 'OPD') ev.push({ type: 'pharmacy.to-issue', line: l, dedupeKey: `pharmacy.to-issue:${l._id}:${ms}` });
+      publish(ms, ev);
+    } else if (op.kind === 'reject') {
+      l.status = 'rejected';
+      l.rejectedMs = ms;
+      l.checkedMs = ms;
+      publish(ms, [{ type: 'pharmacy.rejected', line: l, dedupeKey: `pharmacy.rejected:${l._id}` }]);
+    } else if (op.kind === 'cancel') {
+      l.status = 'cancelled';
+      l.cancelledMs = ms;
+      publish(ms, [{ type: 'pharmacy.cancelled', line: l, extra: { querySeq: l.querySeq }, dedupeKey: `pharmacy.cancelled:${l._id}` }]);
+    } else if (op.kind === 'issue') {
+      l.status = 'issued';
+      l.issuedMs = ms;
+      const store: Store = s.store ?? (ob.setting === 'ER' ? 'er' : 'main');
+      const batchesOut = takeStock(l, store, ms);
+      l.issued = { by: pharmacistBy, at: clinicOf(ms), realAt: new Date(ms), store, quantity: l.quantity, batches: batchesOut, announcedAt: new Date(ms + 300) };
+      publish(ms, [{ type: 'pharmacy.issued', line: l, dedupeKey: `pharmacy.issued:${l._id}` }]);
+    } else if (op.kind === 'pquery' || op.kind === 'aquery') {
+      const q = s.q!;
+      const red = l.flags.filter((f) => f.severity === 'red' && !f.confirmed);
+      const kidneyRed = red.filter((f) => f.kind === 'kidney');
+      let question = q.question ?? '';
+      let redKeys = red.map((f) => f.key);
+      if (q.by === 'agent') {
+        if (q.kind === 'allergy') {
+          const flag = red.find((f) => f.kind === 'allergy');
+          question = `${flag!.text}. Please confirm with a reason, change the dose, or cancel.`;
+          redKeys = red.filter((f) => f.kind === 'allergy').map((f) => f.key);
+        } else {
+          const egfr = /eGFR (\d+)/.exec(kidneyRed[0]?.text ?? '')?.[1];
+          question = `Dose may need lowering for kidney function${egfr ? ` (eGFR ${egfr})` : ''}. Please review.`;
+          redKeys = kidneyRed.map((f) => f.key);
+        }
+      }
+      const openedAt = new Date(ms);
+      const dueAt = new Date(ms + targets.query[pri] * MIN);
+      l.querySeq = 1;
+      l.query = {
+        seq: 1, kind: q.kind, question, by: q.by === 'agent' ? PHARMACY_AGENT : pharmacistBy, at: clinicOf(ms), openedRealAt: openedAt, dueAt, suggestions: [], redKeys,
+      };
+      if (!['issued'].includes(l.status)) {
+        l.status = 'query';
+        if (q.by === 'pharm') l.checkedMs = ms;
+      }
+      publish(ms, [{ type: 'pharmacy.query', line: l, extra: { querySeq: 1, kind: q.kind, queryDueAt: dueAt }, dedupeKey: `pharmacy.query:${l._id}:1` }]);
+    } else {
+      const a = s.q!.ans!;
+      const keep = a.outcome === 'keep';
+      const reason = a.reason;
+      l.query!.answer = { outcome: a.outcome, by: doctor, reason, at: clinicOf(ms), realAt: new Date(ms) };
+      if (keep) {
+        const asked = (f: Flag) => (l.query!.redKeys as string[]).includes(f.key);
+        l.flags = l.flags.map((f) => (f.severity === 'red' && !f.confirmed && asked(f) ? { ...f, confirmed: { by: doctor.name, reason, at: clinicOf(ms) } } : f));
+      }
+      const events: Ev[] = [{ type: 'pharmacy.query-answered', line: l, extra: { querySeq: 1, outcome: a.outcome }, dedupeKey: `pharmacy.query-answered:${l._id}:1` }];
+      if (!keep) {
+        l.status = 'stopped';
+        l.stoppedMs = ms;
+        events.push({ type: 'pharmacy.stopped', line: l, extra: { querySeq: 1 }, dedupeKey: `pharmacy.stopped:${l._id}` });
+      }
+      publish(ms, events);
+    }
+  }
+
+  // The query and rejection alerts.
+  for (const l of ob.lines) {
+    const name = `${medicineLabel(l.medicine)}${l.dose === null ? '' : ` ${l.dose} ${l.unit}`}`;
+    if (l.query) {
+      const minutes = Math.max(1, Math.round((new Date(l.query.dueAt).getTime() - new Date(l.query.openedRealAt).getTime()) / MIN));
+      const openMs = new Date(l.query.openedRealAt).getTime();
+      const answered = l.query.answer ? new Date(l.query.answer.realAt).getTime() : undefined;
+      alertDocs.push({
+        _id: new Types.ObjectId(), title: `Pharmacy query: ${name} (${l.query.kind})`, subtitle: `For ${doctor.name} · ${ob.number} · answer within ${minutes} min`, querySeq: 1,
+        patientName: ob.patient.name, uhid: ob.patient.uhid, type: 'Medication Alert', category: 'Medication', priority: 'High', status: answered ? 'Completed' : 'Pending',
+        dueDateTime: displayDateTime(new Date(clinicOf(openMs).getTime() + minutes * MIN)), link: `pharmacy-line:${l._id}`, createdAt: new Date(openMs), updatedAt: new Date(answered ?? openMs),
+      });
+    }
+    if (l.state === 'rejected') {
+      alertDocs.push({
+        _id: new Types.ObjectId(), title: `Rejected: ${name}`, subtitle: `For ${doctor.name} · ${ob.number} · ${l.spec.reason}`, patientName: ob.patient.name, uhid: ob.patient.uhid,
+        type: 'Medication Alert', category: 'Medication', priority: 'Medium', status: 'Pending', link: `pharmacy-rejected:${l._id}`, createdAt: new Date(l.rejectedMs!), updatedAt: new Date(l.rejectedMs!),
+      });
+    }
+  }
+
+  // The line documents.
+  for (const l of ob.lines) {
+    const s = l.spec;
+    const doc: Record<string, any> = {
+      _id: l._id, order: orderId, patient: ob.patient._id, medicine: l.medicine, product: l.product, ...(l.freeName ? { freeName: l.freeName } : {}), dose: l.dose,
+      ...(l.doseText ? { doseText: l.doseText } : {}), unit: l.unit, route: l.route, frequency: l.frequency, durationDays: l.durationDays, quantity: l.quantity, note: '', version: 1,
+      status: l.status, enteredCheckAt: new Date(l.enteredMs), waitingForStock: false, ...(l.prescriptionItem ? { prescriptionItem: l.prescriptionItem, prescriptionRev: 1 } : {}),
+      flags: l.flags, querySeq: l.querySeq, history: [], createdAt: new Date(created), updatedAt: new Date(Math.min(nowMs, l.lastMs)),
+    };
+    if (l.checkedMs !== undefined) doc.checkedAt = new Date(l.checkedMs);
+    if (l.issueFromMs !== undefined) doc.issueFrom = new Date(l.issueFromMs);
+    if (l.query) doc.query = l.query;
+    if (l.approvedMs !== undefined) doc.approved = { by: pharmacistBy, at: clinicOf(l.approvedMs), version: 1, ...(l.approvedReason ? { reason: l.approvedReason } : {}) };
+    if (l.rejectedMs !== undefined) doc.rejected = { by: pharmacistBy, reason: s.reason, at: clinicOf(l.rejectedMs) };
+    if (l.issued) doc.issued = l.issued;
+    if (l.cancelledMs !== undefined) doc.cancelled = { by: doctor, reason: s.reason, at: clinicOf(l.cancelledMs) };
+    if (l.stoppedMs !== undefined) doc.stopped = { by: doctor, reason: s.q!.ans!.reason, at: clinicOf(l.stoppedMs) };
+    lineDocs.push(doc);
+  }
+
+  const touched = Math.min(nowMs, Math.max(announcedMs, ...ob.lines.map((l) => l.lastMs)));
+  orderDocs.push({
+    _id: orderId, number: ob.number, patient: ob.patient._id, patientUhid: ob.patient.uhid, patientName: ob.patient.name, case: ob.caseId, setting: ob.setting,
+    ...(ob.ward ? { ward: ob.ward } : {}), orderedBy: doctor, priority: pri, note: spec.note ?? '', source: ob.source,
+    ...(ob.prescription ? { prescription: ob.prescription._id, prescriptionRev: 1 } : { prescriptionRev: 0 }), orderedAt: clinicOf(created), announcedAt: new Date(announcedMs),
+    checkRound: round.check.n, checkOpen: round.check.open, ...(round.check.n ? { checkDueAt: new Date(round.check.due!) } : {}),
+    issueRound: round.issue.n, issueOpen: round.issue.open, ...(round.issue.n ? { issueDueAt: new Date(round.issue.due!) } : {}),
+    createdAt: new Date(created), updatedAt: new Date(touched),
+  });
+}
+
 /**
  * Replaces everything the Pharmacy agent keeps with a demo day: pharmacy stock, 25 medicine orders in every
  * state across the ER, the wards and the outpatient counter, with their checks, queries, issues, Coordinator
@@ -460,14 +881,34 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
     const m = await messages.findOne({ case: c._id, type: 'bed.assigned' }).sort({ createdAt: -1 }).select('payload').lean<any>();
     wardName.set(String(c._id), typeof m?.payload?.ward === 'string' && m.payload.ward ? m.payload.ward : 'General Ward');
   }
+  // The demo's own earlier run: its made-up patient records and kidney reports go first, so a rerun starts from the same world.
+  await reports.deleteMany({ labLine: /^pharmacy-demo:/ });
+  await patients.deleteMany({ address: PHARMACY_MARK });
   // The penicillin patient: the first admitted patient who has a Patient record (a made-up sample inpatient has none).
-  const records = new Set((await patients.find({ _id: { $in: wardPool.map((c) => c.patient) } }).select('_id').lean<any[]>()).map((p) => String(p._id)));
+  const hasRecord = async (cs: any[]) => new Set((await patients.find({ _id: { $in: cs.map((c) => c.patient) } }).select('_id').lean<any[]>()).map((p) => String(p._id)));
+  const records = await hasRecord(wardPool);
   const penCase = wardPool.find((c) => records.has(String(c.patient)));
-  const otherWard = wardPool.filter((c) => c !== penCase);
+  // The two kidney patients (eGFR 26 and 27) need a record, for the age and sex their eGFR comes from: admitted patients who have one first,
+  // else a made-up record for a sample inpatient (marked, and cleared on a rerun).
+  const spare = wardPool.filter((c) => c !== penCase);
+  const kidneyCases = [...spare.filter((c) => records.has(String(c.patient))), ...spare.filter((c) => !records.has(String(c.patient)))].slice(0, 2);
+  const otherWard = spare.filter((c) => !kidneyCases.includes(c));
   if (!wardPool.length) console.log('Pharmacy seed: no open admission case; the ward orders are skipped.');
   else if (!penCase) console.log('Pharmacy seed: no admitted patient has a Patient record; the penicillin allergy is not recorded.');
+  const kidneyCase = (who: 'k1' | 'k2') => kidneyCases[who === 'k1' ? 0 : 1];
+  const MADE_UP = { k1: { age: 68, gender: 'Male' }, k2: { age: 64, gender: 'Female' } } as const;
+  for (const who of ['k1', 'k2'] as const) {
+    const c = kidneyCase(who);
+    if (c && !records.has(String(c.patient))) {
+      await patients.create({
+        _id: c.patient, uhid: c.patientUhid, name: c.patientName, ...MADE_UP[who], phone: who === 'k1' ? '9000009301' : '9000009302', address: PHARMACY_MARK, doctor: doctor.name, department: 'General Medicine',
+        createdAt: new Date(nowMs), updatedAt: new Date(nowMs),
+      });
+      console.log(`Pharmacy seed: ${c.patientUhid} had no Patient record; a made-up one was added for the kidney story.`);
+    }
+  }
 
-  const openCases = await cases.find({ state: 'open' }).lean<any[]>();
+  const openCases = await cases.find({ state: 'open', openedBy: { $ne: 'pharmacy' } }).lean<any[]>();
   const openOf = new Map(openCases.map((c) => [String(c.patient), c]));
   const clinical = new Set(openCases.filter((c) => c.kind === 'er' || c.kind === 'ipd').map((c) => String(c.patient)));
   // The existing demo prescription, and the patient it belongs to.
@@ -485,7 +926,7 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
   // The allergy the penicillin ward patient has recorded (before any check runs, so every flag sees it).
   if (penCase) await patients.updateOne({ _id: penCase.patient }, { $addToSet: { allergies: 'Penicillin' } });
 
-  const specs = SPECS.filter((s) => s.area === 'ER' || (s.area === 'Ward' && wardPool.length && (s.who !== 'pen' || penCase)) || (s.area === 'OPD' && (s.rx?.fixture ? fixturePatient : counter.length)));
+  const specs = SPECS.filter((s) => s.area === 'ER' || (s.area === 'Ward' && wardPool.length && (s.who !== 'pen' || penCase) && ((s.who !== 'k1' && s.who !== 'k2') || kidneyCase(s.who))) || (s.area === 'OPD' && (s.rx?.fixture ? fixturePatient : counter.length)));
 
   // ---- Build the orders: patient, case, lines ---------------------------------------------------
   const lastCaseNo = (await cases.find({ number: /^CASE-\d{4,}$/, openedBy: { $ne: 'pharmacy' } }).select('number').lean<any[]>()).reduce((max, c) => Math.max(max, Number(String(c.number).slice(5))), 0);
@@ -518,7 +959,7 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
       patient = { _id: pick.case.patient, uhid: pick.case.patientUhid, name: pick.case.patientName };
       locationOf = { area: 'ER' };
     } else if (spec.area === 'Ward') {
-      const c = spec.who === 'pen' ? penCase : otherWard.length ? otherWard[(spec.who as number) % otherWard.length] : penCase;
+      const c = spec.who === 'pen' ? penCase : spec.who === 'k1' || spec.who === 'k2' ? kidneyCase(spec.who) : otherWard.length ? otherWard[(spec.who as number) % otherWard.length] : penCase;
       caseId = c._id;
       patient = { _id: c.patient, uhid: c.patientUhid, name: c.patientName };
       ward = wardName.get(String(c._id));
@@ -625,17 +1066,44 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
   builds.sort((a, b) => a.t0 - b.t0);
   builds.forEach((b) => (b.number = `MO-${pad(++orderSerial, 4)}`));
 
+  // ---- A released Kidney function report for each patient with a set eGFR, written as the Lab release writes it -------
+  // The creatinine is solved from the pharmacy's own eGFR rule (age and sex from the record), so a live recheck reproduces the flags.
+  const rft = testByKey('rft')!;
+  for (const b of builds.filter((x) => x.spec.egfr !== undefined)) {
+    const p = await patients.findById(b.patient._id).lean<any>();
+    const sex = p?.gender === 'Male' ? 'M' : p?.gender === 'Female' ? 'F' : p?.gender === 'Other' ? 'Other' : null;
+    let creatinine: number | undefined;
+    for (let c = 50; c <= 1000 && creatinine === undefined; c++) if (egfr({ creatinine: c / 100, age: p?.age ?? null, sex }) === b.spec.egfr) creatinine = c / 100;
+    if (creatinine === undefined) throw new Error(`Pharmacy seed: no creatinine gives eGFR ${b.spec.egfr} for ${b.patient.uhid}.`);
+    const values: Record<string, number> = { Creatinine: creatinine, Urea: Math.round(40 + creatinine * 12) };
+    const rows = rft.params.map((q) => ({ param: q.name, value: values[q.name], unit: q.unit, ...flagValue('rft', q.name, values[q.name]) }));
+    // Released a few minutes before the kidney question about its line.
+    const query = b.spec.lines!.find((l) => l.q?.kind === 'kidney')!.q!;
+    const at = new Date(Math.min(nowMs - 2 * MIN, b.t0 + (query.at - 5) * b.sq * MIN));
+    const when = clinicOf(at.getTime());
+    await reports.collection.insertOne({
+      uhid: b.patient.uhid, testName: rft.label, category: rft.category, date: displayDate(when), time: displayTime(when),
+      status: rows.some((r) => r.flag !== 'normal') ? 'Abnormal' : 'Completed',
+      groups: [{
+        category: rft.label,
+        parameters: rows.map((r) => ({
+          name: r.param, result: r.value, referenceRange: rangeText('rft', rft.params.find((q) => q.name === r.param)!), unit: r.unit,
+          status: { normal: 'Normal', low: 'Low', high: 'High', abnormal: 'Abnormal' }[r.flag], critical: r.critical,
+        })),
+      }],
+      labLine: `pharmacy-demo:${b.patient._id}`, amended: false,
+      aiSummary: { sample: false, ...templateSummary(rows.map((r, i) => ({ name: r.param, value: r.value, unit: r.unit, referenceRange: rangeText('rft', rft.params[i]), flag: r.flag, critical: r.critical }))) },
+      createdAt: at, updatedAt: at,
+    });
+  }
+
   // ---- Flags: the fixed rules over every patient's active lines, as a live recheck would leave them -----
   const byPatient = new Map<string, LB[]>();
   for (const b of builds) for (const l of b.lines) byPatient.set(String(b.patient._id), [...(byPatient.get(String(b.patient._id)) ?? []), l]);
-  const eGfrOf = new Map<string, number>();
-  for (const b of builds) if (b.spec.egfr !== undefined) eGfrOf.set(String(b.patient._id), b.spec.egfr);
   // What the checks compare against: lines still to check, in a query or approved, and lines issued in the last 24 hours (all of today's).
   const isActive = (l: LB) => ['check', 'query', 'approved', 'issued'].includes(l.state);
   for (const [patientId, list] of byPatient) {
-    let f: PatientFactsView = await facts.facts(patientId);
-    const forced = eGfrOf.get(patientId);
-    if (forced !== undefined) f = { ...f, egfr: forced, kidneyStatus: 'known' };
+    const f: PatientFactsView = await facts.facts(patientId);
     for (const l of list) {
       const others = list.filter((o) => o !== l && isActive(o)).map(asCheckLine);
       const drafts = checkLine(asCheckLine(l), f, others);
@@ -660,391 +1128,28 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
 
   // ---- Stock plan -----------------------------------------------------------------------------
   const pharmacistBy = { id: pharmacist.id, name: pharmacist.name };
-  const allProducts = MEDICINES.flatMap((m) => m.products);
-  const batchBuilds: BatchBuild[] = [];
-  const pairs = new Map<string, BatchBuild[]>();
-  let batchSerial = 0;
-  const rr = rng(30102026);
-  const addBatch = (product: ProductDef, store: Store, days: number, final: number, first = false): BatchBuild => {
-    const b: BatchBuild = {
-      _id: new Types.ObjectId(),
-      product,
-      store,
-      batchNo: `${product.medicine.replace(/[^a-z]/g, '').slice(0, 3).toUpperCase()}-${1000 + ++batchSerial}`,
-      expiry: isoOf(clinicMs + days * DAY),
-      final,
-      taken: 0,
-      receivedAt: new Date(clinicMs - (14 + Math.floor(rr() * 40)) * DAY),
-      ...(first ? { first: true } : {}),
-    };
-    batchBuilds.push(b);
-    const k = `${product.key}|${store}`;
-    pairs.set(k, [...(pairs.get(k) ?? []), b]);
-    return b;
-  };
-  const levelRows: { product: string; store: Store; reorderLevel: number }[] = [];
-  for (const p of allProducts) {
-    for (const store of ['main', 'er'] as Store[]) {
-      if (store === 'er' && !erStocked(p)) continue;
-      if (store === 'er' && p.key === OUT.product) {
-        levelRows.push({ product: p.key, store, reorderLevel: OUT.level });
-        continue;
-      }
-      const low = LOW[`${p.key}|${store}`];
-      const base = (store === 'main' ? BASE_MAIN : BASE_ER)[p.form];
-      const total = low ? low.left : base;
-      const older = Math.max(1, Math.round(total * 0.4));
-      const newer = total - older;
-      const d0 = 150 + Math.floor(rr() * 90);
-      addBatch(p, store, d0, older, true);
-      if (newer > 0) addBatch(p, store, d0 + 180, newer);
-      levelRows.push({ product: p.key, store, reorderLevel: low ? low.level : Math.max(2, Math.floor(total * 0.2)) });
-    }
-  }
-  for (const x of NEAR_EXPIRY) addBatch(productByKey(x.product)!, x.store, x.days, x.qty);
-  for (const x of EXPIRED) addBatch(productByKey(x.product)!, x.store, x.days, x.qty);
-
-  const movementDocs: Record<string, any>[] = [];
-  const takeStock = (l: LB, store: Store, ms: number): { batch: string; batchNo: string; expiry: string; qty: number }[] => {
-    const qty = l.quantity ?? 0;
-    const pair = pairs.get(`${l.product}|${store}`)?.find((b) => b.first);
-    if (!pair) throw new Error(`Pharmacy seed: ${l.order.number} issues ${l.product} from ${store}, which stocks none.`);
-    pair.taken += qty;
-    movementDocs.push({
-      _id: new Types.ObjectId(), batch: pair._id, product: pair.product.key, store, change: -qty, kind: 'issued', reason: 'issued', line: l._id,
-      by: pharmacistBy, at: clinicOf(ms), createdAt: new Date(ms), updatedAt: new Date(ms),
-    });
-    return [{ batch: String(pair._id), batchNo: pair.batchNo, expiry: pair.expiry, qty }];
-  };
+  const stock = planStock(clinicMs, clinicOf, pharmacistBy);
+  const takeStock = stock.takeStock;
+  const movementDocs = stock.movementDocs;
 
   // ---- Simulate each order's day: messages, rounds, clocks, alerts, documents ----------------------
   const clockDocs: Record<string, any>[] = [];
   const alertDocs: Record<string, any>[] = [];
   const lineDocs: Record<string, any>[] = [];
   const orderDocs: Record<string, any>[] = [];
-  const earliest = (xs: number[]): number | null => (xs.length ? Math.min(...xs) : null);
 
-  for (const ob of builds) {
-    const spec = ob.spec;
-    const sq = ob.sq;
-    const pri = spec.pri;
-    const orderId = ob._id;
-    const created = ob.t0;
-    const at = (off: number): number => Math.min(nowMs - MIN, ob.t0 + off * sq * MIN);
-    const announcedMs = created + 1000;
-
-    const round = { check: { n: 0, open: false, due: null as number | null }, issue: { n: 0, open: false, due: null as number | null } };
-    const running = new Map<string, Record<string, any>>();
-    const push = (type: string, ms: number, summary: string, payload: Record<string, unknown>, dedupeKey: string): Types.ObjectId => {
-      const _id = new Types.ObjectId();
-      messageDocs.push({
-        _id, case: ob.caseId, from: 'pharmacy', to: ['coordinator'], type, priority: CASE_PRIORITY[pri], summary: cut(summary), payload,
-        dueBy: null, needsPerson: false, opensWork: false, hop: 0, attempts: 0, state: 'delivered', dedupeKey, createdAt: new Date(ms),
-      });
-      touchedCases.set(String(ob.caseId), Math.max(touchedCases.get(String(ob.caseId)) ?? 0, ms));
-      return _id;
-    };
-    const startClock = (def: string, ref: string, msgId: Types.ObjectId, ms: number, dueMs: number, payload: Record<string, unknown>) => {
-      const detail = PHARMACY_CLOCKS.find((c) => c.key === def)?.detailFrom?.(payload);
-      const c = { _id: new Types.ObjectId(), def, case: ob.caseId, ref, startedBy: msgId, startedAt: new Date(ms), dueAt: new Date(dueMs), state: 'running', ...(detail ? { detail } : {}), createdAt: new Date(ms), updatedAt: new Date(ms) };
-      running.set(ref, c);
-      clockDocs.push(c);
-    };
-    const stopClock = (ref: string, ms: number) => {
-      const c = running.get(ref);
-      if (!c) return;
-      c.state = 'met';
-      c.stoppedAt = new Date(ms);
-      c.metMinutes = Math.round((ms - c.startedAt.getTime()) / MIN);
-      c.updatedAt = new Date(ms);
-      running.delete(ref);
-    };
-
-    /** Opens, moves or closes the order's rounds to match what waits now; returns what a message carries and the rounds this call closed. */
-    const sync = (): { state: Record<string, unknown>; closed: { check?: number; issue?: number } } => {
-      const closed: { check?: number; issue?: number } = {};
-      const dueC = earliest(ob.lines.filter((l) => l.status === 'to-check').map((l) => l.enteredMs + targets.check[pri] * MIN));
-      const dueI = ob.setting === 'OPD' ? null : earliest(ob.lines.filter((l) => l.status === 'approved').map((l) => (l.issueFromMs ?? created) + targets.issue[pri] * MIN));
-      for (const [k, due] of [['check', dueC], ['issue', dueI]] as const) {
-        const r = round[k];
-        if (due !== null && !r.open) Object.assign(r, { n: r.n + 1, open: true, due });
-        else if (due !== null) r.due = due;
-        else if (r.open) {
-          r.open = false;
-          closed[k] = r.n;
-        }
-      }
-      return {
-        state: {
-          checkRound: round.check.n, checkDueAt: new Date(round.check.due ?? created), issueRound: round.issue.n, issueDueAt: new Date(round.issue.due ?? created),
-        },
-        closed,
-      };
-    };
-    const refOf = (k: 'check' | 'issue', n: number) => `${orderId}:${k === 'check' ? 'c' : 'i'}${n}`;
-
-    interface Ev { type: LineMessageType; line: LB; extra?: Record<string, unknown>; dedupeKey: string }
-    /** One publish: the rounds are synced first, then every event carries the state, then each closed round says so. */
-    const publish = (ms: number, events: Ev[]): void => {
-      const { state, closed } = sync();
-      let k = 0;
-      const next = () => ms + 100 * k++;
-      for (const ev of events) {
-        const l = ev.line;
-        const when = next();
-        const payload: Record<string, unknown> = {
-          orderId: String(orderId), orderNumber: ob.number, lineId: String(l._id), medicine: l.medicine ?? 'unlisted', priority: pri, setting: ob.setting, version: 1, ...state,
-        };
-        const q = l.query;
-        if (ev.type === 'pharmacy.query') Object.assign(payload, { querySeq: q!.seq, kind: q!.kind, queryDueAt: q!.dueAt });
-        if (ev.type === 'pharmacy.query-answered') Object.assign(payload, { querySeq: q!.seq, outcome: q!.answer.outcome });
-        if (ev.type === 'pharmacy.issued') Object.assign(payload, { store: l.issued!.store, quantity: l.issued!.quantity });
-        if (ev.type === 'pharmacy.cancelled' || ev.type === 'pharmacy.stopped') Object.assign(payload, { querySeq: l.querySeq });
-        Object.assign(payload, ev.extra ?? {});
-        const id = push(ev.type, when, lineSummary(ob.number, { medicine: l.medicine, dose: l.dose, unit: l.unit }, ev.type, pri), payload, ev.dedupeKey);
-        l.lastMs = Math.max(l.lastMs, when);
-        // What the Coordinator's clocks do with it.
-        const cRef = refOf('check', round.check.n);
-        const iRef = refOf('issue', round.issue.n);
-        for (const [ref, due] of [[cRef, state.checkDueAt], [iRef, state.issueDueAt]] as const) {
-          if (ref === iRef && ob.setting === 'OPD') continue;
-          const c = running.get(ref);
-          if (c) {
-            c.dueAt = due;
-            c.updatedAt = new Date(when);
-          }
-        }
-        if (ev.type === 'pharmacy.to-check' && !running.has(cRef)) startClock('pharmacy-check', cRef, id, when, (state.checkDueAt as Date).getTime(), payload);
-        if (ev.type === 'pharmacy.to-issue' && ob.setting !== 'OPD' && !running.has(iRef)) startClock('pharmacy-issue', iRef, id, when, (state.issueDueAt as Date).getTime(), payload);
-        if (ev.type === 'pharmacy.query') startClock('pharmacy-query', `${l._id}:q${q!.seq}`, id, when, new Date(q!.dueAt).getTime(), payload);
-        if (['pharmacy.query-answered', 'pharmacy.cancelled', 'pharmacy.stopped'].includes(ev.type)) stopClock(`${l._id}:q${l.querySeq}`, when);
-      }
-      for (const [kind, n] of [['check', closed.check], ['issue', closed.issue]] as const) {
-        if (n === undefined) continue;
-        const when = next();
-        const type = kind === 'check' ? 'pharmacy.check-done' : 'pharmacy.issue-done';
-        push(type, when, `${ob.number}: ${kind === 'check' ? 'all medicines checked' : 'all medicines issued'} (${pri.toUpperCase()})`, { orderId: String(orderId), orderNumber: ob.number, [kind === 'check' ? 'checkRound' : 'issueRound']: n }, `${type}:${orderId}:${n}`);
-        stopClock(refOf(kind, n), when);
-      }
-    };
-
-    // The order: pharmacy.ordered, then every line waits to be checked.
-    push('pharmacy.ordered', announcedMs, orderSummary(ob.number, ob.lines.map((l) => medicineLabel(l.medicine)), pri), {
-      orderId: String(orderId), orderNumber: ob.number, priority: pri, setting: ob.setting, source: ob.source, medicines: ob.lines.map((l) => l.medicine ?? 'unlisted'),
-    }, `pharmacy.ordered:${orderId}`);
-    for (const l of ob.lines) l.status = 'to-check';
-    publish(created + 1500, ob.lines.map((l) => ({ type: 'pharmacy.to-check' as const, line: l, dedupeKey: `pharmacy.to-check:${l._id}:${l.enteredMs}` })));
-
-    // Then what each line did, in time order.
-    interface Op { off: number; line: LB; kind: 'approve' | 'pquery' | 'aquery' | 'reject' | 'cancel' | 'issue' | 'answer' }
-    const ops: Op[] = [];
-    for (const l of ob.lines) {
-      const s = l.spec;
-      if (['approved', 'issued', 'stopped'].includes(l.state)) ops.push({ off: s.a!, line: l, kind: 'approve' });
-      if (l.state === 'rejected') ops.push({ off: s.a!, line: l, kind: 'reject' });
-      if (l.state === 'cancelled') ops.push({ off: s.a!, line: l, kind: 'cancel' });
-      if (['issued', 'stopped'].includes(l.state)) ops.push({ off: s.i!, line: l, kind: 'issue' });
-      if (s.q) {
-        ops.push({ off: s.q.at, line: l, kind: s.q.by === 'pharm' ? 'pquery' : 'aquery' });
-        if (s.q.ans) ops.push({ off: s.q.ans.at, line: l, kind: 'answer' });
-      }
-      if (['approved', 'issued', 'stopped', 'rejected', 'cancelled'].includes(l.state) && s.a === undefined) throw new Error(`Pharmacy seed: ${ob.number} ${s.med} has no action time.`);
-    }
-    ops.sort((a, b) => a.off - b.off || a.line.idx - b.line.idx);
-    for (const op of ops) {
-      const l = op.line;
-      const ms = at(op.off);
-      const s = l.spec;
-      if (op.kind === 'approve') {
-        l.status = 'approved';
-        l.approvedMs = ms;
-        l.checkedMs = ms;
-        l.issueFromMs = ms;
-        const ev: Ev[] = [{ type: 'pharmacy.approved', line: l, dedupeKey: `pharmacy.approved:${l._id}:1:${ms}` }];
-        if (ob.setting !== 'OPD') ev.push({ type: 'pharmacy.to-issue', line: l, dedupeKey: `pharmacy.to-issue:${l._id}:${ms}` });
-        publish(ms, ev);
-      } else if (op.kind === 'reject') {
-        l.status = 'rejected';
-        l.rejectedMs = ms;
-        l.checkedMs = ms;
-        publish(ms, [{ type: 'pharmacy.rejected', line: l, dedupeKey: `pharmacy.rejected:${l._id}` }]);
-      } else if (op.kind === 'cancel') {
-        l.status = 'cancelled';
-        l.cancelledMs = ms;
-        publish(ms, [{ type: 'pharmacy.cancelled', line: l, extra: { querySeq: l.querySeq }, dedupeKey: `pharmacy.cancelled:${l._id}` }]);
-      } else if (op.kind === 'issue') {
-        l.status = 'issued';
-        l.issuedMs = ms;
-        const store: Store = s.store ?? (ob.setting === 'ER' ? 'er' : 'main');
-        const batchesOut = takeStock(l, store, ms);
-        l.issued = { by: pharmacistBy, at: clinicOf(ms), realAt: new Date(ms), store, quantity: l.quantity, batches: batchesOut, announcedAt: new Date(ms + 300) };
-        publish(ms, [{ type: 'pharmacy.issued', line: l, dedupeKey: `pharmacy.issued:${l._id}` }]);
-      } else if (op.kind === 'pquery' || op.kind === 'aquery') {
-        const q = s.q!;
-        const red = l.flags.filter((f) => f.severity === 'red' && !f.confirmed);
-        const kidneyRed = red.filter((f) => f.kind === 'kidney');
-        let question = q.question ?? '';
-        let redKeys = red.map((f) => f.key);
-        if (q.by === 'agent') {
-          if (q.kind === 'allergy') {
-            const flag = red.find((f) => f.kind === 'allergy');
-            question = `${flag!.text}. Please confirm with a reason, change the dose, or cancel.`;
-            redKeys = red.filter((f) => f.kind === 'allergy').map((f) => f.key);
-          } else {
-            const egfr = /eGFR (\d+)/.exec(kidneyRed[0]?.text ?? '')?.[1];
-            question = `Dose may need lowering for kidney function${egfr ? ` (eGFR ${egfr})` : ''}. Please review.`;
-            redKeys = kidneyRed.map((f) => f.key);
-          }
-        }
-        const openedAt = new Date(ms);
-        const dueAt = new Date(ms + targets.query[pri] * MIN);
-        l.querySeq = 1;
-        l.query = {
-          seq: 1, kind: q.kind, question, by: q.by === 'agent' ? PHARMACY_AGENT : pharmacistBy, at: clinicOf(ms), openedRealAt: openedAt, dueAt, suggestions: [], redKeys,
-        };
-        if (!['issued'].includes(l.status)) {
-          l.status = 'query';
-          if (q.by === 'pharm') l.checkedMs = ms;
-        }
-        publish(ms, [{ type: 'pharmacy.query', line: l, extra: { querySeq: 1, kind: q.kind, queryDueAt: dueAt }, dedupeKey: `pharmacy.query:${l._id}:1` }]);
-      } else {
-        const a = s.q!.ans!;
-        const keep = a.outcome === 'keep';
-        const reason = a.reason;
-        l.query!.answer = { outcome: a.outcome, by: doctor, reason, at: clinicOf(ms), realAt: new Date(ms) };
-        if (keep) {
-          const asked = (f: Flag) => (l.query!.redKeys as string[]).includes(f.key);
-          l.flags = l.flags.map((f) => (f.severity === 'red' && !f.confirmed && asked(f) ? { ...f, confirmed: { by: doctor.name, reason, at: clinicOf(ms) } } : f));
-        }
-        const events: Ev[] = [{ type: 'pharmacy.query-answered', line: l, extra: { querySeq: 1, outcome: a.outcome }, dedupeKey: `pharmacy.query-answered:${l._id}:1` }];
-        if (!keep) {
-          l.status = 'stopped';
-          l.stoppedMs = ms;
-          events.push({ type: 'pharmacy.stopped', line: l, extra: { querySeq: 1 }, dedupeKey: `pharmacy.stopped:${l._id}` });
-        }
-        publish(ms, events);
-      }
-    }
-
-    // The query and rejection alerts.
-    for (const l of ob.lines) {
-      const name = `${medicineLabel(l.medicine)}${l.dose === null ? '' : ` ${l.dose} ${l.unit}`}`;
-      if (l.query) {
-        const minutes = Math.max(1, Math.round((new Date(l.query.dueAt).getTime() - new Date(l.query.openedRealAt).getTime()) / MIN));
-        const openMs = new Date(l.query.openedRealAt).getTime();
-        const answered = l.query.answer ? new Date(l.query.answer.realAt).getTime() : undefined;
-        alertDocs.push({
-          _id: new Types.ObjectId(), title: `Pharmacy query: ${name} (${l.query.kind})`, subtitle: `For ${doctor.name} · ${ob.number} · answer within ${minutes} min`, querySeq: 1,
-          patientName: ob.patient.name, uhid: ob.patient.uhid, type: 'Medication Alert', category: 'Medication', priority: 'High', status: answered ? 'Completed' : 'Pending',
-          dueDateTime: displayDateTime(new Date(clinicOf(openMs).getTime() + minutes * MIN)), link: `pharmacy-line:${l._id}`, createdAt: new Date(openMs), updatedAt: new Date(answered ?? openMs),
-        });
-      }
-      if (l.state === 'rejected') {
-        alertDocs.push({
-          _id: new Types.ObjectId(), title: `Rejected: ${name}`, subtitle: `For ${doctor.name} · ${ob.number} · ${l.spec.reason}`, patientName: ob.patient.name, uhid: ob.patient.uhid,
-          type: 'Medication Alert', category: 'Medication', priority: 'Medium', status: 'Pending', link: `pharmacy-rejected:${l._id}`, createdAt: new Date(l.rejectedMs!), updatedAt: new Date(l.rejectedMs!),
-        });
-      }
-    }
-
-    // The line documents.
-    for (const l of ob.lines) {
-      const s = l.spec;
-      const doc: Record<string, any> = {
-        _id: l._id, order: orderId, patient: ob.patient._id, medicine: l.medicine, product: l.product, ...(l.freeName ? { freeName: l.freeName } : {}), dose: l.dose,
-        ...(l.doseText ? { doseText: l.doseText } : {}), unit: l.unit, route: l.route, frequency: l.frequency, durationDays: l.durationDays, quantity: l.quantity, note: '', version: 1,
-        status: l.status, enteredCheckAt: new Date(l.enteredMs), waitingForStock: false, ...(l.prescriptionItem ? { prescriptionItem: l.prescriptionItem, prescriptionRev: 1 } : {}),
-        flags: l.flags, querySeq: l.querySeq, history: [], createdAt: new Date(created), updatedAt: new Date(Math.min(nowMs, l.lastMs)),
-      };
-      if (l.checkedMs !== undefined) doc.checkedAt = new Date(l.checkedMs);
-      if (l.issueFromMs !== undefined) doc.issueFrom = new Date(l.issueFromMs);
-      if (l.query) doc.query = l.query;
-      if (l.approvedMs !== undefined) doc.approved = { by: pharmacistBy, at: clinicOf(l.approvedMs), version: 1, ...(l.approvedReason ? { reason: l.approvedReason } : {}) };
-      if (l.rejectedMs !== undefined) doc.rejected = { by: pharmacistBy, reason: s.reason, at: clinicOf(l.rejectedMs) };
-      if (l.issued) doc.issued = l.issued;
-      if (l.cancelledMs !== undefined) doc.cancelled = { by: doctor, reason: s.reason, at: clinicOf(l.cancelledMs) };
-      if (l.stoppedMs !== undefined) doc.stopped = { by: doctor, reason: s.q!.ans!.reason, at: clinicOf(l.stoppedMs) };
-      lineDocs.push(doc);
-    }
-
-    const touched = Math.min(nowMs, Math.max(announcedMs, ...ob.lines.map((l) => l.lastMs)));
-    orderDocs.push({
-      _id: orderId, number: ob.number, patient: ob.patient._id, patientUhid: ob.patient.uhid, patientName: ob.patient.name, case: ob.caseId, setting: ob.setting,
-      ...(ob.ward ? { ward: ob.ward } : {}), orderedBy: doctor, priority: pri, note: spec.note ?? '', source: ob.source,
-      ...(ob.prescription ? { prescription: ob.prescription._id, prescriptionRev: 1 } : { prescriptionRev: 0 }), orderedAt: clinicOf(created), announcedAt: new Date(announcedMs),
-      checkRound: round.check.n, checkOpen: round.check.open, ...(round.check.n ? { checkDueAt: new Date(round.check.due!) } : {}),
-      issueRound: round.issue.n, issueOpen: round.issue.open, ...(round.issue.n ? { issueDueAt: new Date(round.issue.due!) } : {}),
-      createdAt: new Date(created), updatedAt: new Date(touched),
-    });
-  }
+  const out = { messageDocs, touchedCases, clockDocs, alertDocs, lineDocs, orderDocs };
+  for (const ob of builds) simulateOrder(ob, { nowMs, targets, doctor, pharmacistBy, clinicOf, takeStock, ...out });
   for (const c of clockDocs) {
     if (c.state === 'running' && c.dueAt.getTime() <= nowMs) throw new Error(`Pharmacy seed: the running ${c.def} clock ${c.detail ?? ''} is already overdue.`);
   }
 
   // ---- Stock documents ---------------------------------------------------------------------------
-  const batchDocs = batchBuilds.map((b) => ({
-    _id: b._id, product: b.product.key, medicine: b.product.medicine, store: b.store, batchNo: b.batchNo, expiry: b.expiry, quantity: b.final, receivedBy: pharmacistBy,
-    receivedAt: b.receivedAt, takes: [], createdAt: b.receivedAt, updatedAt: b.receivedAt,
-  }));
-  for (const b of batchBuilds) {
-    if (b.taken > 0 && !b.first) throw new Error('Pharmacy seed: an issue reached a batch that is not the oldest usable one.');
-    movementDocs.push({
-      _id: new Types.ObjectId(), batch: b._id, product: b.product.key, store: b.store, change: b.final + b.taken, kind: 'received', reason: `Received batch ${b.batchNo}`, by: pharmacistBy,
-      at: b.receivedAt, createdAt: b.receivedAt, updatedAt: b.receivedAt,
-    });
-  }
-  for (const x of [...NEAR_EXPIRY, ...EXPIRED]) if ((pairs.get(`${x.product}|${x.store}`) ?? []).some((b) => b.taken > 0 && !b.first)) throw new Error('Pharmacy seed: an issue reached a special batch.');
-  const lowKeys = [...Object.keys(LOW), `${OUT.product}|${OUT.store}`];
-  const lowAt = lowKeys.map((_, i) => new Date(nowMs - (95 + i * 47) * MIN));
-  const levelDocs = levelRows.map((r) => {
-    const k = `${r.product}|${r.store}`;
-    const i = lowKeys.indexOf(k);
-    return { ...r, ...(i >= 0 ? { lowAlertedAt: lowAt[i] } : {}), createdAt: new Date(clinicMs - 30 * DAY), updatedAt: i >= 0 ? lowAt[i] : new Date(clinicMs - 30 * DAY) };
-  });
-  lowKeys.forEach((k, i) => {
-    const [product, store] = k.split('|') as [string, Store];
-    const left = k === `${OUT.product}|${OUT.store}` ? 0 : LOW[k].left;
-    const level = levelRows.find((r) => r.product === product && r.store === store)!.reorderLevel;
-    alertDocs.push({
-      _id: new Types.ObjectId(), title: `Low stock: ${productByKey(product)!.label} (${STORE_LABEL[store]})`, subtitle: `${left} left · reorder level ${level}`, lowAlertedAt: lowAt[i],
-      type: 'Medication Alert', category: 'Medication', priority: 'Medium', status: 'Pending', dueDateTime: displayDateTime(clinicOf(lowAt[i].getTime())),
-      link: `pharmacy-stock:${product}:${store}`, patientName: '', uhid: '', createdAt: lowAt[i], updatedAt: lowAt[i],
-    });
-  });
+  const { batchDocs, levelDocs, lowKeys, lowAlerts } = stockDocuments(stock, nowMs, clinicMs, clinicOf, pharmacistBy);
+  alertDocs.push(...lowAlerts);
 
   // ---- The week of hourly snapshots ----------------------------------------------------------------
-  const openQuery = (l: Record<string, any>) => ['to-check', 'query', 'approved', 'issued'].includes(l.status) && l.query && !l.query.answer;
-  const today = {
-    ordersToday: orderDocs.filter((o) => o.createdAt.getTime() >= midnight.getTime()).length,
-    toCheck: lineDocs.filter((l) => l.status === 'to-check').length,
-    openQueries: lineDocs.filter(openQuery).length,
-    issuedToday: lineDocs.filter((l) => l.issued && l.issued.realAt.getTime() >= midnight.getTime()).length,
-    lowStock: lowKeys.length,
-  };
-  const r = rng(26092026);
-  const busyAt = (h: number) => Math.max(0.08, Math.sin(((h - 6) / 24) * 2 * Math.PI));
-  const cum = (h: number) => Array.from({ length: h + 1 }, (_, k) => busyAt(k)).reduce((a, b) => a + b, 0);
-  const lastHour = hourOf(new Date(nowMs)).getTime();
-  const hnow = new Date(lastHour).getHours();
-  const points = Array.from({ length: 168 }, (_, k) => {
-    const i = 167 - k;
-    const hour = new Date(lastHour - i * HOUR);
-    const h = hour.getHours();
-    if (i === 0) return { hour, at: new Date(nowMs), ...today };
-    const sameDay = hour.getTime() >= midnight.getTime();
-    const share = sameDay ? cum(h) / cum(hnow) : cum(h) / cum(23);
-    const scale = (full: number, jitter: number) => Math.max(0, Math.round(full * share * (1 + (r() - 0.5) * jitter)));
-    const dayTotal = (base: number) => (sameDay ? base : Math.round(base * (0.85 + r() * 0.35)));
-    return {
-      hour,
-      at: new Date(Math.min(nowMs, hour.getTime() + 59 * MIN)),
-      ordersToday: scale(dayTotal(Math.max(today.ordersToday, 25)), 0.1),
-      toCheck: Math.max(1, Math.round(3 + 6 * busyAt(h) + (r() - 0.5) * 3)),
-      openQueries: Math.max(0, Math.round(1 + 3 * busyAt(h) + (r() - 0.5) * 2)),
-      issuedToday: scale(dayTotal(Math.max(today.issuedToday, 25)), 0.1),
-      lowStock: Math.max(2, 3 + Math.round((r() - 0.3) * 2)),
-    };
-  });
+  const points = buildSnapshots(orderDocs, lineDocs, lowKeys.length, nowMs, midnight);
 
   // ---- Wipe the previous run, then write -----------------------------------------------------------
   const oldCases = await cases.find({ openedBy: 'pharmacy' }).select('number').lean<any[]>();
@@ -1093,7 +1198,7 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
   if (milestones.length) await timeline.insertMany(milestones);
   await snapshots.insertMany(points);
   await counters.updateOne({ key: 'pharmacy-order' }, { $set: { last: orderDocs.length } }, { upsert: true });
-  await counters.updateOne({ key: 'case' }, { $set: { last: caseSerial } }, { upsert: true });
+  await counters.updateOne({ key: 'case' }, { $max: { last: caseSerial } }, { upsert: true });
   // The Pharmacy agent joined these cases: the Coordinator lists it with their agents.
   await cases.updateMany({ _id: { $in: [...joined].map((id) => new Types.ObjectId(id)) } }, { $addToSet: { agents: 'pharmacy' } }, { timestamps: false });
   // The existing demo prescription is in Pharmacy now, at revision 1 with nothing pending, so the reconcile pass has nothing to send.

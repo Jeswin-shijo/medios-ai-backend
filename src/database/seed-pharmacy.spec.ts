@@ -5,6 +5,8 @@ import { after, before, describe, test } from 'node:test';
 import { hourOf } from '../common/utils/series';
 import { validatePayload } from '../modules/coordinator/coordinator-types';
 import { PatientsService } from '../modules/patients/patients.service';
+import { PharmacyPatientsService } from '../modules/pharmacy/pharmacy-patients.service';
+import { DEFAULT_TARGETS } from '../modules/pharmacy/pharmacy-settings.service';
 import { PHARMACY_MESSAGE_TYPES } from '../modules/pharmacy/pharmacy-coordinator.registration';
 import { PharmacyPrescriptionsService } from '../modules/pharmacy/pharmacy-prescriptions.service';
 import { PharmacyReconcileService } from '../modules/pharmacy/pharmacy-reconcile.service';
@@ -20,6 +22,13 @@ import { PHARMACY_DEMO_RX, seedPharmacy } from './seed-pharmacy';
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
 const DAY = '2026-09-26';
+/** The latest 10:00 (local) that is at least five minutes ago and within the 72 hours a kidney result counts: the timing checks do not depend on the hour the suite runs. */
+const PINNED = (() => {
+  const t = new Date();
+  t.setHours(10, 0, 0, 0);
+  return t.getTime() <= Date.now() - 5 * MINUTE ? t.getTime() : t.getTime() - 24 * HOUR;
+})();
+const MIDNIGHT = new Date(PINNED).setHours(0, 0, 0, 0);
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
 
 describe('seedPharmacy', () => {
@@ -45,7 +54,14 @@ describe('seedPharmacy', () => {
 
   // The services wired onto the seeded database, built once (it adds one patient of its own).
   let world: Awaited<ReturnType<typeof buildWorld>> | undefined;
-  const getWorld = async () => (world ??= await buildWorld(m));
+  const getWorld = async () => {
+    if (!world) {
+      world = await buildWorld(m);
+      // The world's own patient is not part of the demo: later reseeds see the same free patients.
+      await m.Patient.deleteOne({ _id: world.patientId });
+    }
+    return world;
+  };
 
   const chest = async () => {
     const visit = (await m.ErVisit.find().lean<any[]>().exec()).find((v) => /Pressure in the chest/.test(v.complaintText ?? ''))!;
@@ -74,11 +90,11 @@ describe('seedPharmacy', () => {
     await quiet(async () => {
       await seedBeds(DAY);
       await seedCoordinator(DAY);
-      await seedEr(DAY);
-      await seedLab(DAY);
+      await seedEr(DAY, PINNED);
+      await seedLab(DAY, PINNED);
     });
-    seededAt = Date.now();
-    log = await quiet(() => seedPharmacy(DAY));
+    seededAt = PINNED;
+    log = await quiet(() => seedPharmacy(DAY, PINNED));
   });
 
   after(async () => {
@@ -123,8 +139,8 @@ describe('seedPharmacy', () => {
       assert.equal(o.checkOpen, waitingCheck.length > 0, `${o.number} checkOpen`);
       assert.equal(o.issueOpen, waitingIssue.length > 0, `${o.number} issueOpen`);
       assert.ok(o.checkRound >= 1);
-      if (waitingCheck.length) assert.equal(o.checkDueAt.getTime(), Math.min(...waitingCheck.map((l) => l.enteredCheckAt.getTime() + { stat: 15, urgent: 60, routine: 240 }[o.priority as 'stat'] * MINUTE)));
-      if (waitingIssue.length) assert.equal(o.issueDueAt.getTime(), Math.min(...waitingIssue.map((l) => l.issueFrom.getTime() + { stat: 15, urgent: 60, routine: 240 }[o.priority as 'stat'] * MINUTE)));
+      if (waitingCheck.length) assert.equal(o.checkDueAt.getTime(), Math.min(...waitingCheck.map((l) => l.enteredCheckAt.getTime() + DEFAULT_TARGETS.check[o.priority as 'stat'] * MINUTE)));
+      if (waitingIssue.length) assert.equal(o.issueDueAt.getTime(), Math.min(...waitingIssue.map((l) => l.issueFrom.getTime() + DEFAULT_TARGETS.issue[o.priority as 'stat'] * MINUTE)));
     }
     // Issued lines carry what they took, a movement and an announcement.
     for (const l of lines.filter((x) => x.issued)) {
@@ -216,7 +232,7 @@ describe('seedPharmacy', () => {
     // The first open admission case (by number) whose patient has a Patient record.
     const wardCases = await m.Case.find({ kind: 'ipd', state: 'open', openedBy: { $ne: 'er' } }).sort({ number: 1 }).lean<any[]>().exec();
     let first: any;
-    for (const c of wardCases) if (!first && (await m.Patient.exists({ _id: c.patient }).exec())) first = c;
+    for (const c of wardCases) if (!first && (await m.Patient.exists({ _id: c.patient, address: { $ne: 'Seed: pharmacy demo' } }).exec())) first = c;
     assert.ok(first, 'an admitted patient with a record');
     const patient = (await m.Patient.findById(first.patient).lean<any>().exec())!;
     assert.ok(patient.allergies.includes('Penicillin'));
@@ -338,6 +354,32 @@ describe('seedPharmacy', () => {
     assert.equal(new Set(counter.map((v) => v.orderNumber)).size, 5);
   });
 
+  test('the eGFR 26 and 27 patients have a released Kidney function report, and a live recheck keeps their kidney flags', async () => {
+    const w = await getWorld();
+    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport);
+    const reports = await m.LabTestReport.find({ labLine: /^pharmacy-demo:/ }).lean<any[]>().exec();
+    assert.equal(reports.length, 2);
+    const seen: number[] = [];
+    for (const r of reports) {
+      assert.equal(r.testName, 'Kidney function');
+      assert.ok(r.groups[0].parameters.some((q: any) => q.name === 'Creatinine' && typeof q.result === 'number'));
+      assert.ok(Date.now() - r.updatedAt.getTime() < 72 * HOUR && r.updatedAt.getTime() <= PINNED, 'inside the 72 h window, not after now');
+      const patient = (await m.Patient.findOne({ uhid: r.uhid }).lean<any>().exec())!;
+      const f = await facts.facts(String(patient._id));
+      seen.push(f.egfr!);
+      assert.equal(f.kidneyStatus, 'known');
+      // The kidney flags of that patient's lines as seeded.
+      const lines = await m.PharmacyLine.find({ patient: patient._id }).lean<any[]>().exec();
+      const before = lines.map((l) => [String(l._id), JSON.stringify((l.flags ?? []).filter((x: any) => x.kind === 'kidney'))]);
+      assert.ok(before.some(([, k]) => k !== '[]'), 'a kidney flag is seeded');
+      const results = await w.orders.recheckPatient(String(patient._id), 'order');
+      assert.deepEqual(results.map((x) => String(x.line._id)), [], 'a live recheck changes nothing');
+      const after = (await m.PharmacyLine.find({ patient: patient._id }).lean<any[]>().exec()).map((l) => [String(l._id), JSON.stringify((l.flags ?? []).filter((x: any) => x.kind === 'kidney'))]);
+      assert.deepEqual(after, before);
+    }
+    assert.deepEqual(seen.sort(), [26, 27]);
+  });
+
   test('no patient name in any seeded pharmacy message', async () => {
     const names = (await m.Patient.find().lean<any[]>().exec()).map((p) => p.name);
     const msgs = await m.AgentMessage.find({ from: 'pharmacy' }).lean<any[]>().exec();
@@ -349,6 +391,13 @@ describe('seedPharmacy', () => {
       assert.match(msg.summary, /^MO-\d{4}/);
       assert.ok(!/MHK2\d{9}/.test(text), 'no UHID');
     }
+    // Alert words and links, and what a clock is about, carry no name either (the alert's own patient fields are the only place a name is kept).
+    for (const a of await m.TaskAlertItem.find({ link: /^pharmacy-/ }).lean<any[]>().exec()) {
+      for (const n of names) assert.ok(!`${a.title} ${a.link}`.includes(n), `"${n}" in the alert ${a.link}`);
+      if (a.link.startsWith('pharmacy-stock:')) assert.ok(!a.subtitle.includes('For '));
+      else for (const n of names) assert.ok(!a.subtitle.includes(n), `"${n}" in the subtitle of ${a.link}`);
+    }
+    for (const c of await m.Clock.find({ def: /^pharmacy-/ }).lean<any[]>().exec()) for (const n of names) assert.ok(!(c.detail ?? '').includes(n), `"${n}" in a clock detail`);
   });
 
   test('every seeded pharmacy message carries the payload its type declares, and every pharmacy clock has a detail', async () => {
@@ -387,7 +436,16 @@ describe('seedPharmacy', () => {
     // Unrelated data survives a rerun.
     await m.Prescription.create({ uhid: 'MHK202500399', type: 'Mine', items: [] });
     const before = [await m.PharmacyOrder.countDocuments().exec(), await m.PharmacyLine.countDocuments().exec(), await m.Case.countDocuments().exec(), await m.Prescription.countDocuments({ type: PHARMACY_DEMO_RX }).exec()];
-    await quiet(() => seedPharmacy(DAY));
+    // A case an earlier run opened for the pharmacy is cleared and opened again: no order is left pointing at a missing case.
+    const used = new Set((await m.PharmacyOrder.distinct('case').exec()).map(String));
+    const labOpd = (await m.Case.find({ openedBy: 'lab', kind: 'opd' }).lean<any[]>().exec()).find((c) => used.has(String(c._id)));
+    if (labOpd) await m.Case.updateOne({ _id: labOpd._id }, { $set: { openedBy: 'pharmacy' } });
+    await quiet(() => seedPharmacy(DAY, PINNED));
+    for (const o of await m.PharmacyOrder.find().lean<any[]>().exec()) {
+      assert.ok(await m.Case.exists({ _id: o.case }).exec(), `${o.number} has its case`);
+      assert.ok(await m.PharmacyLocation.exists({ case: o.case }).exec(), `${o.number} has its location`);
+    }
+    for (const l of await m.PharmacyLocation.find().lean<any[]>().exec()) assert.ok(await m.Case.exists({ _id: l.case }).exec());
     assert.deepEqual([await m.PharmacyOrder.countDocuments().exec(), await m.PharmacyLine.countDocuments().exec(), await m.Case.countDocuments().exec(), await m.Prescription.countDocuments({ type: PHARMACY_DEMO_RX }).exec()], before);
     assert.equal(await m.Prescription.countDocuments({ type: 'Mine' }).exec(), 1);
     assert.equal(await m.PharmacyOrder.countDocuments().exec(), (await m.PharmacyOrder.distinct('number').exec()).length);
@@ -462,7 +520,7 @@ describe('seedPharmacy', () => {
     for (const l of c.lines.filter((x) => String(x._id) !== String(enox._id))) assert.equal((await m.PharmacyLine.findById(l._id).lean<any>().exec())!.querySeq, 0);
     // Put the demo back as the seed leaves it.
     await m.LabTestReport.deleteMany({ labLine: 'k1' });
-    await quiet(() => seedPharmacy(DAY));
+    await quiet(() => seedPharmacy(DAY, PINNED));
     assert.equal((await m.PharmacyLine.findById(enox._id).lean<any>().exec())?.querySeq ?? 0, 0, 'ids change on a rerun; the new enoxaparin line has no query');
   });
 
@@ -474,7 +532,7 @@ describe('seedPharmacy', () => {
     assert.equal(last.hour.getTime(), hourOf(new Date(last.at)).getTime());
     assert.equal(last.lowStock, 4);
     assert.equal(last.openQueries, 3);
-    assert.equal(last.ordersToday, (await m.PharmacyOrder.find({ createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) } }).lean().exec()).length);
+    assert.equal(last.ordersToday, (await m.PharmacyOrder.find({ createdAt: { $gte: new Date(MIDNIGHT) } }).lean().exec()).length);
     assert.equal(snaps[0].hour.getTime(), last.hour.getTime() - 167 * HOUR);
   });
 
