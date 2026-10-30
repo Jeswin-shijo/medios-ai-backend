@@ -347,7 +347,7 @@ const ROUTE_WORDS: Record<string, Route> = {
   inhalation: 'inhaled',
 };
 
-function routeFromText(text?: string): Route | null {
+export function routeFromText(text?: string): Route | null {
   if (!text) return null;
   return ROUTE_WORDS[text.trim().toLowerCase()] ?? null;
 }

@@ -40,10 +40,10 @@ describe('prescriptions into Pharmacy', () => {
   });
 
   const save = (items: any[], rev = 1) =>
-    m.Prescription.create({ uhid: w.patientUhid, doctor: DOC.name, items, pharmacyRev: rev, pharmacyBy: { id: DOC.id, name: DOC.name } });
+    m.Prescription.create({ uhid: w.patientUhid, doctor: DOC.name, items, pharmacyRev: rev, pharmacyPending: rev > 0 ? true : undefined, pharmacyBy: { id: DOC.id, name: DOC.name } });
   /** What the controller's save does on an edit: a new revision. */
   const edit = async (id: string, items: any[]) => {
-    await m.Prescription.collection.updateOne({ _id: new Types.ObjectId(id) }, { $set: { items, pharmacyBy: { id: DOC.id, name: DOC.name } }, $inc: { pharmacyRev: 1 } });
+    await m.Prescription.collection.updateOne({ _id: new Types.ObjectId(id) }, { $set: { items, pharmacyPending: true, pharmacyBy: { id: DOC.id, name: DOC.name } }, $inc: { pharmacyRev: 1 } });
   };
   const orderOf = (id: unknown) => m.PharmacyOrder.findOne({ prescription: id }).lean<any>().exec();
   const linesOf = (orderId: unknown) => m.PharmacyLine.find({ order: orderId }).sort({ _id: 1 }).lean<any[]>().exec();
@@ -133,6 +133,9 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal(old.status, 'cancelled');
     assert.ok(old.query.answer);
     assert.equal(old.query.answer.outcome, 'cancel');
+    const alert = await m.TaskAlertItem.findOne({ link: `pharmacy-line:${String(line._id)}` }).lean<any>().exec();
+    assert.equal(alert.status, 'Completed');
+    assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
   });
 
   test('an unconfirmed red allergy on a prescription line is held at once in an allergy query and never appears in To check', async () => {
@@ -162,6 +165,24 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal((await rec.reconcile()).prescriptions, 0);
   });
 
+  test('reconcile (g) skips a synced prescription, picks up a pending one, and stops re-syncing one with no Active item', async () => {
+    const rec = new PharmacyReconcileService(m.PharmacyOrder, m.PharmacyLine, m.Clock, m.AgentMessage, w.orders, w.checks, s.issue, s.stock, m.Prescription, svc);
+    const synced = await save([item('Tab Amlodipine 5 mg', '5 mg')]);
+    await svc.sync(String(synced._id));
+    const empty = await save([item('Tab Metformin 500 mg', '500 mg', 'BD', '5 days', { status: 'Paused' })]);
+    const pending = await save([item('Tab Telmisartan 40 mg', '40 mg')]);
+    await m.Prescription.collection.updateMany({}, { $set: { updatedAt: new Date(Date.now() - 5 * 60_000) } });
+    const calls: string[] = [];
+    const real = svc.sync.bind(svc);
+    svc.sync = async (id: string) => (calls.push(id), real(id));
+    assert.equal((await rec.reconcile()).prescriptions, 1);
+    assert.deepEqual([...calls].sort(), [String(empty._id), String(pending._id)].sort());
+    assert.equal(await orderOf(pending._id).then((o) => o.prescriptionRev), 1);
+    calls.length = 0;
+    assert.equal((await rec.reconcile()).prescriptions, 0);
+    assert.deepEqual(calls, []);
+  });
+
   test('reconcile (g) leaves a prescription at revision 0 alone, and catches up an edit', async () => {
     const rec = new PharmacyReconcileService(m.PharmacyOrder, m.PharmacyLine, m.Clock, m.AgentMessage, w.orders, w.checks, s.issue, s.stock, m.Prescription, svc);
     const old = await save([item('Tab Amlodipine 5 mg', '5 mg')], 0);
@@ -176,16 +197,87 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal((await orderOf(rx._id)).prescriptionRev, 2);
   });
 
-  test('two syncs of one revision at once create its lines once', async () => {
+  test('two first-revision syncs truly contend: one is busy, one order, lines made once', async () => {
     const rx = await save([item('Tab Amlodipine 5 mg', '5 mg'), item('Tab Metformin 500 mg', '500 mg', 'BD', '5 days')]);
     const results = await Promise.all([svc.sync(String(rx._id)), svc.sync(String(rx._id))]);
-    assert.ok(results.includes('synced'));
+    assert.deepEqual([...results].sort(), ['busy', 'synced']);
     const orders = await m.PharmacyOrder.find({ prescription: rx._id }).lean().exec();
     assert.equal(orders.length, 1);
     assert.equal((await linesOf(orders[0]._id)).length, 2);
-    // A later call settles whatever the loser left.
+  });
+
+  test('three syncs after an edit: exactly one synced, no duplicate lines', async () => {
+    const rx = await save([item('Tab Amlodipine 5 mg', '5 mg')]);
     await svc.sync(String(rx._id));
-    assert.equal((await linesOf(orders[0]._id)).length, 2);
+    await edit(String(rx._id), [item('Tab Amlodipine 5 mg', '10 mg'), item('Tab Metformin 500 mg', '500 mg', 'BD', '5 days')]);
+    const results = await Promise.all([svc.sync(String(rx._id)), svc.sync(String(rx._id)), svc.sync(String(rx._id))]);
+    assert.equal(results.filter((r) => r === 'synced').length, 1);
+    const order = await orderOf(rx._id);
+    const open = (await linesOf(order._id)).filter((l) => l.status === 'to-check');
+    assert.equal(open.length, 2);
+  });
+
+  test('a live claim gives busy; a lapsed claim re-runs a half-applied revision without duplicate lines', async () => {
+    const rx = await save([item('Tab Amlodipine 5 mg', '5 mg'), item('Tab Metformin 500 mg', '500 mg', 'BD', '5 days')]);
+    await svc.sync(String(rx._id));
+    const order = await orderOf(rx._id);
+    await m.PharmacyOrder.collection.updateOne({ _id: order._id }, { $set: { prescriptionRev: 0, syncingUntil: new Date(Date.now() + 30_000) } });
+    assert.equal(await svc.sync(String(rx._id)), 'busy');
+    await m.PharmacyOrder.collection.updateOne({ _id: order._id }, { $set: { syncingUntil: new Date(Date.now() - 1000) } });
+    assert.equal(await svc.sync(String(rx._id)), 'synced');
+    assert.equal((await linesOf(order._id)).length, 2);
+    const after = await orderOf(rx._id);
+    assert.equal(after.prescriptionRev, 1);
+    assert.equal(after.syncingUntil, undefined);
+  });
+
+  test('Y34: an over-long sync does not release a newer claim or set the revision', async () => {
+    const rx = await save([item('Tab Amlodipine 5 mg', '5 mg')]);
+    await svc.sync(String(rx._id));
+    const order = await orderOf(rx._id);
+    await edit(String(rx._id), [item('Tab Amlodipine 5 mg', '10 mg')]);
+    const newer = new Date(Date.now() + 120_000);
+    const real = w.orders.announceOrdered.bind(w.orders);
+    (w.orders as any).announceOrdered = async (o: any) => {
+      // While this sync is still running, its claim lapsed and another sync took over.
+      await m.PharmacyOrder.collection.updateOne({ _id: order._id }, { $set: { syncingUntil: newer } });
+      return real(o);
+    };
+    assert.equal(await svc.sync(String(rx._id)), 'busy');
+    const after = await orderOf(rx._id);
+    assert.equal(after.prescriptionRev, 1);
+    assert.equal(new Date(after.syncingUntil).getTime(), newer.getTime());
+  });
+
+  test('an ER-case prescription line, once approved, still gets no issue clock', async () => {
+    await w.openEr();
+    const rx = await save([item('Tab Amlodipine 5 mg', '5 mg')]);
+    await svc.sync(String(rx._id));
+    const [line] = await linesOf((await orderOf(rx._id))._id);
+    await w.checks.approve(PHARM, String(line._id), {});
+    assert.equal((await w.lineDoc(String(line._id))).status, 'approved');
+    assert.equal((await w.clocksOf('pharmacy-issue')).length, 0);
+  });
+
+  test('a prescription with no Active item and no order makes no order and stops being pending', async () => {
+    const rx = await save([item('Tab Amlodipine 5 mg', '5 mg', 'OD', '30 days', { status: 'Paused' })]);
+    assert.equal(await svc.sync(String(rx._id)), 'current');
+    assert.equal(await orderOf(rx._id), null);
+    assert.equal((await m.Prescription.findById(rx._id).lean<any>().exec()).pharmacyPending, undefined);
+  });
+
+  test('a prescription with no patient record is warned about once and stops being pending', async () => {
+    const rx = await m.Prescription.create({ uhid: 'MHK999999999', items: [item('Tab Amlodipine 5 mg', '5 mg')], pharmacyRev: 1, pharmacyPending: true, pharmacyBy: { id: DOC.id, name: DOC.name } });
+    const warned: string[] = [];
+    (svc as any).logger = { warn: (x: string) => warned.push(x), error: () => undefined };
+    assert.equal(await svc.sync(String(rx._id)), 'current');
+    assert.equal(warned.length, 1);
+    assert.equal((await m.Prescription.findById(rx._id).lean<any>().exec()).pharmacyPending, undefined);
+  });
+
+  test('an unlisted line stores its route in lower case', async () => {
+    assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml') as any, 1).route, 'oral');
+    assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml', 'OD', '3 days', { route: 'Topical' }) as any, 1).route, '');
   });
 
   test('status reports each item: not sent, or its line with the red and amber flags', async () => {
@@ -206,7 +298,7 @@ describe('prescriptions into Pharmacy', () => {
     const calls: string[] = [];
     const stub = { sync: async (id: string) => void calls.push(id) } as unknown as PharmacyPrescriptionsService;
     const rxService = new PrescriptionsService(m.Prescription, stub);
-    const created = await rxService.create({ uhid: w.patientUhid, items: [], pharmacyRev: 50, pharmacyBy: { id: 'x', name: 'Mallory' } } as any, DOC);
+    const created = await rxService.create({ uhid: w.patientUhid, items: [], pharmacyRev: 50, pharmacyPending: false, pharmacyBy: { id: 'x', name: 'Mallory' } } as any, DOC);
     assert.equal(created.pharmacyRev, 1);
     assert.equal(created.pharmacyBy?.name, DOC.name);
     const stale = await rxService.update(String(created._id), { additionalInstructions: 'a', pharmacyRev: 1, pharmacyBy: { id: 'x', name: 'Mallory' } } as any, PHARM);
@@ -215,6 +307,17 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal(again.pharmacyRev, 3);
     assert.equal((await m.Prescription.findById(created._id).lean<any>().exec()).pharmacyBy.name, DOC.name);
     assert.equal(calls.length, 3);
+    assert.equal(created.pharmacyPending, true);
+  });
+
+  test('two concurrent saves advance the stored revision twice (an atomic increment, not read plus one)', async () => {
+    const rxService = new PrescriptionsService(m.Prescription, { sync: async () => 'current' } as unknown as PharmacyPrescriptionsService);
+    const created = await rxService.create({ uhid: w.patientUhid, items: [] } as any, DOC);
+    await Promise.all([
+      rxService.update(String(created._id), { additionalInstructions: 'a' } as any, DOC),
+      rxService.update(String(created._id), { additionalInstructions: 'b' } as any, DOC),
+    ]);
+    assert.equal((await m.Prescription.findById(created._id).lean<any>().exec()).pharmacyRev, 3);
   });
 
   test('check-interactions uses the Pharmacy rules: warfarin with metronidazole gives one "Red: Raises INR sharply (warfarin with metronidazole)"; metformin with cimetidine gives none', async () => {

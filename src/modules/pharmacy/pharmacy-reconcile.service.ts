@@ -147,6 +147,8 @@ export class PharmacyReconcileService {
       { announcedAt: { $exists: false }, createdAt: { $lt: new Date(Date.now() - GRACE_MS) } },
       (o) => `announcing order ${o.number}`,
       async (o) => {
+        // Y35: an order with no lines (a prescription sync that has not added them yet) is not announced.
+        if (!(await this.lines.exists({ order: o._id }).exec())) return false;
         const doc = await this.orderDocs.findById(o._id).exec();
         return doc ? this.orders.announceOrdered(doc) : false;
       },
@@ -353,18 +355,17 @@ export class PharmacyReconcileService {
   // ---------- (g) a saved prescription Pharmacy has not caught up with ----------
 
   /**
-   * A prescription whose revision is above its order's (or that has no order yet), untouched for 30 s, is synced.
-   * Revision 0 (saved before Pharmacy existed) is never swept in.
+   * A prescription still marked pending (its latest revision not yet handled by Pharmacy), untouched for 30 s,
+   * is synced. Sync clears the mark, so the branch's candidates shrink as it repairs. Revision 0 (saved before
+   * Pharmacy existed) is never marked.
    */
   private syncPrescriptions(): Promise<number> {
     return this.scan<PrescriptionDocument & Row>(
       'prescriptions',
       this.rxs,
-      { pharmacyRev: { $gt: 0 }, updatedAt: { $lt: new Date(Date.now() - GRACE_MS) } },
+      { pharmacyPending: true, updatedAt: { $lt: new Date(Date.now() - GRACE_MS) } },
       (r) => `syncing prescription ${String(r._id)}`,
       async (r) => {
-        const order = await this.orderDocs.findOne({ prescription: r._id }).select('prescriptionRev').lean<{ prescriptionRev: number }>().exec();
-        if (order && order.prescriptionRev >= r.pharmacyRev) return false;
         return (await this.prescriptions.sync(String(r._id))) === 'synced';
       },
     );

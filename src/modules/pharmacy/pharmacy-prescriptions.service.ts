@@ -5,7 +5,7 @@ import { PatientsService } from '../patients/patients.service';
 import { Prescription, PrescriptionDocument, PrescriptionItem } from '../prescriptions/schemas/prescription.schema';
 import { UserRole } from '../users/schemas/user.schema';
 import { Actor } from '../beds/actor';
-import { Frequency, matchMedicine, parseDose, parseDurationDays, pickProduct, quantityFor, routeFor } from './pharmacy-catalogue';
+import { Frequency, matchMedicine, parseDose, parseDurationDays, pickProduct, quantityFor, routeFor, routeFromText } from './pharmacy-catalogue';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { LineSpec, PharmacyOrdersService } from './pharmacy-orders.service';
 import { startKey } from './pharmacy-rounds';
@@ -38,7 +38,7 @@ export function prescriptionLine(item: PrescriptionItem & { _id?: unknown }, rev
       dose: null,
       doseText: item.dose,
       unit: '',
-      route: item.route ?? '',
+      route: routeFromText(item.route) ?? '',
       frequency: item.frequency,
       durationDays: days,
       quantity: null,
@@ -92,17 +92,17 @@ export class PharmacyPrescriptionsService {
     const first = await this.load(prescriptionId);
     if (!first || first.pharmacyRev <= 0) return 'current';
     let order: PharmacyOrderDocument | null = await this.orderDocs.findOne({ prescription: first._id }).exec();
-    if (order && order.prescriptionRev >= first.pharmacyRev) return 'current';
+    if (order && order.prescriptionRev >= first.pharmacyRev) return this.settled(first, 'current');
     if (!order) {
       // Nothing to dispense and nothing sent before: no order is made.
-      if (!first.items.some((i) => i.status === 'Active')) return 'current';
+      if (!first.items.some((i) => i.status === 'Active')) return this.settled(first, 'current');
       let patient;
       try {
         patient = await this.patients.findOne(first.uhid);
       } catch (e) {
         if (e instanceof NotFoundException) {
           this.logger.warn(`Prescription ${String(first._id)} has no patient record for its UHID; not sent to Pharmacy`);
-          return 'current';
+          return this.settled(first, 'current');
         }
         throw e;
       }
@@ -124,21 +124,30 @@ export class PharmacyPrescriptionsService {
     }
     const orderId = order._id;
     const now = Date.now();
+    const until = new Date(now + CLAIM_MS);
     const claimed = await this.orderDocs
-      .updateOne({ _id: orderId, $or: [{ syncingUntil: { $exists: false } }, { syncingUntil: null }, { syncingUntil: { $lt: new Date(now) } }] }, { $set: { syncingUntil: new Date(now + CLAIM_MS) } })
+      .updateOne({ _id: orderId, $or: [{ syncingUntil: { $exists: false } }, { syncingUntil: null }, { syncingUntil: { $lt: new Date(now) } }] }, { $set: { syncingUntil: until } })
       .exec();
     if (!claimed.modifiedCount) return 'busy';
     try {
       // Read again under the claim: an edit may have landed since the first read.
       const rx = await this.load(prescriptionId);
       const fresh = await this.orderDocs.findById(orderId).exec();
-      if (!rx || !fresh || fresh.prescriptionRev >= rx.pharmacyRev) return 'current';
+      if (!rx || !fresh || fresh.prescriptionRev >= rx.pharmacyRev) return rx ? await this.settled(rx, 'current') : 'current';
       await this.apply(rx, fresh);
-      await this.orderDocs.updateOne({ _id: orderId }, { $set: { prescriptionRev: rx.pharmacyRev } }).exec();
-      return 'synced';
+      // Guarded on this sync's own claim: one that overran its claim never lowers the revision or frees a newer claim.
+      const done = await this.orderDocs.updateOne({ _id: orderId, syncingUntil: until }, { $set: { prescriptionRev: rx.pharmacyRev }, $unset: { syncingUntil: '' } }).exec();
+      if (!done.modifiedCount) return 'busy';
+      return await this.settled(rx, 'synced');
     } finally {
-      await this.orderDocs.updateOne({ _id: orderId }, { $unset: { syncingUntil: '' } }).exec();
+      await this.orderDocs.updateOne({ _id: orderId, syncingUntil: until }, { $unset: { syncingUntil: '' } }).exec();
     }
+  }
+
+  /** Clears the pending mark of the revision just handled (not a newer one saved meanwhile). */
+  private async settled(rx: PrescriptionDocument, result: SyncResult): Promise<SyncResult> {
+    await this.rxs.updateOne({ _id: rx._id, pharmacyRev: rx.pharmacyRev }, { $unset: { pharmacyPending: '' } }).exec();
+    return result;
   }
 
   private async apply(rx: PrescriptionDocument, order: PharmacyOrderDocument): Promise<void> {

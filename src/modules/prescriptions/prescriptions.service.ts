@@ -26,6 +26,7 @@ function withoutPharmacyFields<T extends object>(body: T): T {
   const clean = { ...body } as Record<string, unknown>;
   delete clean.pharmacyRev;
   delete clean.pharmacyBy;
+  delete clean.pharmacyPending;
   return clean as T;
 }
 
@@ -52,7 +53,7 @@ export class PrescriptionsService {
   }
 
   async create(data: Partial<Prescription>, actor: Actor): Promise<PrescriptionDocument> {
-    const rx = new this.prescriptionModel({ ...withoutPharmacyFields(data), pharmacyRev: 1, pharmacyBy: { id: actor.id, name: actor.name } });
+    const rx = new this.prescriptionModel({ ...withoutPharmacyFields(data), pharmacyRev: 1, pharmacyPending: true, pharmacyBy: { id: actor.id, name: actor.name } });
     const saved = await rx.save();
     await this.handOff(saved);
     return saved;
@@ -63,6 +64,7 @@ export class PrescriptionsService {
     Object.assign(rx, withoutPharmacyFields(updates));
     // An atomic increment of the stored value: a stale copy of the record can never repeat a revision.
     rx.$inc('pharmacyRev', 1);
+    rx.pharmacyPending = true;
     rx.pharmacyBy = { id: actor.id, name: actor.name };
     const saved = await rx.save();
     await this.handOff(saved);

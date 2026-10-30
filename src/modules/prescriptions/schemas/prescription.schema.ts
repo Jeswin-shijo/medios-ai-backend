@@ -87,6 +87,10 @@ export class Prescription {
   /** The doctor who saved the current revision, set by the server from the signed-in user. */
   @Prop({ type: { id: String, name: String }, _id: false })
   pharmacyBy?: { id: string; name: string };
+
+  /** Set with every revision, cleared by Pharmacy's sync once that revision is handled. Reconcile reads only these. */
+  @Prop({ type: Boolean, index: { sparse: true } })
+  pharmacyPending?: boolean;
 }
 
 export const PrescriptionSchema = SchemaFactory.createForClass(Prescription);

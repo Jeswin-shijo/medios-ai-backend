@@ -74,6 +74,16 @@ describe('PharmacyReconcileService', () => {
     assert.equal(await sent('pharmacy.ordered'), 1);
   });
 
+  test('Y35: an order with no lines is never announced', async () => {
+    const patient = await m.Patient.findById(w.patientId).lean<any>().exec();
+    const empty = await w.orders.createOrder({ patient, priority: 'routine', orderedBy: DOC, source: 'order' });
+    await wipe('pharmacy.ordered');
+    const r = await pass();
+    assert.equal(r.ordered, 0);
+    assert.equal(await sent('pharmacy.ordered'), 0);
+    assert.equal((await orderDoc(String(empty._id))).announcedAt, undefined);
+  });
+
   test('a line flipped to To check with no round (a crash before publish) gets a round and a running check clock', async () => {
     const v = await order();
     const oid = new Types.ObjectId(v.id);
