@@ -67,6 +67,8 @@ export function prescriptionLine(item: PrescriptionItem & { _id?: unknown }, rev
 const same = (a: LineSpec, l: PharmacyLineDocument | PharmacyLine) =>
   (a.medicine ? a.medicine === l.medicine : !l.medicine && (a.freeName ?? '').toLowerCase() === (l.freeName ?? '').toLowerCase()) &&
   (a.dose !== null ? a.dose === l.dose : l.dose === null && (a.doseText ?? '').toLowerCase() === (l.doseText ?? '').toLowerCase()) &&
+  a.product === l.product &&
+  a.route === l.route &&
   a.frequency === l.frequency &&
   a.durationDays === l.durationDays;
 
@@ -154,31 +156,36 @@ export class PharmacyPrescriptionsService {
     const rev = rx.pharmacyRev;
     const by = this.by(rx);
     const actor: Actor = { id: by.id, name: by.name, role: UserRole.DOCTOR };
-    // Earlier revisions' unissued lines go (this closes an open query and publishes pharmacy.cancelled).
-    const old = await this.lines.find({ order: order._id, status: { $in: OPEN }, $or: [{ prescriptionRev: { $lt: rev } }, { prescriptionRev: { $exists: false } }] }).sort({ _id: 1 }).exec();
-    for (const l of old) await this.cancelOld(actor, String(l._id));
-
-    // An Active item with no line of this revision yet: carry over an identical issued line, else add a line.
+    // An Active item with no line of this revision yet: carry over an identical earlier line (issued, or not yet issued with its status),
+    // else add a line. Earlier unissued lines no item matches are cancelled (this closes an open query and publishes pharmacy.cancelled).
     const specs = rx.items.filter((i) => i.status === 'Active').map((i) => prescriptionLine(i, rev));
     const mine = await this.lines.find({ order: order._id, prescriptionRev: rev }).exec();
     const have = new Set(mine.map((l) => l.prescriptionItem));
+    const old = await this.lines.find({ order: order._id, status: { $in: OPEN }, $or: [{ prescriptionRev: { $lt: rev } }, { prescriptionRev: { $exists: false } }] }).sort({ _id: 1 }).exec();
     const issued = await this.lines.find({ order: order._id, status: 'issued', prescriptionRev: { $lt: rev } }).sort({ _id: 1 }).exec();
+    const pool = [...issued, ...old];
     const taken = new Set<string>();
     const add: LineSpec[] = [];
     for (const spec of specs) {
       if (have.has(spec.prescriptionItem)) continue;
-      const match = issued.find((l) => !taken.has(String(l._id)) && same(spec, l));
+      const match = pool.find((l) => !taken.has(String(l._id)) && same(spec, l));
       if (match) {
-        taken.add(String(match._id));
-        await this.lines.updateOne({ _id: match._id, status: 'issued' }, { $set: { prescriptionItem: spec.prescriptionItem, prescriptionRev: rev } }).exec();
-        continue;
+        // Guarded on the status and version just read: a line that moved on meanwhile is not carried (it is re-added below).
+        const carried = await this.lines
+          .updateOne({ _id: match._id, status: match.status, version: match.version }, { $set: { prescriptionItem: spec.prescriptionItem, prescriptionRev: rev } })
+          .exec();
+        if (carried.modifiedCount) {
+          taken.add(String(match._id));
+          continue;
+        }
       }
       add.push(spec);
     }
+    for (const l of old) if (!taken.has(String(l._id))) await this.cancelOld(actor, String(l._id));
     if (add.length) await this.orders.addLines(order, add);
 
-    // Every line of this revision still waiting: held at once on an unconfirmed red allergy, then re-checked with the others.
-    const waiting = await this.lines.find({ order: order._id, prescriptionRev: rev, status: 'to-check' }).sort({ _id: 1 }).exec();
+    // Every new line of this revision still waiting (carried lines keep their state and are rechecked below): held at once on an unconfirmed red allergy, then re-checked with the others.
+    const waiting = (await this.lines.find({ order: order._id, prescriptionRev: rev, status: 'to-check' }).sort({ _id: 1 }).exec()).filter((l) => !taken.has(String(l._id)));
     await this.checks.holdAtOnce(waiting);
     await this.orders.recheckPatient(String(order.patient), 'prescription', { skip: waiting.map((l) => String(l._id)) });
     await this.orders.announceOrdered(order);

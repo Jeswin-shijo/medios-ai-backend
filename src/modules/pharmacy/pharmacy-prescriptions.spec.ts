@@ -121,6 +121,56 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal((await w.sent('pharmacy.cancelled')).length, 1);
   });
 
+  test('M3: a save with no item change keeps approved counter lines approved, re-opens no allergy query and raises no new alert; changing one dose cancels and re-adds only that item', async () => {
+    const a = item('Tab Amlodipine 5 mg', '5 mg');
+    const b = item('Tab Metformin 500 mg', '500 mg', 'BD', '5 days');
+    const rx = await save([a, b]);
+    await svc.sync(String(rx._id));
+    const order = await orderOf(rx._id);
+    const [la, lb] = await linesOf(order._id);
+    await w.checks.approve(PHARM, String(la._id), {});
+    await w.checks.approve(PHARM, String(lb._id), {});
+    const alertsBefore = await m.TaskAlertItem.countDocuments({});
+    const toCheckBefore = (await w.sent('pharmacy.to-check')).length;
+
+    await edit(String(rx._id), [{ ...a, _id: new Types.ObjectId() }, { ...b, _id: new Types.ObjectId() }]);
+    assert.equal(await svc.sync(String(rx._id)), 'synced');
+    const lines = await linesOf(order._id);
+    assert.equal(lines.length, 2, 'no line was added');
+    assert.deepEqual(lines.map((l) => l.status), ['approved', 'approved']);
+    assert.deepEqual(lines.map((l) => l.prescriptionRev), [2, 2]);
+    assert.equal((await w.sent('pharmacy.cancelled')).length, 0);
+    assert.equal((await w.sent('pharmacy.to-check')).length, toCheckBefore, 'nothing is announced again');
+    assert.equal(await m.TaskAlertItem.countDocuments({}), alertsBefore, 'no new alert');
+    assert.equal(lines.filter((l) => l.query).length, 0, 'no query was opened');
+
+    // One item's dose changes: only that item is cancelled and re-added.
+    await edit(String(rx._id), [{ ...a, _id: new Types.ObjectId() }, { ...b, dose: '1000 mg', _id: new Types.ObjectId() }]);
+    assert.equal(await svc.sync(String(rx._id)), 'synced');
+    const after = await linesOf(order._id);
+    assert.equal(after.length, 3);
+    assert.equal(String(after[0]._id), String(la._id));
+    assert.equal(after[0].status, 'approved');
+    assert.equal(after[1].status, 'cancelled');
+    assert.deepEqual([after[2].medicine, after[2].dose, after[2].status], ['metformin', 1000, 'to-check']);
+  });
+
+  test('M4: an issued oral line whose route changes to IV is not carried over; an IV line is added', async () => {
+    const a = item('Tab Paracetamol 500 mg', '500 mg', 'TDS', '3 days');
+    const rx = await save([a]);
+    await svc.sync(String(rx._id));
+    const order = await orderOf(rx._id);
+    const [first] = await linesOf(order._id);
+    await m.PharmacyLine.collection.updateOne({ _id: first._id }, { $set: { status: 'issued', issued: { realAt: new Date() } } });
+    await edit(String(rx._id), [{ ...a, route: 'IV', _id: new Types.ObjectId() }]);
+    await svc.sync(String(rx._id));
+    const lines = await linesOf(order._id);
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].prescriptionRev, 1, 'the oral line was not carried to the new revision');
+    assert.equal(lines[1].route, 'iv');
+    assert.equal(lines[1].status, 'to-check');
+  });
+
   test('editing closes an open query on an earlier line', async () => {
     const rx = await save([item('Tab Amlodipine 5 mg', '5 mg')]);
     await svc.sync(String(rx._id));
