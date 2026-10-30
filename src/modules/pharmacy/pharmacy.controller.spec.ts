@@ -6,7 +6,7 @@ import { RequestMethod } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { UserRole } from '../users/schemas/user.schema';
-import { AnswerDto, PharmacyOrderDto } from './dto/pharmacy.dto';
+import { AnswerDto, IssueDto, PharmacyOrderDto, ReceiveDto } from './dto/pharmacy.dto';
 import { PharmacyController } from './pharmacy.controller';
 import { MEDICINES } from './pharmacy-catalogue';
 
@@ -106,6 +106,14 @@ describe('PharmacyController bodies', () => {
     await assert.rejects(() => pipe.transform({ querySeq: '1', outcome: 'keep', reason: 'x' }, { type: 'body', metatype: AnswerDto }), BadRequestException);
     const ok = (await pipe.transform({ querySeq: 1, outcome: 'keep', reason: 'x' }, { type: 'body', metatype: AnswerDto })) as AnswerDto;
     assert.equal(ok.querySeq, 1);
+  });
+  test('M9: a batch number may contain dots and inner spaces; its ends are trimmed; other characters are refused', async () => {
+    const issue = (batchNo: string) => pipe.transform({ batchNo }, { type: 'body', metatype: IssueDto }) as Promise<IssueDto>;
+    assert.equal((await issue('B.12 34')).batchNo, 'B.12 34');
+    assert.equal((await issue('  AB/12-3  ')).batchNo, 'AB/12-3');
+    const rec = (await pipe.transform({ product: 'aspirin-tab-300', store: 'main', batchNo: 'L.5 9', expiry: '2027-01-01', quantity: 5 }, { type: 'body', metatype: ReceiveDto })) as ReceiveDto;
+    assert.equal(rec.batchNo, 'L.5 9');
+    for (const bad of ['', '   ', 'B;12', 'x'.repeat(41)]) await assert.rejects(() => issue(bad), BadRequestException, bad);
   });
   test('an order with 11 lines is a 400', async () => {
     const line = { medicine: 'ibuprofen', product: 'ibuprofen-tab-400', dose: 400, route: 'oral', frequency: 'TDS', durationDays: 5 };

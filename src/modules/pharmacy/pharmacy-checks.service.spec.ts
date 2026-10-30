@@ -64,6 +64,15 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     assert.equal(done.status, 'approved');
   });
 
+  test('M7: a query question is 1 to 300 characters in the service too', async () => {
+    await w.openEr();
+    const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [aspirin300] });
+    const id = v.lines[0].id;
+    await assert.rejects(() => w.checks.query(PHARM, id, { kind: 'other', question: 'q'.repeat(301) }), { status: 400, message: 'Write the question in 1 to 300 characters' });
+    const ok = await w.checks.query(PHARM, id, { kind: 'other', question: 'q'.repeat(300) });
+    assert.equal(ok.status, 'query');
+  });
+
   test('an unconfirmed red clash needs a reason; an amber allergy needs Allergy reviewed', async () => {
     await w.openEr();
     const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [{ ...enoxaparin60, frequency: 'STAT', durationDays: undefined }, ibuprofen400] });

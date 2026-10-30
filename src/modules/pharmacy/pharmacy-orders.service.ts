@@ -511,12 +511,13 @@ export class PharmacyOrdersService {
       const views = await this.lineViews(rows);
       return views.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
     }
+    // Open queries first (soonest due), then those answered in the last 24 h (latest first): each fetched in its own order, never limited before it.
     const since = new Date(Date.now() - DAY_MS);
-    const rows = await this.lines
-      .find({ query: { $exists: true }, $or: [{ 'query.answer': { $exists: false } }, { 'query.answer.realAt': { $gte: since } }] })
-      .limit(WORKLIST_LIMIT)
-      .exec();
-    const views = await this.lineViews(rows);
+    const openRows = await this.lines.find({ query: { $exists: true }, 'query.answer': { $exists: false } }).sort({ 'query.dueAt': 1, _id: 1 }).limit(WORKLIST_LIMIT).exec();
+    const answeredRows = openRows.length >= WORKLIST_LIMIT
+      ? []
+      : await this.lines.find({ query: { $exists: true }, 'query.answer.realAt': { $gte: since } }).sort({ 'query.answer.realAt': -1, _id: -1 }).limit(WORKLIST_LIMIT - openRows.length).exec();
+    const views = await this.lineViews([...openRows, ...answeredRows]);
     const open = views.filter((v) => !v.query?.answer).sort((a, b) => a.query!.dueAt.localeCompare(b.query!.dueAt));
     const answered = views.filter((v) => v.query?.answer).sort((a, b) => b.query!.answer!.at.localeCompare(a.query!.answer!.at));
     return [...open, ...answered];

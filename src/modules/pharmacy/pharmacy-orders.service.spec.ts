@@ -499,6 +499,20 @@ describe('PharmacyOrdersService', () => {
     assert.equal(list.length, 301, 'the counter lines fill their own limit of 300');
   });
 
+  test('M6: with more than 300 answered queries an open query is still listed, first', async () => {
+    const v = await service.order(DOC, { patientId, priority: 'routine', lines: [{ ...aspirin300, frequency: 'OD', durationDays: 1 }] });
+    const now = new Date();
+    const by = { id: 'd', name: 'D' };
+    const base = { order: v.id, patient: patientId, medicine: 'aspirin', product: 'aspirin-tab-300', dose: 300, unit: 'mg', route: 'oral', frequency: 'OD', durationDays: 1, status: 'issued', flags: [], version: 1 };
+    const q = (seq: number, answered: boolean) => ({ seq, kind: 'other', question: 'q', by, at: now, openedRealAt: now, dueAt: now, suggestions: [], ...(answered ? { answer: { outcome: 'keep', by, reason: 'r', at: now, realAt: now } } : {}) });
+    await m.PharmacyLine.insertMany(Array.from({ length: 305 }, () => ({ ...base, query: q(1, true) })));
+    const open = await m.PharmacyLine.create({ ...base, status: 'query', query: q(1, false) });
+    const list = await service.worklist('queries');
+    assert.ok(list.some((l) => l.id === String(open._id)), 'the open query is listed');
+    assert.equal(list[0].id, String(open._id), 'open queries come first');
+    assert.equal(list.length, 300);
+  });
+
   test('order() leaves no empty order behind when adding the lines fails', async () => {
     const model: any = m.PharmacyLine;
     const original = model.create;

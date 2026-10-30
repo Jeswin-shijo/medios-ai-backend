@@ -94,7 +94,7 @@ export class PharmacyChecksService {
     // Stock queries come only from Out of stock: a wait must never skip the approve gates.
     if (input.kind === 'stock') throw new BadRequestException('A stock query opens only from Out of stock');
     const question = cleanText(input.question);
-    if (question.length < 1 || question.length > 500) throw new BadRequestException('Write the question in 1 to 500 characters');
+    if (question.length < 1 || question.length > 300) throw new BadRequestException('Write the question in 1 to 300 characters');
     const line = await this.queries.load(lineId);
     if (line.status !== 'to-check') throw new ConflictException('This line is not waiting to be checked');
     const opened = await this.queries.openQuery(lineId, { kind: input.kind, question, by: { id: actor.id, name: actor.name }, markChecked: true });

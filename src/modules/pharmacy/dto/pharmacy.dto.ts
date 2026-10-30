@@ -31,6 +31,8 @@ const ROUTES = Object.keys(ROUTE_LABEL);
 const STORE_KEYS = ['main', 'er'];
 const SETTINGS = ['ER', 'Ward', 'OPD'];
 const OUTCOMES = ['change', 'keep', 'cancel', 'stop', 'switch', 'wait'];
+/** A batch number: 1 to 40 characters of letters, digits, ".", "/" and "-", with single inner spaces allowed (the ends are trimmed first). */
+const BATCH_NO = /^[A-Za-z0-9./-](?:[A-Za-z0-9./ -]{0,38}[A-Za-z0-9./-])?$/;
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 
 /** The value must not be 0 (an adjustment that changes nothing). */
@@ -122,14 +124,14 @@ export class QueryDto {
 
 export class IssueDto {
   @ApiPropertyOptional({ enum: STORE_KEYS }) @IsOptional() @IsIn(STORE_KEYS) store?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @Matches(/^[A-Za-z0-9/-]{1,40}$/, { message: 'batchNo must be 1 to 40 characters of letters, digits, "/" or "-"' }) batchNo?: string;
+  @ApiPropertyOptional() @IsOptional() @Transform(trim) @IsString() @Matches(BATCH_NO, { message: 'batchNo must be 1 to 40 characters of letters, digits, ".", "/", "-" or inner spaces' }) batchNo?: string;
   @ApiPropertyOptional({ minimum: 1, maximum: 10000 }) @IsOptional() @IsInt() @Min(1) @Max(10000) quantity?: number;
 }
 
 export class ReceiveDto {
   @ApiProperty() @IsString() @MinLength(1) @MaxLength(80) product: string;
   @ApiProperty({ enum: STORE_KEYS }) @IsIn(STORE_KEYS) store: string;
-  @ApiProperty() @IsString() @Matches(/^[A-Za-z0-9/-]{1,40}$/, { message: 'batchNo must be 1 to 40 characters of letters, digits, "/" or "-"' }) batchNo: string;
+  @ApiProperty() @Transform(trim) @IsString() @Matches(BATCH_NO, { message: 'batchNo must be 1 to 40 characters of letters, digits, ".", "/", "-" or inner spaces' }) batchNo: string;
   @ApiProperty({ example: '2027-12-31' }) @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'expiry must be YYYY-MM-DD' }) expiry: string;
   @ApiProperty({ minimum: 1, maximum: 10000 }) @IsInt() @Min(1) @Max(10000) quantity: number;
 }
