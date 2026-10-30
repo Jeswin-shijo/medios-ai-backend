@@ -472,4 +472,32 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal((await w.lineDoc(id)).querySeq, 1);
     assert.equal((await w.lineDoc(id)).approved, undefined, 'a Kept line has no stale approval');
   });
+
+  test('Keep never confirms an allergy that arrived while a kidney query was open: it closes its query, returns the line to To check and holds the new allergy', async () => {
+    const { case: theCase } = await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    await w.labResulted(String(theCase._id), 'rft');
+    assert.equal((await w.lineDoc(id)).query.kind, 'kidney');
+    // A red allergy arrives while the kidney query is open (no second query opens on the line).
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['enoxaparin'] } });
+    await w.orders.recheckPatient(w.patientId, 'order');
+    const mid = await w.lineDoc(id);
+    assert.equal(mid.query.kind, 'kidney');
+    assert.equal(mid.flags.filter((f: any) => f.kind === 'allergy' && f.severity === 'red').length, 1);
+    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Renal-dosed already' });
+    const line = await w.lineDoc(id);
+    const allergy = line.flags.find((f: any) => f.kind === 'allergy');
+    assert.equal(allergy.confirmed, undefined);
+    assert.equal(line.flags.find((f: any) => f.kind === 'kidney').confirmed.reason, 'Renal-dosed already');
+    // The kidney query is closed (clock met, one query-answered) and a new allergy query is open with its clock running.
+    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.answer], ['query', 'allergy', 2, undefined]);
+    assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
+    assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
+    assert.equal((await alertOf(id)).querySeq, 2);
+    // The pharmacist can't approve it: it is in a query, and the allergy still needs a doctor.
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'x' }), { status: 409 });
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'to-check' } });
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'x' }), { status: 409, message: 'A doctor must confirm this allergy first. Query the doctor.' });
+  });
 });

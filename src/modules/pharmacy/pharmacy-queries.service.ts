@@ -102,6 +102,7 @@ export class PharmacyQueries {
               openedRealAt: now,
               dueAt,
               suggestions: q.suggestions ?? [],
+              redKeys: ((line.flags ?? []) as Flag[]).filter((f) => f.severity === 'red' && !(f.confirmed && f.version === line.version)).map((f) => f.key),
             },
           },
         },
@@ -217,12 +218,20 @@ export class PharmacyQueries {
     // Every message names the query it concerns: the clock ref is never read from the line at send time.
     const events: LineEvent[] = [{ type: 'pharmacy.query-answered', lineId, extra: { querySeq: q.seq, outcome }, dedupeKey: `pharmacy.query-answered:${lineId}:${q.seq}` }];
     const unset: Record<string, ''> = {};
+    let afterKeep = false;
         const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, extra: { querySeq: q.seq }, dedupeKey: `${type}:${lineId}` });
     const confirmOf = (c?: { reason: string }) => (c && cleanText(c.reason) ? { by, reason: cleanText(c.reason) } : undefined);
 
     if (outcome === 'keep') {
-      // The doctor's reason confirms every red flag still unconfirmed, whatever its kind.
-      const flags = ((line.flags ?? []) as Flag[]).map((f) => (f.severity === 'red' && !(f.confirmed && f.version === line.version) ? { ...f, confirmed: { by: actor.name, reason, at: clinicNow() } } : f));
+      // Keep confirms only the red flags the line carried when the query opened (an old query without the record: its own kind),
+      // and an allergy only on an allergy query: an allergy that arrived meanwhile is never confirmed implicitly.
+      const seen = (f: Flag) => (q.redKeys ? q.redKeys.includes(f.key) : f.kind === q.kind || f.kind !== 'allergy');
+      const flags = ((line.flags ?? []) as Flag[]).map((f) =>
+        f.severity === 'red' && !(f.confirmed && f.version === line.version) && seen(f) && (f.kind !== 'allergy' || q.kind === 'allergy')
+          ? { ...f, confirmed: { by: actor.name, reason, at: clinicNow() } }
+          : f,
+      );
+      afterKeep = needsDoctor(flags, line.version).length > 0;
       guard.flags = line.flags;
       set.flags = flags;
       if (!issued) {
@@ -300,7 +309,8 @@ export class PharmacyQueries {
     }
     await this.completeQueryAlert(lineId, q.seq);
     await this.orders.publish(String(line.order), events);
-    if (outcome === 'wait' && set.status === 'to-check') await this.holdAtOnce([line]);
+    // A red allergy Keep did not confirm gets its own allergy query for a doctor.
+    if ((outcome === 'wait' && set.status === 'to-check') || afterKeep) await this.holdAtOnce([line]);
     return this.orders.line(lineId);
   }
 

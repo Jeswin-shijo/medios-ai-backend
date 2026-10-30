@@ -36,6 +36,8 @@ export interface LineQuery {
   openedRealAt: Date;
   dueAt: Date;
   suggestions: string[];
+  /** Keys of the unconfirmed red flags on the line when the query opened: the most a Keep answer can confirm. */
+  redKeys?: string[];
   answer?: { outcome: string; by: By; reason: string; at: Date; realAt: Date; replacement?: ReplacementSpec };
 }
 
