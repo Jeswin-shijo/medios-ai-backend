@@ -33,6 +33,9 @@ import { LabSnapshot, LabSnapshotDocument, LabSnapshotSchema } from '../modules/
 import { PharmacyOrder, PharmacyOrderDocument, PharmacyOrderSchema } from '../modules/pharmacy/schemas/pharmacy-order.schema';
 import { PharmacyLine, PharmacyLineDocument, PharmacyLineSchema } from '../modules/pharmacy/schemas/pharmacy-line.schema';
 import { PharmacyLocation, PharmacyLocationDocument, PharmacyLocationSchema } from '../modules/pharmacy/schemas/pharmacy-location.schema';
+import { PharmacyBatch, PharmacyBatchDocument, PharmacyBatchSchema } from '../modules/pharmacy/schemas/pharmacy-batch.schema';
+import { PharmacyMovement, PharmacyMovementDocument, PharmacyMovementSchema } from '../modules/pharmacy/schemas/pharmacy-movement.schema';
+import { PharmacyStockLevel, PharmacyStockLevelDocument, PharmacyStockLevelSchema } from '../modules/pharmacy/schemas/pharmacy-stock-level.schema';
 import { LabTestReport, LabReportDocument, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 import { Appointment, AppointmentDocument, AppointmentSchema } from '../modules/appointments/schemas/appointment.schema';
@@ -98,6 +101,9 @@ export function models() {
     PharmacyOrder: model(PharmacyOrder, PharmacyOrderSchema) as Model<PharmacyOrderDocument>,
     PharmacyLine: model(PharmacyLine, PharmacyLineSchema) as Model<PharmacyLineDocument>,
     PharmacyLocation: model(PharmacyLocation, PharmacyLocationSchema) as Model<PharmacyLocationDocument>,
+    PharmacyBatch: model(PharmacyBatch, PharmacyBatchSchema) as Model<PharmacyBatchDocument>,
+    PharmacyMovement: model(PharmacyMovement, PharmacyMovementSchema) as Model<PharmacyMovementDocument>,
+    PharmacyStockLevel: model(PharmacyStockLevel, PharmacyStockLevelSchema) as Model<PharmacyStockLevelDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
     Appointment: model(Appointment, AppointmentSchema) as Model<AppointmentDocument>,

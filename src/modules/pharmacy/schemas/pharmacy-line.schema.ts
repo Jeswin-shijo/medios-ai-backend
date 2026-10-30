@@ -106,6 +106,8 @@ export class PharmacyLine {
     realAt: Date;
     store: string;
     batches: { batch: string; batchNo: string; expiry: string; qty: number }[];
+    /** What was handed over, in the product's issue unit (the only record for an unlisted medicine, which has no batches). */
+    quantity?: number;
     announcedAt?: Date;
   };
   @Prop({ type: Object }) cancelled?: { by: By; reason: string; at: Date };

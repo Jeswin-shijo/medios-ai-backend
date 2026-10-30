@@ -200,7 +200,8 @@ export class PharmacyRounds {
     if (ev.type === 'pharmacy.query') Object.assign(base, { querySeq: q?.seq ?? line.querySeq, kind: q?.kind ?? 'other', queryDueAt: q?.dueAt ?? new Date() });
     if (ev.type === 'pharmacy.query-answered') Object.assign(base, { querySeq: q?.seq ?? line.querySeq, outcome: q?.answer?.outcome ?? 'keep' });
     if (ev.type === 'pharmacy.issued') {
-      const qty = line.issued?.batches?.reduce((n, b) => n + b.qty, 0) ?? line.quantity ?? 0;
+      const fromBatches = line.issued?.batches?.length ? line.issued.batches.reduce((n, b) => n + b.qty, 0) : undefined;
+      const qty = line.issued?.quantity ?? fromBatches ?? line.quantity ?? 0;
       Object.assign(base, { store: line.issued?.store ?? '', quantity: qty });
     }
     if (ev.type === 'pharmacy.cancelled' || ev.type === 'pharmacy.stopped') Object.assign(base, { querySeq: line.querySeq });
