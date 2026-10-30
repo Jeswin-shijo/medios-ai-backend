@@ -10,6 +10,7 @@ import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { PHARMACY_CLOCKS, PHARMACY_MESSAGE_TYPES, PharmacyCoordinatorRegistration } from './pharmacy-coordinator.registration';
+import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
 import { PharmacySettingsService } from './pharmacy-settings.service';
@@ -34,7 +35,7 @@ describe('PharmacyCoordinatorRegistration', () => {
       m.PharmacyOrder, m.PharmacyLine, m.PharmacyLocation, m.CoordinatorCounter,
       new PatientsService(m.Patient), cases, messages, new PharmacySettingsService(new SettingsService(m.HospitalSettings)), new PharmacyPatientsService(m.Patient, m.LabTestReport),
     );
-    new PharmacyCoordinatorRegistration(registry, orders, messages).onModuleInit();
+    new PharmacyCoordinatorRegistration(registry, orders, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, new PharmacySettingsService(new SettingsService(m.HospitalSettings)))).onModuleInit();
   });
 
   test('the pharmacy agent registers its 12 message types, 3 clocks, the locked rule and the location handlers', async () => {
@@ -48,7 +49,7 @@ describe('PharmacyCoordinatorRegistration', () => {
     assert.deepEqual([rule.agent, rule.default, rule.locked, rule.label], ['pharmacy', true, true, 'Medicine safety checks']);
     assert.equal(rule.description, 'Check every medicine order for allergy, clashes, doubles, dose and kidney function');
 
-    for (const t of ['er.arrived', 'bed.assigned', 'bed.transferred', 'er.left', 'bed.discharged']) {
+    for (const t of ['lab.resulted', 'er.arrived', 'bed.assigned', 'bed.transferred', 'er.left', 'bed.discharged']) {
       assert.ok(registry.subscribers(t).some((s) => s.agent === 'pharmacy'), t);
     }
     const def = registry.definitions().find((d) => d.key === 'pharmacy')!;

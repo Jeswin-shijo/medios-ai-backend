@@ -261,9 +261,19 @@ export class PharmacyOrdersService {
     });
   }
 
+  /** Checks doctor input against the list and turns it into line specs (with quantity), for a Change or a Switch. */
+  validateInputs(inputs: LineInput[]): LineSpec[] {
+    return this.validate(inputs);
+  }
+
+  /** The rule flags of specs for a patient, leaving out the lines in `exclude` (a line being changed must not clash with itself). */
+  async draftSpecFlags(patientId: string, specs: LineSpec[], exclude: string[] = []): Promise<FlagDraft[][]> {
+    return this.draftFlags(patientId, await this.facts.facts(patientId), specs, exclude);
+  }
+
   /** The rule flags of each spec, checked against the patient's active lines and the other specs. */
-  private async draftFlags(patientId: string, facts: PatientFactsView, specs: LineSpec[]): Promise<FlagDraft[][]> {
-    const active = (await this.activeLines(patientId)).map(asCheckLine);
+  private async draftFlags(patientId: string, facts: PatientFactsView, specs: LineSpec[], exclude: string[] = []): Promise<FlagDraft[][]> {
+    const active = (await this.activeLines(patientId)).filter((l) => !exclude.includes(String(l._id))).map(asCheckLine);
     const mine = specs.map(asCheckLine);
     return specs.map((_, i) => checkLine(mine[i], facts, [...active, ...mine.filter((__, j) => j !== i)]));
   }

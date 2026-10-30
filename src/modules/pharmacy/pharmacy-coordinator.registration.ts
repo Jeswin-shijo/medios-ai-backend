@@ -3,6 +3,7 @@ import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
 import { medicineLabel } from './pharmacy-rounds';
+import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 
 type Fields = MessageTypeDef['payload'];
@@ -140,6 +141,7 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     private readonly registry: AgentRegistry,
     private readonly orders: PharmacyOrdersService,
     private readonly messages: MessagesService,
+    private readonly checks: PharmacyChecksService,
   ) {}
 
   onModuleInit(): void {
@@ -152,6 +154,8 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
       messageTypes: MESSAGE_TYPES,
       clocks: PHARMACY_CLOCKS,
       handles: [
+        // A released kidney test re-checks the doses that depend on it.
+        { type: 'lab.resulted', handler: (id) => this.checks.onKidneyResult(id) },
         { type: 'er.arrived', handler: (id) => this.locate(id, () => ({ area: 'ER' })) },
         { type: 'bed.assigned', handler: (id) => this.locate(id, (p) => ({ area: 'Ward', ward: str(p.ward) ?? undefined })) },
         { type: 'bed.transferred', handler: (id) => this.locate(id, (p) => ({ area: 'Ward', ward: str(p.ward) ?? undefined })) },

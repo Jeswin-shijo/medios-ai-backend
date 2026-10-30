@@ -14,6 +14,7 @@ import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { PharmacyCoordinatorRegistration } from './pharmacy-coordinator.registration';
+import { PharmacyChecksService } from './pharmacy-checks.service';
 import { LineInput, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
 import { startKey } from './pharmacy-rounds';
@@ -71,7 +72,7 @@ describe('PharmacyOrdersService', () => {
       m.PharmacyOrder, m.PharmacyLine, m.PharmacyLocation, m.CoordinatorCounter,
       new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport),
     );
-    new PharmacyCoordinatorRegistration(registry, service, messages).onModuleInit();
+    new PharmacyCoordinatorRegistration(registry, service, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, service, cases, messages, settings)).onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });
     patientId = String(p._id);
     patientUhid = p.uhid;
