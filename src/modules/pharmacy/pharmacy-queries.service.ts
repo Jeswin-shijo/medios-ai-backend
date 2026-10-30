@@ -219,6 +219,7 @@ export class PharmacyQueries {
     const events: LineEvent[] = [{ type: 'pharmacy.query-answered', lineId, extra: { querySeq: q.seq, outcome }, dedupeKey: `pharmacy.query-answered:${lineId}:${q.seq}` }];
     const unset: Record<string, ''> = {};
     let afterKeep = false;
+    let newRedAfterKeep: Flag | undefined;
         const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, extra: { querySeq: q.seq }, dedupeKey: `${type}:${lineId}` });
     const confirmOf = (c?: { reason: string }) => (c && cleanText(c.reason) ? { by, reason: cleanText(c.reason) } : undefined);
 
@@ -232,6 +233,8 @@ export class PharmacyQueries {
           : f,
       );
       afterKeep = needsDoctor(flags, line.version).length > 0;
+      // An issued line: a red flag that arrived during the query (not an allergy, which is held above) gets its own question.
+      if (issued) newRedAfterKeep = flags.find((f) => f.severity === 'red' && f.kind !== 'allergy' && !(f.confirmed && f.version === line.version));
       guard.flags = line.flags;
       set.flags = flags;
       if (!issued) {
@@ -311,6 +314,7 @@ export class PharmacyQueries {
     await this.orders.publish(String(line.order), events);
     // A red allergy Keep did not confirm gets its own allergy query for a doctor.
     if ((outcome === 'wait' && set.status === 'to-check') || afterKeep) await this.holdAtOnce([line]);
+    else if (newRedAfterKeep) await this.askAboutFlag(lineId, newRedAfterKeep);
     return this.orders.line(lineId);
   }
 
@@ -321,7 +325,10 @@ export class PharmacyQueries {
   async ensureReplacement(lineId: string): Promise<PharmacyLineDocument | null> {
     const line = await this.load(lineId);
     const r = line.query?.answer?.replacement;
-    if (!r || (await this.lines.exists({ _id: r.id }).exec())) return null;
+    if (!r) return null;
+    const existing = await this.lines.findById(r.id).exec();
+    // Created but never completed (a crash or error after the add): finish it. Anything further along is left alone.
+    if (existing) return existing.status === 'to-check' ? this.finishReplacement(line, existing) : null;
     const order = await this.orderOf(line);
     const spec: LineSpec = {
       id: r.id, replaces: lineId, medicine: r.medicine, product: r.product, dose: r.dose, unit: r.unit, route: r.route, frequency: r.frequency,
@@ -334,9 +341,22 @@ export class PharmacyQueries {
       if ((e as { code?: number }).code === 11000) return null;
       throw e;
     }
-    await this.orders.recheckPatient(String(line.patient), 'order', { skip: [String(added._id)] });
+    return this.finishReplacement(line, added);
+  }
+
+  /** The steps after a replacement exists, all repeatable: announce it to check first (so its round opens), then recheck and hold. */
+  private async finishReplacement(old: PharmacyLineDocument, added: PharmacyLineDocument): Promise<PharmacyLineDocument> {
+    await this.orders.publish(String(old.order), [{ type: 'pharmacy.to-check', lineId: String(added._id), dedupeKey: startKey('pharmacy.to-check', added) }]);
+    await this.orders.recheckPatient(String(old.patient), 'order', { skip: [String(added._id)] });
     await this.holdAtOnce([added]);
-    await this.orders.publish(String(line.order), [{ type: 'pharmacy.to-check', lineId: String(added._id), dedupeKey: startKey('pharmacy.to-check', added) }]);
     return added;
+  }
+
+  /** Y24: a red flag left unconfirmed on an issued line gets its own query, of the flag's kind. */
+  private async askAboutFlag(lineId: string, flag: Flag): Promise<void> {
+    const kind: QueryKind = flag.kind === 'kidney' ? 'kidney' : flag.kind === 'clash' ? 'clash' : flag.kind === 'dose' ? 'dose' : 'other';
+    const egfr = /eGFR (\d+)/.exec(flag.text)?.[1];
+    const question = kind === 'kidney' && egfr ? `Dose may need lowering for kidney function (eGFR ${egfr}). Please review.` : `${flag.text}. Please review.`;
+    await this.openQuery(lineId, { kind, question, by: PHARMACY_AGENT });
   }
 }

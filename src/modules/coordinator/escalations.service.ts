@@ -165,7 +165,8 @@ export class EscalationsService {
       escalation: { id: String(e._id), ladder: e.ladder, step: e.step, titleKey, titleLabel: v.label, holderNames: v.names },
     };
     const link = alertLink ?? `escalation:${e._id}`;
-    const filter = create || !alertLink || !e.alert ? { link } : { _id: e.alert };
+    // A step up reclaims the alert only while it still belongs to this escalation (a newer query may have reused it).
+    const filter = create || !alertLink || !e.alert ? { link } : { _id: e.alert, 'escalation.id': String(e._id) };
     const alert = await this.alertModel
       .findOneAndUpdate(
         filter,
