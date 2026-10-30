@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Model, isValidObjectId } from 'mongoose';
 import type { Priority as CasePriority } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
@@ -36,6 +36,8 @@ export interface LineEvent {
 }
 
 const MIN_MS = 60_000;
+/** How many times syncRounds re-reads after a guarded write changed or lost a race. */
+const SYNC_TRIES = 5;
 const SUMMARY_MAX = 140;
 const WHAT: Record<LineMessageType, string> = {
   'pharmacy.to-check': 'to check',
@@ -86,6 +88,8 @@ type Clock = 'check' | 'issue';
  * its number, so a message about an older round can never move or stop a newer one.
  */
 export class PharmacyRounds {
+  private readonly logger = new Logger(PharmacyRounds.name);
+
   constructor(
     private readonly orders: Model<PharmacyOrderDocument>,
     private readonly lines: Model<PharmacyLineDocument>,
@@ -99,7 +103,8 @@ export class PharmacyRounds {
     let order = isValidObjectId(orderId) ? await this.orders.findById(orderId).exec() : null;
     if (!order) throw new NotFoundException('Pharmacy order not found');
     const targets = await this.settings.targets();
-    for (let pass = 0; pass < 3; pass++) {
+    let settled = false;
+    for (let pass = 0; pass < SYNC_TRIES; pass++) {
       const waiting = await this.lines
         .find({ order: order._id, status: { $in: ['to-check', 'approved'] } })
         .select('status enteredCheckAt issueFrom waitingForStock')
@@ -114,8 +119,12 @@ export class PharmacyRounds {
       const a = await this.step(order, 'check', checkDue, closed);
       const b = await this.step(order, 'issue', issueDue, closed);
       order = (await this.orders.findById(order._id).exec()) ?? order;
-      if (!a && !b) break;
+      if (!a && !b) {
+        settled = true;
+        break;
+      }
     }
+    if (!settled) this.logger.warn(`Rounds of order ${orderId} did not settle after ${SYNC_TRIES} tries`);
     const created = order.createdAt ?? new Date();
     return {
       state: {
@@ -128,24 +137,24 @@ export class PharmacyRounds {
     };
   }
 
-  /** One clock of one order. Returns whether a guarded write took effect. */
+  /** One clock of one order. Returns true when something changed or a guarded write lost a race (the caller re-reads and tries again). */
   private async step(order: PharmacyOrderDocument, clock: Clock, due: Date | null, closed: { check?: number; issue?: number }): Promise<boolean> {
     const round = order[`${clock}Round`];
     const open = order[`${clock}Open`];
     const dueAt = order[`${clock}DueAt`];
     if (due && !open) {
-      const r = await this.orders.updateOne({ _id: order._id, [`${clock}Round`]: round, [`${clock}Open`]: false }, { $set: { [`${clock}Round`]: round + 1, [`${clock}Open`]: true, [`${clock}DueAt`]: due } }).exec();
-      return r.modifiedCount > 0;
+      await this.orders.updateOne({ _id: order._id, [`${clock}Round`]: round, [`${clock}Open`]: false }, { $set: { [`${clock}Round`]: round + 1, [`${clock}Open`]: true, [`${clock}DueAt`]: due } }).exec();
+      return true;
     }
     if (due && open) {
       if (same(dueAt, due)) return false;
-      const r = await this.orders.updateOne({ _id: order._id, [`${clock}Round`]: round, [`${clock}Open`]: true }, { $set: { [`${clock}DueAt`]: due } }).exec();
-      return r.modifiedCount > 0;
+      await this.orders.updateOne({ _id: order._id, [`${clock}Round`]: round, [`${clock}Open`]: true }, { $set: { [`${clock}DueAt`]: due } }).exec();
+      return true;
     }
     if (!due && open) {
       const r = await this.orders.updateOne({ _id: order._id, [`${clock}Round`]: round, [`${clock}Open`]: true }, { $set: { [`${clock}Open`]: false } }).exec();
       if (r.modifiedCount > 0) closed[clock] = round;
-      return r.modifiedCount > 0;
+      return true;
     }
     return false;
   }

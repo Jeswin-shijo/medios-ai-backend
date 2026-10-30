@@ -384,4 +384,65 @@ describe('PharmacyOrdersService', () => {
     await assert.rejects(() => service.line('nope'), { status: 404 });
     await assert.rejects(() => service.get(String(new Types.ObjectId())), { status: 404 });
   });
+
+  test('a publish that loses the round guard to a concurrent close re-reads and opens round 2 in the same call', async () => {
+    await openEr();
+    const v = await service.order(DOC, { patientId, priority: 'stat', lines: [aspirin300] });
+    const first: any = await m.PharmacyOrder.findById(v.id).lean();
+    assert.deepEqual([first.checkRound, first.checkOpen], [1, true]);
+    // A due that differs, so publish tries to move round 1's due ...
+    await m.PharmacyOrder.collection.updateOne({ _id: new Types.ObjectId(v.id) }, { $set: { checkDueAt: new Date(Date.now() + 5 * MIN) } });
+    // ... and a concurrent caller closes the round between the read and that write.
+    const model: any = m.PharmacyOrder;
+    const original = model.updateOne;
+    model.updateOne = (...args: unknown[]) => {
+      model.updateOne = original;
+      return { exec: () => m.PharmacyOrder.collection.updateOne({ _id: new Types.ObjectId(v.id) }, { $set: { checkOpen: false } }).then(() => original.apply(model, args).exec()) };
+    };
+    try {
+      await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { enteredCheckAt: new Date(Date.now() + 1000) });
+      const fresh: any = await m.PharmacyLine.findById(v.lines[0].id).lean();
+      await service.publish(v.id, [{ type: 'pharmacy.to-check', lineId: v.lines[0].id, dedupeKey: startKey('pharmacy.to-check', fresh) }]);
+    } finally {
+      model.updateOne = original;
+    }
+    const order: any = await m.PharmacyOrder.findById(v.id).lean();
+    assert.deepEqual([order.checkRound, order.checkOpen], [2, true], 'the waiting line has an open round');
+    const msgs = await sent('pharmacy.to-check');
+    assert.equal(msgs[msgs.length - 1].payload.checkRound, 2);
+    assert.ok((await clocksOf('pharmacy-check')).some((c) => c.ref === `${v.id}:c2` && c.state === 'running'));
+  });
+
+  test('the check worklist sorts STAT first, then red, then oldest, in the database: a STAT line is never dropped past the limit', async () => {
+    const routine = await service.order(DOC, { patientId, priority: 'routine', lines: [{ ...aspirin300, frequency: 'OD', durationDays: 1 }] });
+    const old = new Date(Date.now() - 5 * HOUR);
+    await m.PharmacyLine.insertMany(
+      Array.from({ length: 301 }, () => ({ order: routine.id, patient: patientId, medicine: 'aspirin', product: 'aspirin-tab-300', dose: 300, unit: 'mg', route: 'oral', frequency: 'OD', durationDays: 1, status: 'to-check', enteredCheckAt: old, flags: [] })),
+    );
+    const stat = await service.order(DOC, { patientId, priority: 'stat', lines: [clopidogrel300] });
+    const list = await service.worklist('check');
+    assert.equal(list.length, 300);
+    assert.equal(list[0].orderNumber, stat.number);
+    // Red before non-red among the rest.
+    await m.PharmacyLine.updateOne({ order: routine.id, status: 'to-check', _id: { $ne: routine.lines[0].id } }, { flags: [{ key: 'dose.single', kind: 'dose', severity: 'red', text: 'x', version: 1 }] });
+    const again = await service.worklist('check');
+    assert.equal(again[0].orderNumber, stat.number);
+    assert.ok(again[1].flags.some((f) => f.severity === 'red'));
+  });
+
+  test('order() leaves no empty order behind when adding the lines fails', async () => {
+    const model: any = m.PharmacyLine;
+    const original = model.create;
+    model.create = async () => {
+      throw new Error('disk full');
+    };
+    try {
+      await assert.rejects(() => service.order(DOC, { patientId, priority: 'routine', lines: [{ ...aspirin300, frequency: 'OD', durationDays: 1 }] }), /disk full/);
+    } finally {
+      model.create = original;
+    }
+    assert.equal(await m.PharmacyOrder.countDocuments(), 0);
+    assert.equal(await m.PharmacyLine.countDocuments(), 0);
+    assert.equal((await sent('pharmacy.ordered')).length, 0);
+  });
 });
