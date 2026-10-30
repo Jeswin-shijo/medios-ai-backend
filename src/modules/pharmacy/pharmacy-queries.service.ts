@@ -227,6 +227,14 @@ export class PharmacyQueries {
           const redKeys = ((fresh.flags ?? []) as Flag[]).filter((f) => f.kind === 'kidney' && f.severity === 'red' && !(f.confirmed && f.version === fresh.version)).map((f) => f.key);
           await this.openQuery(id, { kind: 'kidney', question: kidneyQuestion(kidney), by: PHARMACY_AGENT, redKeys });
         }
+        // Y30: an issued line that a recheck left with a new unconfirmed red flag and no query gets its question at once
+        // (the reconcile pass is the backstop).
+        if (fresh.status === 'issued' && !(kidney && r.reason === 'kidney')) {
+          const now = await this.load(id);
+          const flags = (now.flags ?? []) as Flag[];
+          const asked = r.newRed.find((f) => f.kind !== 'allergy' && flags.some((x) => x.key === f.key && x.severity === 'red' && !(x.confirmed && x.version === now.version)));
+          if (asked && !this.hasOpenQuery(now)) await this.askAboutFlag(id, asked);
+        }
       } catch (e) {
         this.logger.error(`Holding a rechecked line failed: ${e instanceof Error ? e.message : String(e)}`);
       }

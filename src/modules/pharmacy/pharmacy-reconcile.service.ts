@@ -80,12 +80,14 @@ export class PharmacyReconcileService {
     await guard('the queries branch', async () => void (out.queries = await this.repairQueries()));
     await guard('the answers branch', async () => void (out.answers = await this.repairAnswers()));
     await guard('the replacements branch', async () => void (out.replacements = await this.repairReplacements()));
-    await guard('the red flags branch', async () => void (out.holds = (await this.holdOpenAllergies()) + (await this.askIssuedFlags())));
+    // Takes first: a line stuck mid-issue has its claim cleared before any hold could leave the claim behind.
     await guard('the stock takes branch', async () => {
       const t = await this.issue.repairTakes();
       out.takes = t.undone + t.logged;
     });
     await guard('the waiting lines branch', async () => void (out.released = await this.stock.releaseWaitingWithStock()));
+    await guard('the allergy holds branch', async () => void (out.holds += await this.holdOpenAllergies()));
+    await guard('the issued red flags branch', async () => void (out.holds += await this.askIssuedFlags()));
     await guard('the issued branch', async () => void (out.issued = await this.announceIssued()));
     return out;
   }
@@ -182,12 +184,12 @@ export class PharmacyReconcileService {
     );
   }
 
-  /** A running clock whose round is closed (the done message never arrived, or never went out): done for that round only. */
+  /** A running (or expired and never marked met) clock whose round is closed (the done message never arrived, or never went out): done for that round only. */
   private repairDone(): Promise<number> {
     return this.scan<ClockDocument & Row>(
       'done',
       this.clocks,
-      { def: { $in: ['pharmacy-check', 'pharmacy-issue'] }, state: 'running' },
+      { def: { $in: ['pharmacy-check', 'pharmacy-issue'] }, $or: [{ state: 'running' }, { state: 'expired', stoppedAt: { $exists: false } }] },
       (c) => `the closed round of clock ${String(c._id)}`,
       async (c) => {
         const m = ref.exec(c.ref ?? '');
@@ -262,8 +264,9 @@ export class PharmacyReconcileService {
         }
         const key = `pharmacy.query-answered:${m[1]}:${seq}`;
         if (await this.tooSoon({ dedupeKey: key })) return false;
-        await this.orders.publish(String(line.order), [{ type: 'pharmacy.query-answered', lineId: m[1], extra: { querySeq: seq, outcome }, dedupeKey: key }]);
+        // Y31: the alert first, as answer() does: if it fails, the clock still runs and the next pass comes back.
         await this.checks.completeQueryAlert(m[1], seq);
+        await this.orders.publish(String(line.order), [{ type: 'pharmacy.query-answered', lineId: m[1], extra: { querySeq: seq, outcome }, dedupeKey: key }]);
         return true;
       },
     );

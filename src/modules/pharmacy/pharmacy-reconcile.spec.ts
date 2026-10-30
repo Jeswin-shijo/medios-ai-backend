@@ -10,13 +10,13 @@ import { PharmacyReconcileService } from './pharmacy-reconcile.service';
 const aspirin10 = { ...aspirin300, frequency: 'BD', durationDays: 5 };
 const metformin500 = { medicine: 'metformin', product: 'metformin-tab-500', dose: 500, route: 'oral', frequency: 'BD', durationDays: 5 };
 const amlodipine5 = { medicine: 'amlodipine', product: 'amlodipine-tab-5', dose: 5, route: 'oral', frequency: 'OD', durationDays: 5 };
-const aspirin150 = { medicine: 'aspirin', product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'OD', durationDays: 5 };
 
 describe('PharmacyReconcileService', () => {
   const m = models();
   let w: World;
   let s: StockWorld;
   let rec: PharmacyReconcileService;
+  let logged: string[];
 
   before(async () => {
     await connectTestDb();
@@ -29,6 +29,9 @@ describe('PharmacyReconcileService', () => {
     w = await buildWorld(m);
     s = buildStock(m, w);
     rec = new PharmacyReconcileService(m.PharmacyOrder, m.PharmacyLine, m.Clock, m.AgentMessage, w.orders, w.checks, s.issue, s.stock);
+    // The deliberate failures stay out of the test output; tests read what was logged.
+    logged = [];
+    (rec as any).logger = { error: (x: string) => logged.push(x), log: () => undefined, warn: () => undefined };
     await w.openEr();
   });
 
@@ -99,7 +102,7 @@ describe('PharmacyReconcileService', () => {
   });
 
   test('a start message sent a moment ago is not resent (it would be dropped as a duplicate); the next pass repairs it', async () => {
-    const v = await order();
+    await order();
     await m.Clock.deleteMany({});
     await m.PharmacyOrder.collection.updateMany({}, { $set: { updatedAt: old() } });
     await m.PharmacyLine.collection.updateMany({}, { $set: { updatedAt: old() } });
@@ -111,7 +114,6 @@ describe('PharmacyReconcileService', () => {
     await m.AgentMessage.collection.updateMany({ type: 'pharmacy.to-check' }, { $set: { createdAt: old() } });
     assert.equal((await rec.reconcile()).rounds, 1);
     assert.equal((await clocksOf('pharmacy-check')).length, 1);
-    assert.equal(v.lines.length, 1);
   });
 
   test('a running clock of a closed round (a crash before check-done) is stopped by check-done for that round only; the next round keeps running', async () => {
@@ -292,7 +294,6 @@ describe('PharmacyReconcileService', () => {
     assert.equal(String(added.replaces), lineId);
     assert.equal(await m.PharmacyLine.countDocuments({ replaces: new Types.ObjectId(lineId) }), 1);
     assert.deepEqual(await pass(), ZERO);
-    assert.equal(aspirin150.dose, 150);
   });
 
   test('Y21b: an approved or to-check line with an unconfirmed red allergy flag and no query is held at once', async () => {
@@ -358,6 +359,10 @@ describe('PharmacyReconcileService', () => {
     const v = await s.approved([metformin500]);
     await s.issue.issue(PHARM, v.lines[0].id as string, {});
     await order([amlodipine5]);
+    // A second aspirin while one is issued: the issued line is asked at once (Y30), so nothing is left for reconcile.
+    await s.batch('aspirin-tab-300', 'er', 'B1', 100, 100);
+    await s.issue.issue(PHARM, (await s.approved([aspirin10])).lines[0].id as string, {});
+    await order([aspirin10]);
     await w.checks.query(PHARM, (await order([aspirin10])).lines[0].id as string, { kind: 'dose', question: 'Is it right?' });
     await settle();
     const before = await m.AgentMessage.countDocuments({}).exec();
@@ -390,6 +395,7 @@ describe('PharmacyReconcileService', () => {
       assert.equal(out.ordered, 0);
       assert.equal(out.queries, 1);
       assert.equal(out.issued, 1);
+      assert.deepEqual(logged, [`Reconcile: announcing order ${(await orderDoc(bad.id)).number} failed: boom`]);
     } finally {
       (w.orders as any).announceOrdered = orig;
     }
@@ -420,5 +426,106 @@ describe('PharmacyReconcileService', () => {
     } finally {
       (w.orders as any).announceOrdered = orig;
     }
+  });
+  test('Y30: ordering a second aspirin while one is issued opens a query on the issued line at once, with no reconcile pass', async () => {
+    await s.batch('aspirin-tab-300', 'er', 'B1', 100, 100);
+    const issued = (await s.approved([aspirin10])).lines[0].id as string;
+    await s.issue.issue(PHARM, issued, {});
+    await order([aspirin10]);
+    const line = await w.lineDoc(issued);
+    assert.deepEqual([line.status, line.query.kind, line.query.redKeys, line.query.answer], ['issued', 'other', ['double.aspirin'], undefined]);
+    assert.equal((await alertOf(issued)).status, 'Pending');
+    assert.equal((await clocksOf('pharmacy-query')).length, 1);
+    assert.deepEqual(await pass(), ZERO);
+  });
+
+  test('(d) completes the alert before publishing: a failed completion is completed by the next pass, and no alert stays Pending', async () => {
+    const v = await order();
+    const lineId = v.lines[0].id as string;
+    await w.checks.query(PHARM, lineId, { kind: 'dose', question: 'Is this dose right?' });
+    await w.checks.answer(DOC, lineId, { querySeq: 1, outcome: 'keep', reason: 'Dose is right' });
+    const [c] = await clocksOf('pharmacy-query');
+    await m.Clock.collection.updateOne({ _id: c._id }, { $set: { state: 'running' }, $unset: { stoppedAt: '', metMinutes: '' } });
+    await m.TaskAlertItem.updateOne({ link: `pharmacy-line:${lineId}` }, { $set: { status: 'Pending' } });
+    await m.AgentMessage.deleteMany({ type: 'pharmacy.query-answered' });
+    await settle();
+    const real = w.checks.completeQueryAlert.bind(w.checks);
+    (w.checks as any).completeQueryAlert = async () => {
+      throw new Error('db blip');
+    };
+    try {
+      assert.equal((await rec.reconcile()).answers, 0);
+    } finally {
+      (w.checks as any).completeQueryAlert = real;
+    }
+    assert.equal((await clocksOf('pharmacy-query'))[0].state, 'running');
+    assert.equal(await sent('pharmacy.query-answered'), 0);
+    assert.equal((await pass()).answers, 1);
+    assert.equal((await alertOf(lineId)).status, 'Completed');
+    assert.equal((await clocksOf('pharmacy-query'))[0].state, 'met');
+    assert.deepEqual(await pass(), ZERO);
+  });
+
+  test('an expired (escalated) check clock whose done was lost is marked met by the resent done', async () => {
+    const v = await order();
+    await w.checks.approve(PHARM, v.lines[0].id as string, { reason: 'intended' });
+    const [c] = await clocksOf('pharmacy-check');
+    await m.Clock.collection.updateOne({ _id: c._id }, { $set: { state: 'expired' }, $unset: { stoppedAt: '', metMinutes: '' } });
+    await wipe('pharmacy.check-done');
+    assert.equal((await pass()).done, 1);
+    assert.ok((await clocksOf('pharmacy-check'))[0].stoppedAt);
+    assert.deepEqual(await pass(), ZERO);
+  });
+
+  test('issue round: an open round with no clock gets its to-issue resent', async () => {
+    const v = await s.approved([aspirin10]);
+    assert.equal((await clocksOf('pharmacy-issue')).length, 1);
+    await m.Clock.deleteMany({ def: 'pharmacy-issue' });
+    await wipe('pharmacy.to-issue');
+    assert.equal((await pass()).rounds, 1);
+    assert.deepEqual((await clocksOf('pharmacy-issue')).map((c) => [c.state, c.ref]), [['running', `${v.id}:i1`]]);
+    assert.equal(await sent('pharmacy.to-issue'), 1);
+    assert.deepEqual(await pass(), ZERO);
+  });
+
+  test('issue round: a running clock of a closed round gets issue-done for that round', async () => {
+    await s.batch('aspirin-tab-300', 'er', 'B1', 100, 50);
+    const v = await s.approved([aspirin10]);
+    await s.issue.issue(PHARM, v.lines[0].id as string, {});
+    const [c] = await clocksOf('pharmacy-issue');
+    assert.equal(c.state, 'met');
+    await m.Clock.collection.updateOne({ _id: c._id }, { $set: { state: 'running' }, $unset: { stoppedAt: '', metMinutes: '' } });
+    await wipe('pharmacy.issue-done');
+    assert.equal((await pass()).done, 1);
+    assert.equal((await clocksOf('pharmacy-issue'))[0].state, 'met');
+    const dones = await m.AgentMessage.find({ type: 'pharmacy.issue-done' }).lean<any[]>();
+    assert.deepEqual(dones.map((d) => d.payload.issueRound), [1]);
+    assert.deepEqual(await pass(), ZERO);
+  });
+
+  test('issue round: an OPD order has no issue clock, and reconcile starts none', async () => {
+    const v = await order();
+    await m.PharmacyOrder.collection.updateOne({ _id: new Types.ObjectId(v.id) }, { $set: { setting: 'OPD' } });
+    await w.checks.approve(PHARM, v.lines[0].id as string, { reason: 'intended' });
+    assert.deepEqual(await pass(), ZERO);
+    assert.equal((await clocksOf('pharmacy-issue')).length, 0);
+    assert.equal(await sent('pharmacy.to-issue'), 0);
+  });
+
+  test('a line stuck mid-issue is cleared by repairTakes before the allergy hold, so it can be issued after the doctor and pharmacist act', async () => {
+    await s.batch('aspirin-tab-300', 'er', 'B1', 100, 50);
+    const lineId = (await s.approved([aspirin10])).lines[0].id as string;
+    await m.PharmacyLine.collection.updateOne({ _id: new Types.ObjectId(lineId) }, { $set: { issuing: { by: { id: PHARM.id, name: PHARM.name }, store: 'er', realAt: old() } } });
+    await w.redAllergy(lineId);
+    await pass();
+    // The claim is gone before (or with) the hold; any hold left for the next pass arrives on a clean line.
+    assert.equal((await w.lineDoc(lineId)).issuing, undefined);
+    await pass();
+    const line = await w.lineDoc(lineId);
+    assert.deepEqual([line.status, line.query?.kind, line.issuing], ['query', 'allergy', undefined]);
+    await w.checks.answer(DOC, lineId, { querySeq: 1, outcome: 'keep', reason: 'Tolerated before' });
+    await w.checks.approve(PHARM, lineId, { reason: 'intended' });
+    const issued = await s.issue.issue(PHARM, lineId, {});
+    assert.equal(issued.status, 'issued');
   });
 });
