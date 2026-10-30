@@ -326,13 +326,12 @@ export class PharmacyStockService {
     return raised;
   }
 
-  /** Releases the waiting lines of every product that has usable stock in either store now (the repair for a receive that failed before its release). */
+  /** Releases the waiting lines of every product whose stock now covers them (the repair for a receive that failed before its release); each line still needs its full quantity in one store (Y29). */
   async releaseWaitingWithStock(): Promise<number> {
     let released = 0;
     for (const product of await this.lines.distinct('product', { status: 'approved', waitingForStock: true }).exec()) {
       if (!product) continue;
-      const have = (await Promise.all(STORES.map((st) => this.usable(product, st)))).some((n) => n > 0);
-      if (have) released += await this.releaseWaiting(product);
+      released += await this.releaseWaiting(product);
     }
     return released;
   }
@@ -348,6 +347,10 @@ export class PharmacyStockService {
     let released = 0;
     for (const l of waiting) {
       try {
+        // Y29: released only when one store holds the line's full need in usable stock, never on partial stock.
+        const need = l.quantity ?? 1;
+        const counts = await Promise.all(STORES.map((st) => this.usable(product, st)));
+        if (!counts.some((n) => n >= need)) continue;
         const issueFrom = new Date();
         const done = await this.lines
           .updateOne({ _id: l._id, status: 'approved', waitingForStock: true, version: l.version }, { $set: { waitingForStock: false, issueFrom } })

@@ -197,6 +197,9 @@ describe('PharmacyStockService: receiving, adjusting, low stock and waiting', ()
     const id = v.lines[0].id;
     await m.PharmacyLine.updateOne({ _id: id }, { $set: { waitingForStock: true } });
     const real = s.stock.afterChange.bind(s.stock);
+    // The deliberate error stays out of the test output.
+    const realLogger = (s.stock as any).logger;
+    (s.stock as any).logger = { error: () => undefined, log: () => undefined, warn: () => undefined };
     (s.stock as any).afterChange = async () => {
       throw new Error('boom');
     };
@@ -208,6 +211,7 @@ describe('PharmacyStockService: receiving, adjusting, low stock and waiting', ()
     const out = await s.stock.adjust(PHARM, String(b._id), { change: -1, reason: 'damaged' });
     assert.equal(out.quantity, 3);
     (s.stock as any).afterChange = real;
+    (s.stock as any).logger = realLogger;
     // A line marked waiting while stock exists (its release was lost) is released by the sweep.
     await m.PharmacyLine.updateOne({ _id: id }, { $set: { waitingForStock: true } });
     await s.stock.sweepLowStock();
@@ -219,5 +223,42 @@ describe('PharmacyStockService: receiving, adjusting, low stock and waiting', ()
     assert.ok(rs.every((r) => r.status === 'fulfilled'));
     assert.equal(await s.stock.usable(ASP, 'er'), 20);
     assert.equal(await m.PharmacyBatch.countDocuments({}), 1);
+  });
+
+  test('Y29: a waiting line is released only when one store holds its full need; partial stock leaves it waiting (no sweep release, no new to-issue, clock or query)', async () => {
+    const enox = { medicine: 'enoxaparin', product: 'enoxaparin-syringe-60', dose: 60, route: 'sc', frequency: 'BD', durationDays: 5 };
+    const part = await s.batch('enoxaparin-syringe-60', 'er', 'E', 100, 3);
+    const v = await s.approved([enox]);
+    const id = v.lines[0].id;
+    assert.equal((await w.lineDoc(id)).quantity, 10);
+    await s.issue.outOfStock(PHARM, id);
+    const q = (await w.lineDoc(id)).query;
+    await w.checks.answer(DOC, id, { querySeq: q.seq, outcome: 'wait' });
+    assert.equal((await w.lineDoc(id)).waitingForStock, true);
+    const toIssue = (await w.sent('pharmacy.to-issue')).length;
+    const clocks = (await w.clocksOf('pharmacy-issue')).length;
+    await s.stock.sweepLowStock();
+    assert.equal(await s.stock.releaseWaitingWithStock(), 0);
+    // A receive that leaves each store short releases nothing either.
+    await s.stock.receive(PHARM, { product: 'enoxaparin-syringe-60', store: 'main', batchNo: 'M', expiry: inDays(100), quantity: 4 });
+    let line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.waitingForStock], ['approved', true]);
+    assert.equal((await w.sent('pharmacy.to-issue')).length, toIssue);
+    assert.equal((await w.clocksOf('pharmacy-issue')).length, clocks);
+    assert.equal(await m.PharmacyBatch.countDocuments({ _id: part._id, expiry: { $lt: inDays(0) } }), 0);
+    // An expired batch does not count towards the need.
+    await s.batch('enoxaparin-syringe-60', 'er', 'OLD', -3, 50);
+    assert.equal(await s.stock.releaseWaitingWithStock(), 0);
+    assert.equal((await s.issue.outOfStock(PHARM, id).then(() => 'opened', (e: any) => e.status)), 'opened');
+    // Answer wait again, then a receive that brings one store to the full need releases it once.
+    const q2 = (await w.lineDoc(id)).query;
+    await w.checks.answer(DOC, id, { querySeq: q2.seq, outcome: 'wait' });
+    await s.stock.receive(PHARM, { product: 'enoxaparin-syringe-60', store: 'er', batchNo: 'E2', expiry: inDays(100), quantity: 7 });
+    line = await w.lineDoc(id);
+    assert.equal(line.waitingForStock, false);
+    const sent = (await w.sent('pharmacy.to-issue')).length;
+    assert.equal(sent, toIssue + 1);
+    await s.stock.sweepLowStock();
+    assert.equal((await w.sent('pharmacy.to-issue')).length, sent);
   });
 });

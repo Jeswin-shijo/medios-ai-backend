@@ -439,4 +439,17 @@ describe('PharmacyIssueService: issuing from stock', () => {
     assert.equal(await qty(left._id), 40);
     assert.equal(await m.PharmacyMovement.countDocuments({ batch: left._id }), 0);
   });
+
+  test('repairTakes puts back a take on a line that is neither issued nor claimed (a crashed issue on a line sent back), once', async () => {
+    const b = await s.batch(ASP, 'er', 'A', 100, 40);
+    const id = (await s.approved([aspirin300])).lines[0].id;
+    const ago = new Date(Date.now() - 90_000);
+    await m.PharmacyBatch.updateOne({ _id: b._id }, { $inc: { quantity: -1 }, $push: { takes: { line: new Types.ObjectId(id), qty: 1, realAt: ago } } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'to-check' }, $unset: { approved: '' } });
+    assert.deepEqual(await s.issue.repairTakes(), { undone: 1, logged: 0 });
+    assert.deepEqual(await s.issue.repairTakes(), { undone: 0, logged: 0 });
+    const bd = await m.PharmacyBatch.findById(b._id).lean<any>();
+    assert.deepEqual([bd.quantity, bd.takes.length], [40, 0]);
+    assert.equal(await m.PharmacyMovement.countDocuments({}), 0);
+  });
 });
