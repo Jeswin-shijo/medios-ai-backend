@@ -398,7 +398,7 @@ export class PharmacyQueries {
    * Y24: a red flag left unconfirmed on an issued line gets its own query, of the flag's kind, about that flag only:
    * its Keep confirms that flag, and any other one left is asked next.
    */
-  private async askAboutFlag(lineId: string, flag: Flag): Promise<void> {
+  async askAboutFlag(lineId: string, flag: Flag): Promise<void> {
     const kind: QueryKind = flag.kind === 'kidney' ? 'kidney' : flag.kind === 'clash' ? 'clash' : flag.kind === 'dose' ? 'dose' : 'other';
     const question = kind === 'kidney' ? kidneyQuestion(flag) : `${flag.text}. Please review.`;
     await this.openQuery(lineId, { kind, question, by: PHARMACY_AGENT, redKeys: [flag.key] });

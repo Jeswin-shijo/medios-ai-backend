@@ -179,6 +179,10 @@ export class PharmacyChecksService {
   holdAtOnce(lines: PharmacyLineDocument[]): Promise<void> {
     return this.queries.holdAtOnce(lines);
   }
+  /** Y24: opens a query of the flag's kind about that one red flag (used by the reconcile pass for an issued line). */
+  askAboutFlag(lineId: string, flag: Flag): Promise<void> {
+    return this.queries.askAboutFlag(lineId, flag);
+  }
 
   // ---------- the kidney recheck ----------
 
