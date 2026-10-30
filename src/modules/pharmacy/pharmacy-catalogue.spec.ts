@@ -173,3 +173,108 @@ describe('pickProduct and routeFor', () => {
     assert.equal(routeFor(p), 'iv');
   });
 });
+
+// Written out by hand from the global-constraints medicine table:
+// key|unit|class key|class label|allergy|S|D|per kg|aliases|products (form:strengths;...)
+const EXPECTED_TABLE = `
+aspirin|mg|antiplatelet-salicylate|Antiplatelet (salicylate)|aspirin|600|4000||-|tab:75,150,300
+clopidogrel|mg|antiplatelet-p2y12|Antiplatelet (P2Y12)|-|600|600||-|tab:75
+ticagrelor|mg|antiplatelet-p2y12|Antiplatelet (P2Y12)|-|180|360||-|tab:90
+enoxaparin|mg|anticoagulant-heparin|Anticoagulant (heparin)|-|150||1.1|-|syringe:40,60,80
+heparin|IU|anticoagulant-heparin|Anticoagulant (heparin)|-|10000|40000||unfractionated heparin|mdv:25000
+warfarin|mg|anticoagulant-vka|Anticoagulant (vitamin K antagonist)|-|10|||-|tab:1,2,5
+atorvastatin|mg|statin|Statin|-||80||-|tab:10,20,40,80
+rosuvastatin|mg|statin|Statin|-||40||-|tab:5,10,20,40
+isosorbide-dinitrate|mg|nitrate|Nitrate|-|10|||isdn|sl-tab:5
+metoprolol|mg|beta-blocker|Beta blocker|-||400||-|tab:25,50
+ramipril|mg|ace-inhibitor|ACE inhibitor (RAAS)|-||10||-|cap:2.5,5,10
+telmisartan|mg|arb|ARB (RAAS)|-||80||-|tab:40,80
+amlodipine|mg|ccb|Calcium channel blocker|-||10||-|tab:5,10
+furosemide|mg|loop-diuretic|Loop diuretic|-||600||frusemide|tab:40;ampoule:20
+spironolactone|mg|k-sparing-diuretic|Potassium-sparing diuretic|-||100||-|tab:25,50
+metformin|mg|biguanide|Biguanide|-||2550||-|tab:500,1000
+glimepiride|mg|sulfonylurea|Sulfonylurea|-||8||-|tab:1,2
+insulin-regular|IU|insulin|Insulin|-|50|||regular insulin,human insulin|mdv:1000
+amoxicillin|mg|penicillin|Penicillin|penicillin||3000||amoxycillin|cap:500
+amoxicillin-clavulanate|mg|penicillin|Penicillin|penicillin||1875||co-amoxiclav,augmentin|tab:625
+piperacillin-tazobactam|g|penicillin|Penicillin|penicillin||18||pip-taz|vial:4.5
+ceftriaxone|g|cephalosporin|Cephalosporin|-||4||-|vial:1
+meropenem|g|carbapenem|Carbapenem|-||6||-|vial:1
+azithromycin|mg|macrolide|Macrolide|-||500||-|tab:500
+ciprofloxacin|mg|fluoroquinolone|Fluoroquinolone|-||1500||-|tab:500
+metronidazole|mg|nitroimidazole|Nitroimidazole|-||2000||-|tab:400;bag:500
+cotrimoxazole|mg|sulfonamide|Sulfonamide (sulfa)|sulfa||1920||co-trimoxazole,septran|tab:960
+vancomycin|mg|glycopeptide|Glycopeptide|-|2000||20|-|vial:500,1000
+paracetamol|mg|analgesic|Analgesic|-|1000|4000|15/50|acetaminophen|tab:500,650;bottle:1000
+diclofenac|mg|nsaid|NSAID|nsaid||150||-|tab:50;ampoule:75
+ibuprofen|mg|nsaid|NSAID|nsaid||2400||-|tab:400
+tramadol|mg|opioid|Opioid|-||400||-|cap:50;ampoule:50
+morphine|mg|opioid|Opioid|-|10|||-|ampoule:10
+pantoprazole|mg|ppi|PPI|-||80||-|tab:40;vial:40
+omeprazole|mg|ppi|PPI|-||40||-|cap:20
+ondansetron|mg|antiemetic|Antiemetic|-|8|24||-|tab:4;ampoule:4
+salbutamol|mg|bronchodilator|Bronchodilator|-|5|||albuterol|nebule:2.5
+hydrocortisone|mg|steroid|Steroid|-||400||-|vial:100
+adrenaline|mg|emergency|Emergency|-|1|||epinephrine|ampoule:1
+levetiracetam|mg|antiepileptic|Antiepileptic|-||3000||-|tab:500;vial:500
+cetirizine|mg|antihistamine|Antihistamine|-||10||-|tab:10
+potassium-chloride|mmol|potassium|Potassium supplement|-|40|||kcl|sachet:20;ampoule:20
+normal-saline|mL|iv-fluid|IV fluid|-||||ns,sodium chloride 0.9%|bag:500
+ringer-lactate|mL|iv-fluid|IV fluid|-||||rl,ringer's lactate|bag:500
+`
+  .trim()
+  .split('\n');
+
+const EXPECTED_KIDNEY = `
+enoxaparin|0|30|red|reduce to once daily
+rosuvastatin|0|30|amber|max 10 mg
+ramipril|0|30|amber|start low and check potassium
+spironolactone|0|30|red|avoid: high potassium risk
+metformin|0|30|red|avoid
+metformin|30|45|amber|max 1000 mg a day
+glimepiride|0|30|amber|low blood sugar risk; start low
+amoxicillin-clavulanate|0|30|amber|reduce the dose
+piperacillin-tazobactam|0|40|amber|reduce the dose
+meropenem|0|50|amber|reduce the dose
+ciprofloxacin|0|30|amber|reduce the dose
+cotrimoxazole|0|30|amber|reduce the dose
+vancomycin|0|50|amber|dose by blood levels
+diclofenac|0|30|red|avoid
+diclofenac|30|60|amber|use with care; check kidney function
+ibuprofen|0|30|red|avoid
+ibuprofen|30|60|amber|use with care; check kidney function
+tramadol|0|30|amber|longer gap between doses
+morphine|0|30|amber|reduce the dose
+levetiracetam|0|50|amber|reduce the dose
+`
+  .trim()
+  .split('\n');
+
+describe('the whole table', () => {
+  test('every medicine row matches the constraints', () => {
+    const actual = MEDICINES.map((m) =>
+      [
+        m.key,
+        m.unit,
+        m.classKey,
+        m.classLabel,
+        m.allergyGroup ?? '-',
+        m.maxSingle ?? '',
+        m.maxDaily ?? '',
+        m.perKg ? `${m.perKg.perKg}${m.perKg.underKg ? '/' + m.perKg.underKg : ''}` : '',
+        m.aliases.length ? m.aliases.join(',') : '-',
+        [...new Set(m.products.map((p) => p.form))]
+          .map((f) => `${f}:${m.products.filter((p) => p.form === f).map((p) => p.strength).join(',')}`)
+          .join(';'),
+      ].join('|'),
+    );
+    assert.deepEqual(actual, EXPECTED_TABLE);
+  });
+
+  test('every kidney rule matches the constraints, with words', () => {
+    const actual = MEDICINES.flatMap((m) =>
+      m.kidney.map((k) => [m.key, k.from, k.below, k.severity, k.words].join('|')),
+    );
+    assert.deepEqual(actual, EXPECTED_KIDNEY);
+  });
+});

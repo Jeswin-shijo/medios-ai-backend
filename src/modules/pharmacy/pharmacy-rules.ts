@@ -256,8 +256,11 @@ function doseFlags(med: MedicineDef, line: CheckLine, patient: PatientFacts): Fl
   }
   if (med.perKg) {
     const w = patient.weightKg;
-    if (w === null || w === undefined) {
-      out.push(d('dose.no-weight', 'dose', 'amber', 'Weight not recorded'));
+    if (w === null || w === undefined || w <= 0) {
+      // A rule that applies only under a weight (paracetamol) has nothing to flag with no weight.
+      if (med.perKg.underKg === undefined) {
+        out.push(d('dose.no-weight', 'dose', 'amber', 'Weight not recorded'));
+      }
     } else if (med.perKg.underKg === undefined || w < med.perKg.underKg) {
       const limit = med.perKg.perKg * w;
       if (dose > limit + 1e-9) {
@@ -376,9 +379,15 @@ export function nameChecks(names: string[]): FlagDraft[] {
     .map((n) => matchMedicine(n))
     .filter((m): m is MedicineDef => m !== null);
   const out: FlagDraft[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < meds.length; i++) {
     for (let j = i + 1; j < meds.length; j++) {
-      out.push(...pairFlags(meds[i], meds[j]));
+      for (const f of pairFlags(meds[i], meds[j])) {
+        if (!seen.has(f.key)) {
+          seen.add(f.key);
+          out.push(f);
+        }
+      }
     }
   }
   return out;

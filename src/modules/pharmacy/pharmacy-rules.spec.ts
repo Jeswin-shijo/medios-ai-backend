@@ -136,6 +136,37 @@ describe('clashes', () => {
     assert.equal(t('ondansetron', 'azithromycin')!.text, 'QT prolongation risk (ondansetron with azithromycin)');
     assert.equal(t('amlodipine', 'metoprolol'), undefined);
   });
+  test('every row of the table, on its own', () => {
+    const rows: Array<[string, string, string, string]> = [
+      ['ibuprofen', 'heparin', 'red', 'Major bleeding risk'],
+      ['diclofenac', 'warfarin', 'red', 'Major bleeding risk'],
+      ['warfarin', 'metronidazole', 'red', 'Raises INR sharply'],
+      ['warfarin', 'cotrimoxazole', 'red', 'Raises INR sharply'],
+      ['spironolactone', 'potassium-chloride', 'red', 'High potassium risk'],
+      ['diclofenac', 'aspirin', 'amber', 'Bleeding risk; consider paracetamol'],
+      ['ibuprofen', 'ticagrelor', 'amber', 'Bleeding risk; consider paracetamol'],
+      ['heparin', 'clopidogrel', 'amber', 'Bleeding risk; usual in heart-attack care; monitor'],
+      ['warfarin', 'aspirin', 'amber', 'Bleeding risk; usual in heart-attack care; monitor'],
+      ['warfarin', 'ciprofloxacin', 'amber', 'May raise INR; check INR'],
+      ['warfarin', 'azithromycin', 'amber', 'May raise INR; check INR'],
+      ['clopidogrel', 'omeprazole', 'amber', 'Omeprazole weakens clopidogrel; pantoprazole is preferred'],
+      ['ramipril', 'spironolactone', 'amber', 'High potassium risk; check potassium'],
+      ['ramipril', 'potassium-chloride', 'amber', 'High potassium risk; check potassium'],
+      ['telmisartan', 'spironolactone', 'amber', 'High potassium risk; check potassium'],
+      ['telmisartan', 'potassium-chloride', 'amber', 'High potassium risk; check potassium'],
+      ['ondansetron', 'azithromycin', 'amber', 'QT prolongation risk'],
+      ['ondansetron', 'ciprofloxacin', 'amber', 'QT prolongation risk'],
+    ];
+    for (const [l, r, sev, words] of rows) {
+      for (const [a, b] of [[l, r], [r, l]]) {
+        const f = checkLine(line(a), patient(), [line(b)]).filter((x) => x.kind === 'clash');
+        assert.equal(f.length, 1, `${a} / ${b}`);
+        assert.equal(f[0].severity, sev, `${a} / ${b}`);
+        assert.equal(f[0].text, `${words} (${l} with ${r})`);
+        assert.equal(f[0].key, `clash.${b}`);
+      }
+    }
+  });
   test('an unlisted other line is ignored', () => {
     assert.deepEqual(checkLine(line('aspirin'), patient(), [line(null)]), []);
   });
@@ -187,14 +218,27 @@ describe('dose', () => {
     assert.equal(only(t, 'dose.daily'), undefined);
   });
   test('SOS counts four doses; STAT counts one', () => {
-    const sos = checkLine(line('paracetamol', { dose: 1000, frequency: 'SOS' }), patient(), []);
-    assert.equal(only(sos, 'dose.daily'), undefined);
-    const over = checkLine(line('paracetamol', { dose: 1000, frequency: 'SOS' }), patient({ weightKg: 70 }), []);
-    assert.equal(over.length, 0);
+    const ibu = (dose: number) =>
+      checkLine(line('ibuprofen', { dose, frequency: 'SOS' }), patient(), []);
+    assert.equal(only(ibu(600), 'dose.daily'), undefined); // 2400, not above
+    assert.equal(only(ibu(650), 'dose.daily')!.text, 'Daily total 2600 mg is above the 2400 mg maximum');
     const heparin = checkLine(line('heparin', { dose: 10000, frequency: 'QID' }), patient(), []);
     assert.equal(only(heparin, 'dose.daily'), undefined);
     const heparin2 = checkLine(line('heparin', { dose: 10001, frequency: 'STAT' }), patient(), []);
     assert.equal(keys(heparin2).join(), 'dose.single');
+  });
+  test('no weight: paracetamol raises no flag; vancomycin and enoxaparin do (Y19)', () => {
+    const para = checkLine(line('paracetamol', { dose: 1000, frequency: 'BD' }), patient({ weightKg: null }), []);
+    assert.deepEqual(para, []);
+    const vanc = checkLine(line('vancomycin', { dose: 1000, frequency: 'BD' }), patient({ weightKg: null }), []);
+    assert.deepEqual(keys(vanc), ['dose.no-weight']);
+  });
+  test('a weight of 0 or less counts as not recorded', () => {
+    for (const w of [0, -5]) {
+      const enox = checkLine(line('enoxaparin', { dose: 60, frequency: 'BD' }), patient({ weightKg: w }), []);
+      assert.deepEqual(keys(enox), ['dose.no-weight']);
+      assert.deepEqual(checkLine(line('paracetamol', { dose: 1000, frequency: 'BD' }), patient({ weightKg: w }), []), []);
+    }
   });
   test('enoxaparin 80 mg at 60 kg is an amber per-kg flag', () => {
     const f = checkLine(line('enoxaparin', { dose: 80, frequency: 'BD' }), patient({ weightKg: 60 }), []);
@@ -398,6 +442,12 @@ describe('nameChecks', () => {
     const f = nameChecks(['Tab Metronidazole 400 mg', 'Tab Warfarin 5 mg']);
     assert.equal(f.length, 1);
     assert.equal(f[0].text, 'Raises INR sharply (warfarin with metronidazole)');
+  });
+  test('one flag per key', () => {
+    const a = nameChecks(['Ibuprofen', 'Diclofenac', 'Enoxaparin']).map((f) => f.key);
+    assert.equal(new Set(a).size, a.length);
+    const b = nameChecks(['Aspirin', 'Aspirin 75', 'Tab Aspirin']).map((f) => f.key);
+    assert.deepEqual(b, ['double.aspirin']);
   });
   test('unknown names are skipped; doubles are found', () => {
     assert.deepEqual(nameChecks(['Syp Levocetirizine', 'Tab Aspirin 75']), []);
