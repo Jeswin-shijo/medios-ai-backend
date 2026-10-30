@@ -143,7 +143,8 @@ export class PharmacyChecksService {
     const line = await this.queries.load(lineId);
     if (line.status === 'issued') throw new ConflictException('An issued line can be stopped only by answering a query');
     if (!['to-check', 'query', 'approved'].includes(line.status)) throw new ConflictException('This line is already closed');
-    if (this.queries.hasOpenQuery(line)) return this.answer(actor, lineId, { outcome: 'cancel', reason: text });
+    // Cancelling the line answers whichever query is open now (the one read here).
+    if (line.query && this.queries.hasOpenQuery(line)) return this.answer(actor, lineId, { querySeq: line.query.seq, outcome: 'cancel', reason: text });
     const done = await this.lines
       .updateOne(
         { _id: line._id, status: line.status, version: line.version, querySeq: line.querySeq },

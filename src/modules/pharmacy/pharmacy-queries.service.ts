@@ -17,6 +17,8 @@ type By = { id: string; name: string };
 export const PHARMACY_AGENT: By = { id: 'pharmacy-agent', name: 'Pharmacy Agent' };
 
 export interface AnswerInput {
+  /** The query this answers (the `seq` the doctor saw): any other query, or none open, is refused. */
+  querySeq: number;
   outcome: string;
   reason?: string;
   change?: { product: string; dose: number; route: string; frequency: string; durationDays?: number; confirm?: { reason: string } };
@@ -30,11 +32,20 @@ export interface QueryOpening {
   suggestions?: string[];
   /** The pharmacist's check of the line starts with this query: stamp `checkedAt` in the same guarded write. */
   markChecked?: boolean;
+  /** The red flags this query asks about (what its Keep may confirm). Default: every unconfirmed red flag on the line. */
+  redKeys?: string[];
 }
 
 const MIN_MS = 60_000;
 const NOT_FIT = "That answer doesn't fit this query";
+const CHANGED = 'This question has changed; please reload.';
 export const AUTO_ALLERGY_ASK = 'Please confirm with a reason, change the dose, or cancel.';
+
+/** The automatic kidney question, built from a red kidney flag ("eGFR 28: enoxaparin, reduce to once daily"). */
+export const kidneyQuestion = (flag: Pick<Flag, 'text'>): string => {
+  const egfr = /eGFR (\d+)/.exec(flag.text)?.[1];
+  return `Dose may need lowering for kidney function${egfr ? ` (eGFR ${egfr})` : ''}. Please review.`;
+};
 
 export const cleanText = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 
@@ -102,7 +113,7 @@ export class PharmacyQueries {
               openedRealAt: now,
               dueAt,
               suggestions: q.suggestions ?? [],
-              redKeys: ((line.flags ?? []) as Flag[]).filter((f) => f.severity === 'red' && !(f.confirmed && f.version === line.version)).map((f) => f.key),
+              redKeys: q.redKeys ?? ((line.flags ?? []) as Flag[]).filter((f) => f.severity === 'red' && !(f.confirmed && f.version === line.version)).map((f) => f.key),
             },
           },
         },
@@ -110,9 +121,8 @@ export class PharmacyQueries {
       .exec();
     if (!opened.modifiedCount) return false;
     await this.raiseQueryAlert(lineId);
-    const queryDueAt = dueAt;
     // The message names the query it opens: it is never read from the line at send time.
-    await this.orders.publish(String(line.order), [{ type: 'pharmacy.query', lineId, extra: { querySeq: seq, kind: q.kind, queryDueAt }, dedupeKey: `pharmacy.query:${lineId}:${seq}` }]);
+    await this.orders.publish(String(line.order), [{ type: 'pharmacy.query', lineId, extra: { querySeq: seq, kind: q.kind, queryDueAt: dueAt }, dedupeKey: `pharmacy.query:${lineId}:${seq}` }]);
     return true;
   }
 
@@ -184,10 +194,7 @@ export class PharmacyQueries {
           continue;
         }
         const kidney = r.reason === 'kidney' ? r.newRed.find((f) => f.kind === 'kidney') : undefined;
-        if (kidney) {
-          const egfr = /eGFR (\d+)/.exec(kidney.text)?.[1] ?? '?';
-          await this.openQuery(id, { kind: 'kidney', question: `Dose may need lowering for kidney function (eGFR ${egfr}). Please review.`, by: PHARMACY_AGENT });
-        }
+        if (kidney) await this.openQuery(id, { kind: 'kidney', question: kidneyQuestion(kidney), by: PHARMACY_AGENT });
       } catch (e) {
         this.logger.error(`Holding a rechecked line failed: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -196,11 +203,14 @@ export class PharmacyQueries {
 
   // ---------- answering ----------
 
-  /** The doctor's (or admin's) one answer to the open query. */
+  /**
+   * The doctor's (or admin's) one answer to the open query. It names the query it answers (`querySeq`), so a
+   * double-click or a retry can never answer a follow-up query that the first answer opened.
+   */
   async answer(actor: Actor, lineId: string, input: AnswerInput): Promise<PharmacyLineView> {
     const line = await this.load(lineId);
     const q = line.query;
-    if (!q || q.answer || !['query', 'issued'].includes(line.status)) throw new ConflictException('This line has no open query');
+    if (!q || q.answer || !['query', 'issued'].includes(line.status) || input?.querySeq !== q.seq) throw new ConflictException(CHANGED);
     const issued = line.status === 'issued';
     const allowed = q.kind === 'stock' ? ['switch', 'wait', 'cancel'] : issued ? ['change', 'keep', 'stop'] : ['change', 'keep', 'cancel'];
     const outcome = input?.outcome;
@@ -220,20 +230,20 @@ export class PharmacyQueries {
     const unset: Record<string, ''> = {};
     let afterKeep = false;
     let newRedAfterKeep: Flag | undefined;
-        const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, extra: { querySeq: q.seq }, dedupeKey: `${type}:${lineId}` });
+    const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, extra: { querySeq: q.seq }, dedupeKey: `${type}:${lineId}` });
     const confirmOf = (c?: { reason: string }) => (c && cleanText(c.reason) ? { by, reason: cleanText(c.reason) } : undefined);
 
     if (outcome === 'keep') {
-      // Keep confirms only the red flags the line carried when the query opened (an old query without the record: its own kind),
-      // and an allergy only on an allergy query: an allergy that arrived meanwhile is never confirmed implicitly.
-      const seen = (f: Flag) => (q.redKeys ? q.redKeys.includes(f.key) : f.kind === q.kind || f.kind !== 'allergy');
+      // Keep confirms only what its query asked: the red flags recorded when it opened (an old query without the record: all),
+      // and of those an allergy query confirms only allergies and any other query never an allergy (Y23, Y25).
+      // An allergy is never confirmed implicitly, and an allergy answer never confirms a kidney, clash or dose flag.
+      const asked = (f: Flag) => (q.redKeys ? q.redKeys.includes(f.key) : true) && (f.kind === 'allergy') === (q.kind === 'allergy');
       const flags = ((line.flags ?? []) as Flag[]).map((f) =>
-        f.severity === 'red' && !(f.confirmed && f.version === line.version) && seen(f) && (f.kind !== 'allergy' || q.kind === 'allergy')
-          ? { ...f, confirmed: { by: actor.name, reason, at: clinicNow() } }
-          : f,
+        f.severity === 'red' && !(f.confirmed && f.version === line.version) && asked(f) ? { ...f, confirmed: { by: actor.name, reason, at: clinicNow() } } : f,
       );
       afterKeep = needsDoctor(flags, line.version).length > 0;
-      // An issued line: a red flag that arrived during the query (not an allergy, which is held above) gets its own question.
+      // An issued line: any other red flag left unconfirmed (not an allergy, which is held below) gets its own question.
+      // A line not yet issued goes back to To check, where the pharmacist needs a reason for it.
       if (issued) newRedAfterKeep = flags.find((f) => f.severity === 'red' && f.kind !== 'allergy' && !(f.confirmed && f.version === line.version));
       guard.flags = line.flags;
       set.flags = flags;
@@ -352,11 +362,13 @@ export class PharmacyQueries {
     return added;
   }
 
-  /** Y24: a red flag left unconfirmed on an issued line gets its own query, of the flag's kind. */
+  /**
+   * Y24: a red flag left unconfirmed on an issued line gets its own query, of the flag's kind, about that flag only:
+   * its Keep confirms that flag, and any other one left is asked next.
+   */
   private async askAboutFlag(lineId: string, flag: Flag): Promise<void> {
     const kind: QueryKind = flag.kind === 'kidney' ? 'kidney' : flag.kind === 'clash' ? 'clash' : flag.kind === 'dose' ? 'dose' : 'other';
-    const egfr = /eGFR (\d+)/.exec(flag.text)?.[1];
-    const question = kind === 'kidney' && egfr ? `Dose may need lowering for kidney function (eGFR ${egfr}). Please review.` : `${flag.text}. Please review.`;
-    await this.openQuery(lineId, { kind, question, by: PHARMACY_AGENT });
+    const question = kind === 'kidney' ? kidneyQuestion(flag) : `${flag.text}. Please review.`;
+    await this.openQuery(lineId, { kind, question, by: PHARMACY_AGENT, redKeys: [flag.key] });
   }
 }

@@ -58,7 +58,7 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     assert.equal((await w.sent('pharmacy.approved')).length, 0);
     // The pharmacist queries the doctor; Keep confirms the red allergy flag with the doctor's reason.
     await w.checks.query(PHARM, id, { kind: 'allergy', question: 'Reaction was a rash in 2019' });
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Tolerated it since' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Tolerated it since' });
     const kept = await w.lineDoc(id);
     assert.equal(kept.status, 'to-check');
     assert.equal(kept.flags.find((f: any) => f.kind === 'allergy').confirmed.reason, 'Tolerated it since');

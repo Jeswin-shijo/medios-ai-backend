@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
-import { DOC, MIN, PHARM, World, amoxicillin500, aspirin300, buildWorld, ceftriaxone1, enoxaparin60 } from '../../test/pharmacy-fixtures';
+import { DOC, MIN, PHARM, World, amoxicillin500, aspirin300, buildWorld, ceftriaxone1, enoxaparin60, ibuprofen400 } from '../../test/pharmacy-fixtures';
 
 describe('PharmacyChecksService: queries, answers and the kidney recheck', () => {
   const m = models();
@@ -24,6 +24,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     return { v, id: v.lines[0].id };
   };
   const alertOf = (id: string) => m.TaskAlertItem.findOne({ link: `pharmacy-line:${id}` }).lean().exec() as Promise<any>;
+  const CHANGED = { status: 409, message: 'This question has changed; please reload.' };
   const backdateQueryClock = (minutes: number) =>
     m.Clock.collection.updateMany({ def: 'pharmacy-query' }, { $set: { startedAt: new Date(Date.now() - minutes * MIN), dueAt: new Date(Date.now() - 1000) } });
 
@@ -69,9 +70,13 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const { v, id } = await order();
     await w.redAllergy(id);
     await w.checks.query(PHARM, id, { kind: 'allergy', question: 'Reaction?' });
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'keep' }), { status: 400 });
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'keep', reason: 'x'.repeat(301) }), { status: 400 });
-    const view = await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Mild rash only' });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep' }), { status: 400 });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'x'.repeat(301) }), { status: 400 });
+    // An answer names the query it answers: any other number is refused and changes nothing.
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'Mild rash only' }), CHANGED);
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 0, outcome: 'keep', reason: 'Mild rash only' }), CHANGED);
+    assert.equal((await w.lineDoc(id)).query.answer, undefined);
+    const view =await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Mild rash only' });
     assert.equal(view.status, 'to-check');
     const line = await w.lineDoc(id);
     assert.deepEqual([line.query.answer.outcome, line.query.answer.by.name, line.query.answer.reason], ['keep', 'Dr. Shajin', 'Mild rash only']);
@@ -81,8 +86,8 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
     const o: any = await m.PharmacyOrder.findById(v.id).lean();
     assert.deepEqual([o.checkRound, o.checkOpen], [2, true]);
-    // Answered once only.
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'keep', reason: 'again' }), { status: 409 });
+    // Answered once only: with no query open, every answer is refused.
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'again' }), CHANGED);
   });
 
   test('an expired query clock\'s escalation closes as "Query answered" when the query is answered (the late-stop path)', async () => {
@@ -98,7 +103,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal(String(open.escalation.id), String(esc._id));
     // One answer path: neither the alert nor its escalation can be closed any other way.
     await assert.rejects(() => w.escalations.acknowledge({ id: 'a', name: 'Admin', role: 'admin' as never }, String(esc._id)), { status: 409 });
-    await w.checks.answer(DOC, id, { outcome: 'cancel', reason: 'Not needed' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'cancel', reason: 'Not needed' });
     const closed: any = await m.Escalation.findById(esc._id).lean();
     assert.deepEqual([closed.state, closed.ackByName], ['acknowledged', 'Query answered']);
     assert.equal((await alertOf(id)).status, 'Completed');
@@ -111,7 +116,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await m.PharmacyOrder.collection.updateOne({ _id: new Types.ObjectId(v.id) }, { $set: { createdAt: new Date(Date.now() - 40 * MIN) } });
     await m.PharmacyLine.collection.updateOne({ _id: new Types.ObjectId(id) }, { $set: { enteredCheckAt: new Date(Date.now() - 40 * MIN) } });
     await w.checks.query(PHARM, id, { kind: 'dose', question: 'Dose?' });
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Intended' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Intended' });
     const o: any = await m.PharmacyOrder.findById(v.id).lean();
     assert.deepEqual([o.checkRound, o.checkOpen], [2, true]);
     assert.ok(Math.abs(new Date(o.checkDueAt).getTime() - (Date.now() + 15 * MIN)) < 5_000);
@@ -127,7 +132,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.ok((await w.lineDoc(id)).flags.some((f: any) => f.key === 'dose.single' && f.severity === 'red'));
     await m.PharmacyLine.updateOne({ _id: id, 'flags.key': 'dose.single' }, { $set: { 'flags.$.confirmed': { by: 'Neethu George', reason: 'old', at: new Date() } } });
     await w.checks.query(PHARM, id, { kind: 'dose', question: 'Too high?' });
-    const view = await w.checks.answer(DOC, id, { outcome: 'change', change: { product: 'aspirin-tab-300', dose: 300, route: 'oral', frequency: 'STAT' } });
+    const view = await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', change: { product: 'aspirin-tab-300', dose: 300, route: 'oral', frequency: 'STAT' } });
     assert.equal(view.status, 'to-check');
     const line = await w.lineDoc(id);
     assert.deepEqual([line.version, line.dose, line.flags.some((f: any) => f.severity === 'red'), line.flags.some((f: any) => f.confirmed)], [2, 300, false, false]);
@@ -145,7 +150,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by: { id: 'p', name: 'P' }, at: new Date(), realAt: new Date(), store: 'er', batches: [] } } });
     await w.checks.openQuery(id, { kind: 'dose', question: 'Lower dose please', by: { id: PHARM.id, name: PHARM.name } });
     assert.equal((await w.lineDoc(id)).status, 'issued');
-    const out = await w.checks.answer(DOC, id, { outcome: 'change', reason: 'Lower dose', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
+    const out = await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'change', reason: 'Lower dose', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
     assert.equal(out.status, 'stopped');
     const replacement: any = await m.PharmacyLine.findOne({ replaces: id }).lean();
     assert.deepEqual([replacement.status, replacement.dose, replacement.version], ['to-check', 150, 1]);
@@ -159,11 +164,11 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const { id } = await order('stat', [ceftriaxone1]);
     await w.checks.query(PHARM, id, { kind: 'dose', question: 'Choose again' });
     const change = { product: 'amoxicillin-cap-500', dose: 500, route: 'oral', frequency: 'TDS', durationDays: 5 };
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'change', change }), { status: 400 });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', change }), { status: 400 });
     const same = await w.lineDoc(id);
     assert.deepEqual([same.version, same.status, same.query.answer], [1, 'query', undefined]);
     assert.equal((await alertOf(id)).status, 'Pending');
-    await w.checks.answer(DOC, id, { outcome: 'change', change: { ...change, confirm: { reason: 'Tolerates amoxicillin' } } });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', change: { ...change, confirm: { reason: 'Tolerates amoxicillin' } } });
     const done = await w.lineDoc(id);
     assert.equal(done.version, 2);
     assert.equal(done.flags.find((f: any) => f.kind === 'allergy' && f.severity === 'red').confirmed.reason, 'Tolerates amoxicillin');
@@ -188,17 +193,17 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const { id } = await order();
     await w.checks.query(PHARM, id, { kind: 'allergy', question: 'x' });
     const fits = { status: 400, message: "That answer doesn't fit this query" };
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'wait', reason: 'x' }), fits);
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'stop', reason: 'x' }), fits);
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'switch' }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'wait', reason: 'x' }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'stop', reason: 'x' }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'switch' }), fits);
     await w.checks.cancel(DOC, id, 'x');
 
     // A stock query (only Out of stock opens one) on a never-approved line: wait would skip the approve gates.
     const second = await order('stat', [aspirin300]);
     await w.checks.openQuery(second.id, { kind: 'stock', question: 'Out of stock', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
-    await assert.rejects(() => w.checks.answer(DOC, second.id, { outcome: 'keep', reason: 'x' }), fits);
-    await assert.rejects(() => w.checks.answer(DOC, second.id, { outcome: 'change', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } }), fits);
-    await assert.rejects(() => w.checks.answer(DOC, second.id, { outcome: 'wait' }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, second.id, { querySeq: 1, outcome: 'keep', reason: 'x' }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, second.id, { querySeq: 1, outcome: 'change', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } }), fits);
+    await assert.rejects(() => w.checks.answer(DOC, second.id, { querySeq: 1, outcome: 'wait' }), fits);
     assert.equal((await w.lineDoc(second.id)).status, 'query');
   });
 
@@ -208,7 +213,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await w.checks.approve(PHARM, id, {});
     await w.checks.openQuery(id, { kind: 'stock', question: 'Out of stock in both stores: Aspirin tab 300 mg. Choose another medicine, wait for stock, or cancel.', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
     assert.equal((await w.lineDoc(id)).status, 'query');
-    const waited = await w.checks.answer(DOC, id, { outcome: 'wait' });
+    const waited = await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'wait' });
     assert.equal(waited.status, 'approved');
     assert.equal((await w.lineDoc(id)).waitingForStock, true);
 
@@ -216,10 +221,10 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal((await w.lineDoc(id)).query.seq, 2);
     await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
     const amox = { medicine: 'amoxicillin', product: 'amoxicillin-cap-500', dose: 500, route: 'oral', frequency: 'TDS', durationDays: 5 };
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'switch', switchTo: amox }), { status: 400 });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 2, outcome: 'switch', switchTo: amox }), { status: 400 });
     assert.equal((await w.lineDoc(id)).status, 'query');
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'switch' }), { status: 400 });
-    const sw = await w.checks.answer(DOC, id, { outcome: 'switch', switchTo: { ...amox, confirm: { reason: 'Tolerates it' } } });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 2, outcome: 'switch' }), { status: 400 });
+    const sw = await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'switch', switchTo: { ...amox, confirm: { reason: 'Tolerates it' } } });
     assert.equal(sw.status, 'cancelled');
     const repl: any = await m.PharmacyLine.findOne({ replaces: id }).lean();
     assert.equal(repl.status, 'to-check');
@@ -231,7 +236,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await w.openEr();
     const { id } = await order();
     await w.checks.query(PHARM, id, { kind: 'dose', question: 'one' });
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'ok' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'ok' });
     await w.checks.query(PHARM, id, { kind: 'other', question: 'two' });
     const clocks = await w.clocksOf('pharmacy-query');
     assert.deepEqual(clocks.map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
@@ -256,7 +261,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await backdateQueryClock(40);
     await w.clocks.checkDue(new Date());
     assert.ok((await alertOf(id)).escalation);
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'ok' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'ok' });
     assert.equal((await alertOf(id)).status, 'Completed');
     await w.checks.query(PHARM, id, { kind: 'clash', question: 'two' });
     const alert = await alertOf(id);
@@ -313,7 +318,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal((await w.lineDoc(id)).querySeq, 1);
     assert.equal((await w.sent('pharmacy.query')).length, 1);
     // Keep answers it: the red kidney flag is confirmed with the doctor's reason.
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Renal-dosed already' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Renal-dosed already' });
     const kept = await w.lineDoc(id);
     assert.equal(kept.flags.find((f: any) => f.kind === 'kidney').confirmed.reason, 'Renal-dosed already');
     assert.equal(kept.status, 'to-check');
@@ -339,8 +344,8 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     let line = await w.lineDoc(id);
     assert.deepEqual([line.status, line.query.kind, line.query.question], ['issued', 'kidney', 'Dose may need lowering for kidney function (eGFR 28). Please review.']);
     await assert.rejects(() => w.checks.cancel(DOC, id, 'x'), { status: 409 });
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'cancel', reason: 'x' }), { status: 400 });
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Dose is already reduced' });
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'cancel', reason: 'x' }), { status: 400 });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Dose is already reduced' });
     line = await w.lineDoc(id);
     assert.deepEqual([line.status, line.query.answer.outcome], ['issued', 'keep']);
     assert.equal((await alertOf(id)).status, 'Completed');
@@ -352,7 +357,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await m.PharmacyLine.updateOne({ _id: id2 }, { $set: { status: 'issued', issued: { by: { id: 'p', name: 'P' }, at: new Date(), realAt: new Date(), store: 'er', batches: [] }, flags: [] } });
     await w.orders.recheckPatient(w.patientId, 'kidney', { kinds: ['kidney'] });
     assert.equal((await w.lineDoc(id2)).query.kind, 'kidney');
-    const stopped = await w.checks.answer(DOC, id2, { outcome: 'stop', reason: 'Kidney function too low' });
+    const stopped = await w.checks.answer(DOC, id2, { querySeq: 1, outcome: 'stop', reason: 'Kidney function too low' });
     assert.equal(stopped.status, 'stopped');
     assert.equal((await w.sent('pharmacy.stopped')).length, 1);
     assert.equal((await w.lineDoc(id2)).stopped.reason, 'Kidney function too low');
@@ -369,7 +374,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const mid = await w.lineDoc(id);
     assert.deepEqual([mid.status, mid.query.kind], ['query', 'stock']);
     assert.equal(mid.flags.filter((f: any) => f.key === 'allergy.amoxicillin' && !f.confirmed).length, 1);
-    await w.checks.answer(DOC, id, { outcome: 'wait' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'wait' });
     const line = await w.lineDoc(id);
     assert.notEqual(line.status, 'approved');
     assert.equal(line.waitingForStock, false);
@@ -385,7 +390,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await w.checks.approve(PHARM, id, {});
     await w.checks.openQuery(id, { kind: 'stock', question: 'Out of stock', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
     await m.PharmacyLine.updateOne({ _id: id }, { $push: { flags: { key: 'allergy.cross-nsaid', kind: 'allergy', severity: 'amber', text: 'x', version: 1 } } });
-    await w.checks.answer(DOC, id, { outcome: 'wait' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'wait' });
     const line = await w.lineDoc(id);
     assert.deepEqual([line.status, line.approved, line.waitingForStock], ['to-check', undefined, false]);
     assert.equal((await w.sent('pharmacy.to-check')).length, 2);
@@ -405,7 +410,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
       }
       return original(lineId, seq);
     };
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'ok' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'ok' });
     const [answered] = await w.sent('pharmacy.query-answered');
     assert.deepEqual([answered.payload.querySeq, answered.payload.outcome], [1, 'keep']);
     assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
@@ -444,7 +449,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
       }
       return (real as any)(...args);
     };
-    const out = await w.checks.answer(DOC, id, { outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
+    const out = await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
     assert.equal(out.status, 'stopped');
     const stored = (await w.lineDoc(id)).query.answer.replacement;
     assert.deepEqual([stored.dose, stored.product], [150, 'aspirin-tab-150']);
@@ -466,7 +471,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const { id } = await order('stat', [{ ...enoxaparin60 }]);
     await w.kidneyReport(2.5, { labLine: 'k1' });
     await w.labResulted(String(theCase._id), 'rft');
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Renal-dosed already' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Renal-dosed already' });
     const line = await m.PharmacyLine.findById(id).exec();
     await (w.checks as any).queries.onRechecked([{ line, newRed: [], reason: 'kidney' }]);
     assert.equal((await w.lineDoc(id)).querySeq, 1);
@@ -485,7 +490,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const mid = await w.lineDoc(id);
     assert.equal(mid.query.kind, 'kidney');
     assert.equal(mid.flags.filter((f: any) => f.kind === 'allergy' && f.severity === 'red').length, 1);
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Renal-dosed already' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Renal-dosed already' });
     const line = await w.lineDoc(id);
     const allergy = line.flags.find((f: any) => f.kind === 'allergy');
     assert.equal(allergy.confirmed, undefined);
@@ -495,6 +500,10 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
     assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
     assert.equal((await alertOf(id)).querySeq, 2);
+    // The same Keep again names query 1: it can never confirm the allergy that query 2 asks about.
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Renal-dosed already' }), CHANGED);
+    const again = await w.lineDoc(id);
+    assert.deepEqual([again.query.seq, again.query.answer, again.flags.find((f: any) => f.kind === 'allergy').confirmed], [2, undefined, undefined]);
     // The pharmacist can't approve it: it is in a query, and the allergy still needs a doctor.
     await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'x' }), { status: 409 });
     await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'to-check' } });
@@ -515,7 +524,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await w.kidneyReport(2.5, { labLine: 'k1' });
     await w.labResulted(String(theCase._id), 'rft');
     assert.equal((await w.lineDoc(id)).querySeq, 1, 'the open allergy query takes no second query');
-    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Tolerated before' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Tolerated before' });
     const line = await w.lineDoc(id);
     assert.equal(line.status, 'issued');
     assert.deepEqual([line.query.kind, line.query.seq, line.query.answer], ['kidney', 2, undefined]);
@@ -543,7 +552,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
       }
       return realSend(msg);
     };
-    await assert.rejects(() => w.checks.answer(DOC, id, { outcome: 'keep', reason: 'ok' }));
+    await assert.rejects(() => w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'ok' }));
     await w.checks.query(PHARM, id, { kind: 'other', question: 'two' });
     assert.equal((await alertOf(id)).escalation, undefined);
     await w.escalations.advanceDue(new Date(Date.now() + 11 * MIN));
@@ -575,7 +584,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
       }
       return (realPublish as any)(...a);
     };
-    await w.checks.answer(DOC, id, { outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
     const stored = (await w.lineDoc(id)).query.answer.replacement;
     assert.equal(await m.PharmacyLine.countDocuments({ _id: stored.id }), 1);
     const announced = async () => (await w.sent('pharmacy.to-check')).filter((x) => x.payload.lineId === stored.id).length;
@@ -599,7 +608,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
       await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['aspirin'] } });
       return (realAdd as any)(...a);
     };
-    await w.checks.answer(DOC, id, { outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
     const repl: any = await m.PharmacyLine.findOne({ replaces: id }).lean();
     assert.deepEqual([repl.status, repl.query.kind], ['query', 'allergy']);
     const order2: any = await m.PharmacyOrder.findById(v.id).lean();
@@ -607,5 +616,109 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal((await w.clocksOf('pharmacy-check')).filter((c) => c.state === 'running').length, 0);
     await w.clocks.checkDue(new Date(Date.now() + 5 * 60 * MIN));
     assert.equal(await m.Escalation.countDocuments({ ladder: 'pharmacy' }), 0);
+  });
+
+  const redFlag = (line: any, kind: string) => line.flags.find((f: any) => f.kind === kind && f.severity === 'red');
+
+  test('a repeated Keep (a double-click or a retry) never answers the follow-up query the first Keep opened: 409, and the kidney flag stays unconfirmed', async () => {
+    const { case: theCase } = await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.checks.approve(PHARM, id, {});
+    await issueLine(id);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['enoxaparin'] } });
+    await w.orders.recheckPatient(w.patientId, 'order');
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    await w.labResulted(String(theCase._id), 'rft');
+    const keep = { querySeq: 1, outcome: 'keep', reason: 'Tolerated before' };
+    await w.checks.answer(DOC, id, keep);
+    const first = await w.lineDoc(id);
+    assert.deepEqual([first.query.kind, first.query.seq], ['kidney', 2]);
+    // The same request again names query 1, which is answered: it can't answer query 2.
+    await assert.rejects(() => w.checks.answer(DOC, id, keep), CHANGED);
+    const line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.answer], ['issued', 'kidney', 2, undefined]);
+    assert.equal(redFlag(line, 'kidney').confirmed, undefined);
+    assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
+    assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
+    assert.deepEqual([(await alertOf(id)).status, (await alertOf(id)).querySeq], ['Pending', 2]);
+    // Query 2, answered by its own number.
+    await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'Renal-dosed already' });
+    assert.equal(redFlag(await w.lineDoc(id), 'kidney').confirmed.reason, 'Renal-dosed already');
+  });
+
+  test("on an issued line, an allergy and a kidney flag that arrive during one query are each asked: the allergy query's Keep confirms only the allergy, then the kidney flag gets its own query", async () => {
+    const { case: theCase } = await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.checks.approve(PHARM, id, {});
+    await issueLine(id);
+    assert.equal(await w.checks.openQuery(id, { kind: 'dose', question: 'Dose?', by: { id: PHARM.id, name: PHARM.name } }), true);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['enoxaparin'] } });
+    await w.orders.recheckPatient(w.patientId, 'order');
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    await w.labResulted(String(theCase._id), 'rft');
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Dose fine' });
+    let line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.query.kind, line.query.seq], ['issued', 'allergy', 2]);
+    await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'Tolerated before' });
+    line = await w.lineDoc(id);
+    assert.equal(redFlag(line, 'allergy').confirmed.reason, 'Tolerated before');
+    assert.equal(redFlag(line, 'kidney').confirmed, undefined, 'an allergy answer never confirms a kidney flag');
+    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.answer], ['issued', 'kidney', 3, undefined]);
+    assert.equal(line.query.question, 'Dose may need lowering for kidney function (eGFR 28). Please review.');
+    assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'met'], [`${id}:q3`, 'running']]);
+    assert.deepEqual([(await alertOf(id)).status, (await alertOf(id)).querySeq], ['Pending', 3]);
+    await w.checks.answer(DOC, id, { querySeq: 3, outcome: 'keep', reason: 'Renal-dosed already' });
+    line = await w.lineDoc(id);
+    assert.equal(redFlag(line, 'kidney').confirmed.reason, 'Renal-dosed already');
+    assert.deepEqual([line.querySeq, line.query.answer.outcome], [3, 'keep']);
+  });
+
+  test("on a line not yet issued, an allergy query's Keep confirms only the allergy: a red kidney flag already on the line still needs the pharmacist's reason in To check", async () => {
+    await w.openEr();
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    assert.equal(redFlag(await w.lineDoc(id), 'kidney').key, 'kidney.0-30');
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['enoxaparin'] } });
+    await w.orders.recheckPatient(w.patientId, 'order');
+    let line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.query.kind], ['query', 'allergy']);
+    assert.ok(line.query.redKeys.includes('kidney.0-30'), 'the kidney flag was on the line when the allergy query opened');
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Tolerated before' });
+    line = await w.lineDoc(id);
+    assert.equal(line.status, 'to-check');
+    assert.equal(redFlag(line, 'allergy').confirmed.reason, 'Tolerated before');
+    assert.equal(redFlag(line, 'kidney').confirmed, undefined, 'an allergy answer never confirms a kidney flag');
+    assert.equal(line.querySeq, 1, 'no second query: the pharmacist decides in To check');
+    await assert.rejects(() => w.checks.approve(PHARM, id, {}), { status: 400, message: 'A reason is required to approve a red flag' });
+    assert.equal((await w.checks.approve(PHARM, id, { reason: 'Once daily agreed' })).status, 'approved');
+    assert.equal(redFlag(await w.lineDoc(id), 'kidney').confirmed.reason, 'Once daily agreed');
+  });
+
+  test('on an issued line, a kidney flag and a clash that arrive during one query each get their own question, one after the other', async () => {
+    const { case: theCase } = await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.checks.approve(PHARM, id, {});
+    await issueLine(id);
+    await w.checks.openQuery(id, { kind: 'other', question: 'Still needed?', by: { id: PHARM.id, name: PHARM.name } });
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    await w.labResulted(String(theCase._id), 'rft');
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [ibuprofen400] });
+    const unconfirmedReds = (l: any) => l.flags.filter((f: any) => f.severity === 'red' && !f.confirmed).map((f: any) => f.key).sort();
+    assert.deepEqual(unconfirmedReds(await w.lineDoc(id)), ['clash.ibuprofen', 'kidney.0-30']);
+    assert.equal((await w.lineDoc(id)).querySeq, 1);
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Still needed' });
+    const q2 = (await w.lineDoc(id)).query;
+    assert.deepEqual([q2.seq, q2.answer, q2.redKeys.length], [2, undefined, 1], 'a question of its own asks about one flag');
+    await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'First answer' });
+    let line = await w.lineDoc(id);
+    const q3 = line.query;
+    assert.deepEqual([line.status, q3.seq, q3.answer], ['issued', 3, undefined]);
+    assert.deepEqual([q2.kind, q3.kind].sort(), ['clash', 'kidney']);
+    assert.equal(line.flags.find((f: any) => f.key === q2.redKeys[0]).confirmed.reason, 'First answer');
+    assert.deepEqual(unconfirmedReds(line), [q3.redKeys[0]]);
+    await w.checks.answer(DOC, id, { querySeq: 3, outcome: 'keep', reason: 'Second answer' });
+    line = await w.lineDoc(id);
+    assert.equal(line.flags.find((f: any) => f.key === q3.redKeys[0]).confirmed.reason, 'Second answer');
+    assert.deepEqual([unconfirmedReds(line), line.querySeq], [[], 3]);
   });
 });
