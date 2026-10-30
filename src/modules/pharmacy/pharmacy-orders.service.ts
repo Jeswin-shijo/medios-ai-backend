@@ -360,14 +360,24 @@ export class PharmacyOrdersService {
     for (const line of active) {
       if (skip.has(String(line._id))) continue;
       const others = active.filter((o) => String(o._id) !== String(line._id)).map(asCheckLine);
-      const before = (line.flags ?? []) as Flag[];
-      const after = mergeFlags(before, checkLine(asCheckLine(line), facts, others), line.version, opts.kinds);
       const sig = (fs: Flag[]) => JSON.stringify([...fs].sort((a, b) => a.key.localeCompare(b.key)));
-      if (sig(before) === sig(after)) continue;
-      const saved = await this.lines.updateOne({ _id: line._id, version: line.version }, { $set: { flags: after } }).exec();
-      if (!saved.modifiedCount) continue;
-      line.flags = after;
-      results.push({ line, newRed: newRed(before, after), reason });
+      // The write is guarded on the version and on the flags it read, so a confirmation saved meanwhile is never overwritten:
+      // on a lost write the line is read again and the merge re-run once.
+      let cur: PharmacyLineDocument = line;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const before = (cur.flags ?? []) as Flag[];
+        const after = mergeFlags(before, checkLine(asCheckLine(cur), facts, others), cur.version, opts.kinds);
+        if (sig(before) === sig(after)) break;
+        const saved = await this.lines.updateOne({ _id: cur._id, version: cur.version, flags: cur.flags }, { $set: { flags: after } }).exec();
+        if (saved.modifiedCount) {
+          cur.flags = after;
+          results.push({ line: cur, newRed: newRed(before, after), reason });
+          break;
+        }
+        const fresh = await this.lines.findById(cur._id).exec();
+        if (!fresh) break;
+        cur = fresh;
+      }
     }
     if (results.length) {
       for (const l of this.rechecked) {

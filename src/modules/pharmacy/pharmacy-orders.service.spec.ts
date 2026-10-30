@@ -254,6 +254,40 @@ describe('PharmacyOrdersService', () => {
     assert.equal(n, 1);
   });
 
+  test('M1: a confirmation saved between the recheck\'s read and its write survives (the write is guarded on the flags and re-run once)', async () => {
+    const first = await service.order(DOC, { patientId, priority: 'routine', lines: [enoxaparin60] });
+    const enoxId = first.lines[0].id;
+    await service.order(DOC, { patientId, priority: 'routine', lines: [{ ...aspirin300, frequency: 'OD', durationDays: 5 }] });
+    const before: any = await m.PharmacyLine.findById(enoxId).lean();
+    const idx = before.flags.findIndex((f: any) => f.key === 'clash.aspirin');
+    assert.ok(idx >= 0);
+    const model: any = m.PharmacyLine;
+    const orig = model.updateOne;
+    let fired = false;
+    model.updateOne = function (filter: any, update: any, ...rest: any[]) {
+      if (!fired && String(filter?._id) === enoxId && update?.$set?.flags) {
+        fired = true;
+        // Another person marks the amber clash reviewed after the recheck read the line and before it writes.
+        return {
+          exec: async () => {
+            await orig.call(this, { _id: enoxId }, { $set: { [`flags.${idx}.reviewed`]: { by: 'Neethu', at: 'x' } } }).exec();
+            return orig.call(this, filter, update, ...rest).exec();
+          },
+        };
+      }
+      return orig.call(this, filter, update, ...rest);
+    };
+    try {
+      await service.order(DOC, { patientId, priority: 'routine', lines: [{ medicine: 'ibuprofen', product: 'ibuprofen-tab-400', dose: 400, route: 'oral', frequency: 'BD', durationDays: 3 }] });
+    } finally {
+      model.updateOne = orig;
+    }
+    assert.ok(fired);
+    const after: any = await m.PharmacyLine.findById(enoxId).lean();
+    assert.ok(after.flags.some((f: any) => f.key === 'clash.ibuprofen'), 'the new flag was written');
+    assert.equal(after.flags.find((f: any) => f.key === 'clash.aspirin').reviewed?.by, 'Neethu', 'the concurrent confirmation survived');
+  });
+
   test('a kidney-only recheck touches only kidney flags', async () => {
     const v = await service.order(DOC, { patientId, priority: 'routine', lines: [{ medicine: 'metformin', product: 'metformin-tab-500', dose: 500, route: 'oral', frequency: 'BD', durationDays: 10 }] });
     assert.deepEqual(v.lines[0].flags.map((f) => f.key), ['kidney.unknown']);
