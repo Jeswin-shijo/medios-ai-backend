@@ -460,10 +460,9 @@ describe('PharmacyIssueService: issuing from stock', () => {
     await s.batch('amoxicillin-cap-500', 'er', 'A', 100, 100);
     const id = (await s.approved([amoxicillin500])).lines[0].id as string;
     await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
-    await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409 });
+    await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409, message: 'A new allergy was found: the doctor has been asked' });
     const line = await w.lineDoc(id);
-    assert.notEqual(line.status, 'issued');
-    assert.ok(['query', 'to-check'].includes(line.status));
+    assert.equal(line.status, 'query');
     assert.equal(line.query?.kind, 'allergy');
     assert.equal(await qty((await m.PharmacyBatch.findOne({ batchNo: 'A' }).lean<any>())!._id), 100);
   });

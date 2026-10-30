@@ -19,6 +19,7 @@ const ALLERGY = 'Penicillin (rash in 2019)';
 const FREE_NAME = 'Syp Herbal Tonic';
 /** An unlisted line keeps the route text as typed (Y36): it must never reach the AI. */
 const FREE_ROUTE = 'apply to the left knee';
+const FREE_FREQ = 'after food when needed';
 
 /** A provider that records exactly what the AI client is handed and answers with `answer`. */
 function stubProvider(name: AiProviderName, answer: unknown | ((req: any) => unknown) = { text: 'It matters because of the recorded allergy.' }) {
@@ -61,7 +62,7 @@ describe('PharmacyAiService', () => {
       dose: 5,
       unit: 'ml',
       route: FREE_ROUTE,
-      frequency: 'BD',
+      frequency: FREE_FREQ,
       note: NOTE,
       flags: [{ key: 'list.unmatched', kind: 'list', severity: 'amber', text: 'Not in the medicine list: checks could not run', version: 1 }],
     });
@@ -125,7 +126,7 @@ describe('PharmacyAiService', () => {
       blobs.push(...spy.map((x) => JSON.stringify(x)), ...calls.map((x) => JSON.stringify(x)));
     }
     assert.ok(blobs.length >= 12);
-    const secrets = [NAME, 'Ravi', 'Kumar', PHONE, UHID, NOTE, 'Latha', 'order note', REASON, 'rash', '2019', FREE_NAME, 'Herbal', FREE_ROUTE, 'left knee', String(w.patientId), ids.amox, ids.ibu, ids.enox, ids.free, ids.order];
+    const secrets = [NAME, 'Ravi', 'Kumar', PHONE, UHID, NOTE, 'Latha', 'order note', REASON, 'rash', '2019', FREE_NAME, 'Herbal', FREE_ROUTE, FREE_FREQ, 'left knee', String(w.patientId), ids.amox, ids.ibu, ids.enox, ids.free, ids.order];
     for (const blob of blobs) {
       for (const s of secrets) assert.ok(!blob.includes(s), `leaked ${s}`);
       assert.ok(!/MHK\d{9}/i.test(blob), 'a UHID reached the AI');

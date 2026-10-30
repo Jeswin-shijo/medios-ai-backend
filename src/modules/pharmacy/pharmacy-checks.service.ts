@@ -47,6 +47,8 @@ export class PharmacyChecksService {
     // Y48: an allergy recorded after ordering is seen now, before the gates read the flags.
     await this.orders.recheckPatient(String(first.patient), 'order', { kinds: ['allergy'] });
     const line = await this.queries.load(lineId);
+    // The recheck itself just held the line in an allergy query: say so.
+    if (first.status === 'to-check' && line.status === 'query' && line.query?.kind === 'allergy') throw new ConflictException('A new allergy was found: the doctor has been asked');
     if (line.status !== 'to-check') throw new ConflictException('This line is not waiting to be checked');
     const flags = (line.flags ?? []) as Flag[];
     if (needsDoctor(flags, line.version).length) throw new ConflictException('A doctor must confirm this allergy first. Query the doctor.');

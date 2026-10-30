@@ -51,9 +51,9 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     const id = v.lines[0].id;
     // A real allergy on the record (Y48: every approval rechecks it). The first approval holds the line in an allergy query.
     await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Aspirin'] } });
-    await assert.rejects(() => w.checks.approve(PHARM, id, {}), { status: 409 });
+    await assert.rejects(() => w.checks.approve(PHARM, id, {}), { status: 409, message: 'A new allergy was found: the doctor has been asked' });
     assert.equal((await w.lineDoc(id)).status, 'query');
-    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'I checked it', allergyReviewed: true }), { status: 409 });
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'I checked it', allergyReviewed: true }), { status: 409, message: 'This line is not waiting to be checked' });
     assert.equal((await w.sent('pharmacy.approved')).length, 0);
     // The doctor's Keep confirms the red allergy flag with the doctor's reason, and the line is back in To check.
     await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Tolerated it since' });
@@ -102,7 +102,7 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     const id = v.lines[0].id;
     assert.deepEqual((await w.lineDoc(id)).flags, []);
     await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
-    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'ok', allergyReviewed: true }), { status: 409 });
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'ok', allergyReviewed: true }), { status: 409, message: 'A new allergy was found: the doctor has been asked' });
     const held = await w.lineDoc(id);
     assert.equal(held.status, 'query');
     assert.equal(held.query.kind, 'allergy');

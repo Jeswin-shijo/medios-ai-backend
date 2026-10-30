@@ -3,7 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { StructuredTask } from '../ai/ai-types';
 import { AiService } from '../ai/ai.service';
-import { ROUTE_LABEL, medicineByKey } from './pharmacy-catalogue';
+import { DOSES_PER_DAY, ROUTE_LABEL, medicineByKey } from './pharmacy-catalogue';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
 import type { Flag, FlagKind } from './pharmacy-rules';
 import { PharmacyLine, PharmacyLineDocument } from './schemas/pharmacy-line.schema';
@@ -86,9 +86,9 @@ export class PharmacyAiService {
       medicine: (l.medicine ? medicineByKey(l.medicine)?.name : null) ?? UNLISTED,
       dose: unreadable ? null : l.dose,
       unit: l.unit,
-      // Free text never leaves: only a known route key is sent (an unlisted line keeps the route as typed).
+      // Free text never leaves: only a known route key and a known frequency key are sent (an unlisted line keeps the route as typed).
       route: Object.prototype.hasOwnProperty.call(ROUTE_LABEL, l.route) ? l.route : '',
-      frequency: l.frequency,
+      frequency: Object.prototype.hasOwnProperty.call(DOSES_PER_DAY, l.frequency) ? l.frequency : '',
     };
   }
 

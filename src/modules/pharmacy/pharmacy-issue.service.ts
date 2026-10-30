@@ -94,6 +94,8 @@ export class PharmacyIssueService {
     // Y48: an allergy recorded after ordering or approval is seen now, before the barrier reads the flags.
     if (first.status === 'approved') await this.orders.recheckPatient(String(first.patient), 'order', { kinds: ['allergy'] });
     const line = await this.load(lineId);
+    // The recheck itself just held the line in an allergy query: say so.
+    if (first.status === 'approved' && line.status === 'query' && line.query?.kind === 'allergy') throw new ConflictException('A new allergy was found: the doctor has been asked');
     if (line.status !== 'approved') throw new ConflictException('This line is not approved for issue');
     if (line.issuing) throw new ConflictException('This line is being issued');
 
