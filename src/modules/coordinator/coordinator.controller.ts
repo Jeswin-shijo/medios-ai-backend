@@ -12,7 +12,7 @@ import { ApprovalsService } from './approvals.service';
 import { CasesService } from './cases.service';
 import { ChatService } from './chat.service';
 import { ClocksService } from './clocks.service';
-import { CoordinatorEvents } from './coordinator-events';
+import { CoordinatorEvents, eventFor } from './coordinator-events';
 import { CoordinatorOverviewService } from './coordinator-overview.service';
 import { EscalationsService } from './escalations.service';
 import { MessagesService } from './messages.service';
@@ -224,9 +224,9 @@ export class CoordinatorController {
 
   /** Live Coordinator events. `@Res()` takes the response over, so the JSON wrapper does not apply. */
   @Get('stream')
-  @Roles(...ADMIT_ROLES)
+  @Roles(...ADMIT_ROLES, UserRole.PHARMACIST, UserRole.LAB)
   @ApiOperation({ summary: 'Live Coordinator events (text/event-stream): "coordinator" and "ping" events' })
-  stream(@Req() req: Request, @Res() res: Response) {
+  stream(@CurrentUser() user: any, @Req() req: Request, @Res() res: Response) {
     res.status(200).set({
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -240,7 +240,7 @@ export class CoordinatorController {
       if (!closed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
-    const sub = this.events.events$.subscribe((e) => write('coordinator', e));
+    const sub = this.events.events$.subscribe((e) => write('coordinator', eventFor(actorOf(user).role, e)));
     const ping = setInterval(() => write('ping', {}), PING_MS);
     req.on('close', () => {
       closed = true;
