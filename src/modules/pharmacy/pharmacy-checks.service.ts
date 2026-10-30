@@ -173,6 +173,9 @@ export class PharmacyChecksService {
   ensureReplacement(lineId: string): Promise<PharmacyLineDocument | null> {
     return this.queries.ensureReplacement(lineId);
   }
+  sendBackToCheck(lineId: string): Promise<boolean> {
+    return this.queries.sendBackToCheck(lineId);
+  }
   holdAtOnce(lines: PharmacyLineDocument[]): Promise<void> {
     return this.queries.holdAtOnce(lines);
   }

@@ -167,6 +167,26 @@ export class PharmacyQueries {
     await this.alerts.updateOne({ link: `pharmacy-line:${lineId}`, ...(seq === undefined ? {} : { querySeq: seq }) }, { $set: { status: 'Completed' } }).exec();
   }
 
+  /**
+   * Sends an approved, not-yet-issued line back to To check: guarded on the version and flags read, with `approved`
+   * and any issue claim unset (a claim in flight then loses its flip and puts its takes back). It joins a check round
+   * and leaves the issue clock. Returns false when the line was no longer approved.
+   */
+  async sendBackToCheck(lineId: string): Promise<boolean> {
+    const line = await this.load(lineId);
+    if (line.status !== 'approved') return false;
+    const done = await this.lines
+      .updateOne(
+        { _id: line._id, status: 'approved', version: line.version, flags: line.flags },
+        { $set: { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false }, $unset: { approved: '', issuing: '' } },
+      )
+      .exec();
+    if (!done.modifiedCount) return false;
+    const back = await this.load(lineId);
+    await this.orders.publish(String(line.order), [{ type: 'pharmacy.to-check', lineId, dedupeKey: startKey('pharmacy.to-check', back) }]);
+    return true;
+  }
+
   /** Opens an allergy query (by the Pharmacy Agent) on each line that has an unconfirmed red allergy flag. */
   async holdAtOnce(lines: PharmacyLineDocument[]): Promise<void> {
     for (const l of lines) {
@@ -186,7 +206,15 @@ export class PharmacyQueries {
     for (const r of results) {
       try {
         const id = String(r.line._id);
-        const fresh = await this.load(id);
+        let fresh = await this.load(id);
+        // Y28: an approval covers only the flags present when it was given. A new red flag, or any allergy flag not
+        // yet dealt with, sends a not-yet-issued approved line back to To check (off the issue clock).
+        if (fresh.status === 'approved') {
+          const flags = (fresh.flags ?? []) as Flag[];
+          if (r.newRed.length || needsDoctor(flags, fresh.version).length || needsReview(flags, fresh.version).length) {
+            if (await this.sendBackToCheck(id)) fresh = await this.load(id);
+          }
+        }
         if (this.hasOpenQuery(fresh)) continue;
         const allergy = r.newRed.find((f) => f.kind === 'allergy' && needsDoctor((fresh.flags ?? []) as Flag[], fresh.version).some((n) => n.key === f.key));
         if (allergy) {

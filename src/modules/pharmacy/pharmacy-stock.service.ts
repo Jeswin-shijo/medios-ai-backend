@@ -180,9 +180,8 @@ export class PharmacyStockService {
     if (input.expiry < today()) throw new BadRequestException('This batch has already expired');
     const clash = await this.batches.findOne({ product: product.key, store: input.store, batchNo }).lean().exec();
     if (clash && clash.expiry !== input.expiry) throw new ConflictException(`Batch ${batchNo} is already in stock with another expiry date`);
-    let batch: PharmacyBatchDocument | null;
-    try {
-      batch = await this.batches
+    const upsert = () =>
+      this.batches
         .findOneAndUpdate(
           { product: product.key, store: input.store, batchNo, expiry: input.expiry },
           {
@@ -192,16 +191,23 @@ export class PharmacyStockService {
           { upsert: true, new: true },
         )
         .exec();
+    let batch: PharmacyBatchDocument | null;
+    try {
+      batch = await upsert();
     } catch (e) {
-      if ((e as { code?: number }).code === 11000) throw new ConflictException(`Batch ${batchNo} is already in stock with another expiry date`);
-      throw e;
+      if ((e as { code?: number }).code !== 11000) throw e;
+      // Two first receives of a new batch raced: the loser retries once and adds to the winner's batch, unless the expiry really differs.
+      const winner = await this.batches.findOne({ product: product.key, store: input.store, batchNo }).lean().exec();
+      if (!winner || winner.expiry !== input.expiry) throw new ConflictException(`Batch ${batchNo} is already in stock with another expiry date`);
+      batch = await upsert();
     }
     await this.movementDocs.create({
       batch: batch!._id, product: product.key, store: input.store, change: input.quantity, kind: 'received',
       reason: `Received batch ${batchNo}`, by: { id: actor.id, name: actor.name }, at: clinicNow(),
     });
-    await this.afterChange(product.key, input.store);
-    await this.releaseWaiting(product.key);
+    // The stock change is saved: a failure here is logged (the sweep repairs it), never thrown, so a retry cannot count it twice.
+    await this.afterChange(product.key, input.store).catch((e) => this.logger.error(`Low-stock check of ${product.key} failed: ${String(e)}`));
+    await this.releaseWaiting(product.key).catch((e) => this.logger.error(`Releasing waiting lines of ${product.key} failed: ${String(e)}`));
     return { id: String(batch!._id), usable: await this.usable(product.key, input.store) };
   }
 
@@ -220,7 +226,7 @@ export class PharmacyStockService {
       batch: done._id, product: done.product, store: done.store, change: input.change, kind: 'adjusted', reason: input.reason,
       by: { id: actor.id, name: actor.name }, at: clinicNow(),
     });
-    await this.afterChange(done.product, done.store);
+    await this.afterChange(done.product, done.store).catch((e) => this.logger.error(`Low-stock check of ${done.product} failed: ${String(e)}`));
     return { id: String(done._id), quantity: done.quantity };
   }
 
@@ -233,12 +239,11 @@ export class PharmacyStockService {
     return this.adjust(actor, batchId, { change: -batch.quantity, reason: 'expired' });
   }
 
-  async setLevel(actor: Actor, input: { product: string; store: string; reorderLevel: number }): Promise<{ product: string; store: Store; reorderLevel: number }> {
+  async setLevel(_actor: Actor, input: { product: string; store: string; reorderLevel: number }): Promise<{ product: string; store: Store; reorderLevel: number }> {
     if (typeof input?.product !== 'string' || !productByKey(input.product)) throw new BadRequestException('Choose a medicine from the list');
     if (!isStore(input.store)) throw new BadRequestException('Choose the Main pharmacy or the ER');
     if (!whole(input.reorderLevel, 0, MAX_QTY)) throw new BadRequestException(`The reorder level must be a whole number from 0 to ${MAX_QTY}`);
     await this.levels.updateOne({ product: input.product, store: input.store }, { $set: { reorderLevel: input.reorderLevel } }, { upsert: true }).exec();
-    this.logger.log(`Reorder level of ${input.product} in ${input.store} set to ${input.reorderLevel} by ${actor.name}`);
     await this.afterChange(input.product, input.store);
     return { product: input.product, store: input.store, reorderLevel: input.reorderLevel };
   }
@@ -259,18 +264,19 @@ export class PharmacyStockService {
     if (low && !level.lowAlertedAt) {
       const claimed = await this.levels.findOneAndUpdate({ _id: level._id, lowAlertedAt: { $exists: false } }, { $set: { lowAlertedAt: new Date() } }, { new: true }).exec();
       if (!claimed) return false;
-      await this.raiseAlert(product, store, usable, level.reorderLevel);
+      await this.raiseAlert(product, store, usable, level.reorderLevel, claimed.lowAlertedAt!);
       return true;
     }
     if (!low && level.lowAlertedAt) {
       const cleared = await this.levels.findOneAndUpdate({ _id: level._id, lowAlertedAt: { $exists: true } }, { $unset: { lowAlertedAt: '' } }).exec();
-      if (cleared) await this.alerts.updateOne({ link: lowAlertLink(product, store) }, { $set: { status: 'Completed' } }).exec();
+      // Only the alert raised for the claim just cleared: a newer low's alert is never completed by an older restock.
+      if (cleared?.lowAlertedAt) await this.alerts.updateOne({ link: lowAlertLink(product, store), lowAlertedAt: cleared.lowAlertedAt }, { $set: { status: 'Completed' } }).exec();
     }
     return false;
   }
 
   /** One alert per product and store: a later low reuses the document and makes it Pending again. */
-  private async raiseAlert(product: string, store: Store, usable: number, level: number): Promise<void> {
+  private async raiseAlert(product: string, store: Store, usable: number, level: number, stamp: Date): Promise<void> {
     const def = productByKey(product);
     await this.alerts
       .updateOne(
@@ -280,6 +286,7 @@ export class PharmacyStockService {
           $set: {
             title: `Low stock: ${def?.label ?? product} (${STORE_LABEL[store]})`,
             subtitle: `${usable} left · reorder level ${level}`,
+            lowAlertedAt: stamp,
             type: 'Medication Alert',
             category: 'Medication',
             priority: 'Medium',
@@ -303,15 +310,31 @@ export class PharmacyStockService {
           continue;
         }
         const fresh = await this.levels.findById(l._id).lean<PharmacyStockLevelDocument>().exec();
-        if (fresh?.lowAlertedAt && fresh.reorderLevel > 0 && !(await this.alerts.exists({ link: lowAlertLink(l.product, l.store) }))) {
-          await this.raiseAlert(l.product, l.store, await this.usable(l.product, l.store), fresh.reorderLevel);
-          raised++;
+        if (fresh?.lowAlertedAt && fresh.reorderLevel > 0) {
+          // A flag set with no alert, or with another claim's alert (a restock completed it while stock was low again): raise it.
+          const alert = await this.alerts.findOne({ link: lowAlertLink(l.product, l.store) }).lean<TaskAlertDocument>().exec();
+          if (!alert || new Date(alert.lowAlertedAt ?? 0).getTime() !== new Date(fresh.lowAlertedAt).getTime()) {
+            await this.raiseAlert(l.product, l.store, await this.usable(l.product, l.store), fresh.reorderLevel, fresh.lowAlertedAt);
+            raised++;
+          }
         }
       } catch (e) {
         this.logger.error(`Low-stock sweep of ${l.product} in ${l.store} failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    await this.releaseWaitingWithStock().catch((e) => this.logger.error(`Releasing waiting lines failed: ${String(e)}`));
     return raised;
+  }
+
+  /** Releases the waiting lines of every product that has usable stock in either store now (the repair for a receive that failed before its release). */
+  async releaseWaitingWithStock(): Promise<number> {
+    let released = 0;
+    for (const product of await this.lines.distinct('product', { status: 'approved', waitingForStock: true }).exec()) {
+      if (!product) continue;
+      const have = (await Promise.all(STORES.map((st) => this.usable(product, st)))).some((n) => n > 0);
+      if (have) released += await this.releaseWaiting(product);
+    }
+    return released;
   }
 
   // ---------- waiting for stock ----------

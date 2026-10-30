@@ -150,4 +150,74 @@ describe('PharmacyStockService: receiving, adjusting, low stock and waiting', ()
     assert.equal((await w.lineDoc(id)).waitingForStock, false);
     assert.equal((await w.sent('pharmacy.to-issue')).length, before);
   });
+
+  test('a restock never completes an alert that a newer low just raised; the sweep repairs a mismatched alert', async () => {
+    const b = await s.batch(ASP, 'er', 'A', 100, 12);
+    await s.stock.setLevel(PHARM, { product: ASP, store: 'er', reorderLevel: 5 });
+    await s.stock.adjust(PHARM, String(b._id), { change: -10, reason: 'damaged' });
+    const levels: any = m.PharmacyStockLevel;
+    const orig = levels.findOneAndUpdate;
+    let fired = false;
+    levels.findOneAndUpdate = function (...args: any[]) {
+      const q = orig.apply(this, args);
+      const isClear = JSON.stringify(args[1] ?? {}).includes('$unset');
+      const exec = q.exec.bind(q);
+      q.exec = async () => {
+        const r = await exec();
+        if (isClear && !fired) {
+          fired = true;
+          levels.findOneAndUpdate = orig;
+          const b2 = await m.PharmacyBatch.findOne({ batchNo: 'R' }).lean<any>();
+          await s.stock.adjust(PHARM, String(b2._id), { change: -50, reason: 'damaged' });
+        }
+        return r;
+      };
+      return q;
+    };
+    try {
+      await s.stock.receive(PHARM, { product: ASP, store: 'er', batchNo: 'R', expiry: inDays(90), quantity: 50 });
+    } finally {
+      levels.findOneAndUpdate = orig;
+    }
+    assert.ok(fired);
+    assert.equal(await s.stock.usable(ASP, 'er'), 2);
+    assert.ok((await m.PharmacyStockLevel.findOne({ product: ASP, store: 'er' }).lean<any>())!.lowAlertedAt);
+    assert.equal((await stockAlerts())[0].status, 'Pending');
+    // Force the old end state (alert completed under the new claim's stamp mismatch) and let the sweep repair it.
+    await m.TaskAlertItem.updateOne({ link: `pharmacy-stock:${ASP}:er` }, { $set: { status: 'Completed' }, $unset: { lowAlertedAt: '' } });
+    assert.equal(await s.stock.sweepLowStock(), 1);
+    assert.equal((await stockAlerts())[0].status, 'Pending');
+    // A ticked-off alert keeps its stamp and is not raised again.
+    await m.TaskAlertItem.updateOne({ link: `pharmacy-stock:${ASP}:er` }, { $set: { status: 'Completed' } });
+    assert.equal(await s.stock.sweepLowStock(), 0);
+  });
+
+  test('a failure after the stock change is logged, not thrown, and waiting lines are still released; the sweep releases the rest', async () => {
+    const v = await s.approved([{ medicine: 'ticagrelor', product: 'ticagrelor-tab-90', dose: 180, route: 'oral', frequency: 'STAT' }], 'stat');
+    const id = v.lines[0].id;
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { waitingForStock: true } });
+    const real = s.stock.afterChange.bind(s.stock);
+    (s.stock as any).afterChange = async () => {
+      throw new Error('boom');
+    };
+    const r = await s.stock.receive(PHARM, { product: 'ticagrelor-tab-90', store: 'er', batchNo: 'T1', expiry: inDays(100), quantity: 4 });
+    assert.equal(r.usable, 4);
+    assert.equal((await w.lineDoc(id)).waitingForStock, false);
+    const b = await m.PharmacyBatch.findOne({ batchNo: 'T1' }).lean<any>();
+    await assert.rejects(() => s.stock.adjust(PHARM, String(b._id), { change: -9, reason: 'damaged' }), { status: 409 });
+    const out = await s.stock.adjust(PHARM, String(b._id), { change: -1, reason: 'damaged' });
+    assert.equal(out.quantity, 3);
+    (s.stock as any).afterChange = real;
+    // A line marked waiting while stock exists (its release was lost) is released by the sweep.
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { waitingForStock: true } });
+    await s.stock.sweepLowStock();
+    assert.equal((await w.lineDoc(id)).waitingForStock, false);
+  });
+
+  test('concurrent first receives of a new batch all succeed and add up', async () => {
+    const rs = await Promise.allSettled(Array.from({ length: 4 }, () => s.stock.receive(PHARM, { product: ASP, store: 'er', batchNo: 'NEW', expiry: inDays(60), quantity: 5 })));
+    assert.ok(rs.every((r) => r.status === 'fulfilled'));
+    assert.equal(await s.stock.usable(ASP, 'er'), 20);
+    assert.equal(await m.PharmacyBatch.countDocuments({}), 1);
+  });
 });

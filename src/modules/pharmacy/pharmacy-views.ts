@@ -56,7 +56,7 @@ export interface PharmacyLineView {
   query: QueryView | null;
   approved: { by: By; at: string; reason: string | null } | null;
   rejected: { by: By; reason: string; at: string } | null;
-  issued: { by: By; at: string; store: string; batches: { batch: string; batchNo: string; expiry: string; qty: number }[] } | null;
+  issued: { by: By; at: string; store: string; quantity: number | null; batches: { batch: string; batchNo: string; expiry: string; qty: number }[] } | null;
   cancelled: { by: By; reason: string; at: string } | null;
   stopped: { by: By; reason: string; at: string } | null;
   waitingForStock: boolean;
@@ -164,7 +164,7 @@ export function buildLineViews(
           : null,
         approved: l.approved ? { by: l.approved.by, at: iso(l.approved.at)!, reason: l.approved.reason ?? null } : null,
         rejected: l.rejected ? { by: l.rejected.by, reason: l.rejected.reason, at: iso(l.rejected.at)! } : null,
-        issued: l.issued ? { by: l.issued.by, at: iso(l.issued.at)!, store: l.issued.store, batches: l.issued.batches ?? [] } : null,
+        issued: l.issued ? { by: l.issued.by, at: iso(l.issued.at)!, store: l.issued.store, quantity: l.issued.quantity ?? null, batches: l.issued.batches ?? [] } : null,
         cancelled: l.cancelled ? { by: l.cancelled.by, reason: l.cancelled.reason, at: iso(l.cancelled.at)! } : null,
         stopped: l.stopped ? { by: l.stopped.by, reason: l.stopped.reason, at: iso(l.stopped.at)! } : null,
         waitingForStock: !!l.waitingForStock,

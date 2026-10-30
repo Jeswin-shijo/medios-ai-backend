@@ -120,8 +120,11 @@ describe('PharmacyIssueService: issuing from stock', () => {
 
   test('two concurrent issues of 6 from one batch of 10 succeed once; the batch ends at 4, never below zero, and the loser\'s line is still approved', async () => {
     const b = await s.batch(ASP, 'er', 'B1', 100, 10);
-    const a = await one(aspirin6);
-    const c = await one(aspirin6);
+    // Both are ordered first: the second order sends the first back to To check (Y28), so both are approved after.
+    const [va, vc] = [await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [aspirin6] }), await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [aspirin6] })];
+    const [a, c] = [va.lines[0].id as string, vc.lines[0].id as string];
+    await w.checks.approve(PHARM, a, { reason: 'intended' });
+    await w.checks.approve(PHARM, c, { reason: 'intended' });
     const results = await Promise.allSettled([s.issue.issue(PHARM, a, {}), s.issue.issue(PHARM, c, {})]);
     assert.deepEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
     const lost = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
@@ -200,6 +203,7 @@ describe('PharmacyIssueService: issuing from stock', () => {
     assert.equal(await m.PharmacyMovement.countDocuments({}), 0);
     const [msg] = await w.sent('pharmacy.issued');
     assert.equal(msg.payload.quantity, 7);
+    assert.equal((await w.orders.line(id)).issued!.quantity, 7);
     assert.ok(!/Ambroxol/.test(msg.summary + JSON.stringify(msg.payload)));
   });
 
@@ -239,7 +243,8 @@ describe('PharmacyIssueService: issuing from stock', () => {
     await s.batch('enoxaparin-syringe-60', 'er', 'E', 100, 50);
     await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $push: { flags: { key: 'allergy.cross-nsaid', kind: 'allergy', severity: 'amber', text: 'x', version: 1 } } });
     await assert.rejects(() => s.issue.issue(PHARM, v.lines[0].id, {}), { status: 409 });
-    assert.equal((await w.lineDoc(v.lines[0].id)).status, 'approved');
+    // Y28 backstop: not a dead end, the line is back in To check.
+    assert.equal((await w.lineDoc(v.lines[0].id)).status, 'to-check');
     assert.equal(await m.PharmacyMovement.countDocuments({}), 0);
   });
 
@@ -248,13 +253,12 @@ describe('PharmacyIssueService: issuing from stock', () => {
     const [crashed, claimed, done] = v.lines.map((l: any) => l.id as string);
     const ago = (sec: number) => new Date(Date.now() - sec * 1000);
     const bAsp = await s.batch(ASP, 'er', 'A', 100, 40);
-    const bEno = await s.batch('enoxaparin-syringe-60', 'er', 'E', 100, 40);
     const bAmx = await s.batch('amoxicillin-cap-500', 'er', 'X', 100, 40);
     const by = { id: PHARM.id, name: PHARM.name };
     // crashed: the take was made (stock down), the line never flipped.
     await m.PharmacyBatch.updateOne({ _id: bAsp._id }, { $inc: { quantity: -1 }, $push: { takes: { line: new Types.ObjectId(crashed), qty: 1, realAt: ago(90) } } });
     await m.PharmacyLine.updateOne({ _id: crashed }, { $set: { issuing: { by, store: 'er', realAt: ago(90) } } });
-    // claimed: claimed, no take yet; and a fresh claim that must be left alone.
+    // claimed: claimed, no take yet.
     await m.PharmacyLine.updateOne({ _id: claimed }, { $set: { issuing: { by, store: 'er', realAt: ago(90) } } });
     // done: the line flipped, the movement was never written.
     await m.PharmacyBatch.updateOne({ _id: bAmx._id }, { $inc: { quantity: -15 }, $push: { takes: { line: new Types.ObjectId(done), qty: 15, realAt: ago(90) } } });
@@ -273,11 +277,10 @@ describe('PharmacyIssueService: issuing from stock', () => {
     const mv = await m.PharmacyMovement.find({ line: done }).lean<any>();
     assert.deepEqual([mv.length, mv[0].change, mv[0].kind, String(mv[0].batch)], [1, -15, 'issued', String(bAmx._id)]);
     assert.equal((await m.PharmacyBatch.findById(bAmx._id).lean<any>())!.takes.length, 0);
-    // A fresh claim is left alone, and a second run does nothing.
+    // A fresh claim (set now) is left alone, and a second run does nothing.
     await m.PharmacyLine.updateOne({ _id: claimed }, { $set: { issuing: { by, store: 'er', realAt: ago(5) } } });
     assert.deepEqual(await s.issue.repairTakes(), { undone: 0, logged: 0 });
     assert.ok((await w.lineDoc(claimed)).issuing);
-    void bEno;
   });
 
   test('announceIssued sends pharmacy.issued once for an issued line whose message never went out', async () => {
@@ -288,5 +291,152 @@ describe('PharmacyIssueService: issuing from stock', () => {
     assert.equal(await s.issue.announceIssued(id), true);
     assert.equal((await w.sent('pharmacy.issued')).length, 1);
     assert.equal(await s.issue.announceIssued(id), false);
+  });
+
+  test('Y28: an allergy recorded after approval sends the approved line back to To check; it leaves the issue clock, can be reviewed and approved, and no issue escalation is left running', async () => {
+    await s.batch(ASP, 'er', 'A', 100, 50);
+    const id = (await s.approved([aspirin300])).lines[0].id;
+    assert.equal((await w.clocksOf('pharmacy-issue')).length, 1);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['NSAIDs'] } });
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [clopidogrel300] });
+    let line = await w.lineDoc(id);
+    assert.equal(line.status, 'to-check');
+    assert.equal(line.approved, undefined);
+    assert.ok(line.flags.some((f: any) => f.key === 'allergy.cross-nsaid' && !f.reviewed));
+    assert.equal((await w.sent('pharmacy.issue-done')).length, 1);
+    const [clock] = await w.clocksOf('pharmacy-issue');
+    assert.notEqual(clock.state, 'running');
+    assert.equal(await m.Escalation.countDocuments({}), 0);
+    await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409 });
+    await w.checks.approve(PHARM, id, { allergyReviewed: true });
+    const view = await s.issue.issue(PHARM, id, {});
+    assert.equal(view.status, 'issued');
+  });
+
+  test('Y28: a new red flag from a later order sends the approved line back to To check', async () => {
+    const id = (await s.approved([aspirin300])).lines[0].id;
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [aspirin300] });
+    assert.equal((await w.lineDoc(id)).status, 'to-check');
+  });
+
+  test('a red allergy flag added between the take and the flip: the flip fails, the take is undone and the line is held', async () => {
+    const b = await s.batch(ASP, 'er', 'A', 100, 50);
+    const id = await one();
+    const model: any = m.PharmacyBatch;
+    const orig = model.findOneAndUpdate;
+    let fired = false;
+    model.findOneAndUpdate = function (...args: any[]) {
+      const q = orig.apply(this, args);
+      const exec = q.exec.bind(q);
+      q.exec = async () => {
+        const r = await exec();
+        if (!fired) {
+          fired = true;
+          await w.redAllergy(id, 'aspirin');
+        }
+        return r;
+      };
+      return q;
+    };
+    try {
+      await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409 });
+    } finally {
+      model.findOneAndUpdate = orig;
+    }
+    assert.ok(fired);
+    const line = await w.lineDoc(id);
+    assert.notEqual(line.status, 'issued');
+    assert.equal(line.issuing, undefined);
+    assert.equal(await qty(b._id), 50);
+    assert.equal((await m.PharmacyBatch.findById(b._id).lean<any>())!.takes.length, 0);
+    await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409 });
+  });
+
+  test('repairTakes racing a slow issue puts the stock back once and the issue fails cleanly', async () => {
+    const b1 = await s.batch(ASP, 'er', 'A', 50, 3);
+    const b2 = await s.batch(ASP, 'er', 'B', 100, 50);
+    const id = await one();
+    const model: any = m.PharmacyBatch;
+    const orig = model.findOneAndUpdate;
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let paused!: () => void;
+    const pausedP = new Promise<void>((r) => (paused = r));
+    model.findOneAndUpdate = function (...args: any[]) {
+      const q = orig.apply(this, args);
+      const exec = q.exec.bind(q);
+      q.exec = async () => {
+        const r = await exec();
+        calls++;
+        if (calls === 1) {
+          paused();
+          await gate;
+        }
+        return r;
+      };
+      return q;
+    };
+    const issuing = s.issue.issue(PHARM, id, {}).then(() => 'ok', (e: any) => e);
+    await pausedP;
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60_000;
+    try {
+      await s.issue.repairTakes();
+    } finally {
+      Date.now = realNow;
+    }
+    release();
+    const res = await issuing;
+    model.findOneAndUpdate = orig;
+    assert.notEqual(res, 'ok');
+    Date.now = () => realNow() + 120_000;
+    try {
+      await s.issue.repairTakes();
+    } finally {
+      Date.now = realNow;
+    }
+    const line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.issuing], ['approved', undefined]);
+    assert.deepEqual([await qty(b1._id), await qty(b2._id)], [3, 50]);
+    assert.ok((await m.PharmacyBatch.find({}).lean<any>()).every((x: any) => x.takes.length === 0));
+    assert.equal(await m.PharmacyMovement.countDocuments({}), 0);
+  });
+
+  test('three concurrent repairTakes put a crashed take back once', async () => {
+    const b = await s.batch(ASP, 'er', 'A', 100, 40);
+    const id = await one();
+    const ago = new Date(Date.now() - 90_000);
+    await m.PharmacyBatch.updateOne({ _id: b._id }, { $inc: { quantity: -10 }, $push: { takes: { line: new Types.ObjectId(id), qty: 10, realAt: ago } } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { issuing: { by: { id: 'x', name: 'x' }, store: 'er', realAt: ago } } });
+    await Promise.all([s.issue.repairTakes(), s.issue.repairTakes(), s.issue.repairTakes()]);
+    assert.equal(await qty(b._id), 40);
+  });
+
+  test('concurrent repairs of an issued line\'s take never throw on the movement and write it once', async () => {
+    const id = await one();
+    const b = await s.batch(ASP, 'er', 'A', 100, 40);
+    const ago = new Date(Date.now() - 90_000);
+    const by = { id: PHARM.id, name: PHARM.name };
+    await m.PharmacyBatch.updateOne({ _id: b._id }, { $inc: { quantity: -10 }, $push: { takes: { line: new Types.ObjectId(id), qty: 10, realAt: ago } } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by, at: clinicNow(), realAt: ago, store: 'er', batches: [{ batch: String(b._id), batchNo: 'A', expiry: b.expiry, qty: 10 }] } } });
+    const rs = await Promise.allSettled([s.issue.repairTakes(), s.issue.repairTakes(), s.issue.repairTakes()]);
+    assert.ok(rs.every((r) => r.status === 'fulfilled'));
+    assert.equal(await m.PharmacyMovement.countDocuments({ line: id }), 1);
+    assert.equal(await qty(b._id), 30);
+  });
+
+  test('a leftover take on an issued line that is not in its batches goes back to stock, never logged as issued', async () => {
+    const id = await one();
+    const used = await s.batch(ASP, 'er', 'USED', 100, 40);
+    const left = await s.batch(ASP, 'er', 'LEFT', 100, 40);
+    const ago = new Date(Date.now() - 90_000);
+    const by = { id: PHARM.id, name: PHARM.name };
+    await m.PharmacyBatch.updateOne({ _id: used._id }, { $inc: { quantity: -10 } });
+    await m.PharmacyBatch.updateOne({ _id: left._id }, { $inc: { quantity: -10 }, $push: { takes: { line: new Types.ObjectId(id), qty: 10, realAt: ago } } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by, at: clinicNow(), realAt: ago, store: 'er', batches: [{ batch: String(used._id), batchNo: 'USED', expiry: used.expiry, qty: 10 }] } } });
+    await s.issue.repairTakes();
+    assert.equal(await qty(left._id), 40);
+    assert.equal(await m.PharmacyMovement.countDocuments({ batch: left._id }), 0);
   });
 });

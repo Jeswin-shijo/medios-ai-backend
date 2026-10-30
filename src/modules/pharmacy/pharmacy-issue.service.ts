@@ -6,7 +6,7 @@ import type { Actor } from '../beds/actor';
 import { STORE_LABEL, Store, productByKey, sameKind } from './pharmacy-catalogue';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyLineView, PharmacyOrdersService } from './pharmacy-orders.service';
-import { Flag, needsDoctor, needsReview } from './pharmacy-rules';
+import { Flag, needsDoctor, needsReason, needsReview } from './pharmacy-rules';
 import { PharmacyStockService, STORES, isStore, today } from './pharmacy-stock.service';
 import { PharmacyBatch, PharmacyBatchDocument } from './schemas/pharmacy-batch.schema';
 import { PharmacyLine, PharmacyLineDocument } from './schemas/pharmacy-line.schema';
@@ -100,7 +100,11 @@ export class PharmacyIssueService {
       await this.checks.holdAtOnce([line]);
       throw new ConflictException('A doctor must confirm this allergy before it is issued. A query has been opened.');
     }
-    if (needsReview(flags, line.version).length) throw new ConflictException('An allergy flag on this line was not reviewed. Send it back to be checked.');
+    // Y28 backstop: a flag that arrived after the approval (an unreviewed amber allergy, or a red flag nobody confirmed) sends the line back.
+    if (needsReview(flags, line.version).length || needsReason(flags, line.version).length) {
+      const back = await this.checks.sendBackToCheck(lineId);
+      throw new ConflictException(back ? 'A flag arrived after this line was approved. It is back in To check.' : lineBusy);
+    }
 
     const store: Store = input?.store === undefined ? await this.defaultStoreOf(line) : (input.store as Store);
     if (!isStore(store)) throw new BadRequestException('Choose the Main pharmacy or the ER');
@@ -222,7 +226,11 @@ export class PharmacyIssueService {
           { $setOnInsert: { product: t.product, store: t.store, change: -t.qty, reason: 'issued', by, at } },
           { upsert: true },
         )
-        .exec();
+        .exec()
+        // A racing writer already logged it.
+        .catch((e) => {
+          if ((e as { code?: number }).code !== 11000) throw e;
+        });
       await this.batches.updateOne({ _id: t.batch }, { $pull: { takes: { line } } }).exec();
     }
   }
@@ -290,13 +298,21 @@ export class PharmacyIssueService {
     const withTakes = await this.batches.find({ 'takes.0': { $exists: true } }).lean<PharmacyBatchDocument[]>().exec();
     for (const b of withTakes) {
       for (const t of b.takes) {
-        const line = await this.lines.findById(t.line).lean<PharmacyLineDocument>().exec();
-        if (line?.status === 'issued' && line.issued) {
-          await this.settle(String(line._id), [{ batch: String(b._id), product: b.product, store: b.store, qty: t.qty }], line.issued.by, line.issued.at);
-          logged++;
-        } else if (!(line?.status === 'approved' && line.issuing) && new Date(t.realAt) < cutoff) {
-          // Neither issued nor being issued: nothing will ever flip it, so the stock goes back.
-          if (await this.putBack(String(b._id), String(t.line), t.qty)) undone.add(String(t.line));
+        try {
+          if (new Date(t.realAt) >= cutoff) continue; // a request in flight owns it
+          const line = await this.lines.findById(t.line).lean<PharmacyLineDocument>().exec();
+          if (line?.status === 'issued' && line.issued) {
+            // Only a take the line really issued is logged; a leftover from a failed put-back goes back to stock.
+            if (line.issued.batches?.some((x) => x.batch === String(b._id) && x.qty === t.qty)) {
+              await this.settle(String(line._id), [{ batch: String(b._id), product: b.product, store: b.store, qty: t.qty }], line.issued.by, line.issued.at);
+              logged++;
+            } else if (await this.putBack(String(b._id), String(t.line), t.qty)) undone.add(String(t.line));
+          } else if (!(line?.status === 'approved' && line.issuing)) {
+            // Neither issued nor being issued: nothing will ever flip it, so the stock goes back.
+            if (await this.putBack(String(b._id), String(t.line), t.qty)) undone.add(String(t.line));
+          }
+        } catch (e) {
+          this.logger.error(`Repairing a take of batch ${String(b._id)} failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }

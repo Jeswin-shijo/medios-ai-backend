@@ -56,6 +56,10 @@ export class TaskAlertItem {
   @Prop()
   link?: string;
 
+  /** Pharmacy low-stock alerts: the claim (`lowAlertedAt`) this alert was raised for, so a restock completes only its own alert. */
+  @Prop()
+  lowAlertedAt?: Date;
+
   /** Pharmacy query alerts: the query this alert is about, so an old answer never completes a newer query's alert. */
   @Prop()
   querySeq?: number;
