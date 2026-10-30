@@ -64,7 +64,9 @@ export class PrescriptionsService {
     Object.assign(rx, withoutPharmacyFields(updates));
     // An atomic increment of the stored value: a stale copy of the record can never repeat a revision.
     rx.$inc('pharmacyRev', 1);
+    // Always written, even when the loaded copy already says true: a sync may have cleared it since the load.
     rx.pharmacyPending = true;
+    rx.markModified('pharmacyPending');
     rx.pharmacyBy = { id: actor.id, name: actor.name };
     const saved = await rx.save();
     await this.handOff(saved);

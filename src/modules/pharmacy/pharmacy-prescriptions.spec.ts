@@ -277,7 +277,8 @@ describe('prescriptions into Pharmacy', () => {
 
   test('an unlisted line stores its route in lower case', async () => {
     assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml') as any, 1).route, 'oral');
-    assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml', 'OD', '3 days', { route: 'Topical' }) as any, 1).route, '');
+    assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml', 'OD', '3 days', { route: ' Topical ' }) as any, 1).route, 'topical');
+    assert.equal(prescriptionLine(item('Syp Herbal Tonic', '5 ml', 'OD', '3 days', { route: 'X'.repeat(50) }) as any, 1).route, 'x'.repeat(30));
   });
 
   test('status reports each item: not sent, or its line with the red and amber flags', async () => {
@@ -303,11 +304,27 @@ describe('prescriptions into Pharmacy', () => {
     assert.equal(created.pharmacyBy?.name, DOC.name);
     const stale = await rxService.update(String(created._id), { additionalInstructions: 'a', pharmacyRev: 1, pharmacyBy: { id: 'x', name: 'Mallory' } } as any, PHARM);
     assert.equal(stale.pharmacyRev, 2);
-    const again = await rxService.update(String(created._id), { additionalInstructions: 'b', pharmacyRev: 1 } as any, DOC);
+    const again = await rxService.update(String(created._id), { additionalInstructions: 'b', pharmacyRev: 1, pharmacyPending: false } as any, DOC);
+    assert.equal(again.pharmacyPending, true);
     assert.equal(again.pharmacyRev, 3);
     assert.equal((await m.Prescription.findById(created._id).lean<any>().exec()).pharmacyBy.name, DOC.name);
     assert.equal(calls.length, 3);
     assert.equal(created.pharmacyPending, true);
+  });
+
+  test('a sync that clears the pending flag between load and save does not unflag the new revision', async () => {
+    const rxService = new PrescriptionsService(m.Prescription, { sync: async () => 'current' } as unknown as PharmacyPrescriptionsService);
+    const created = await rxService.create({ uhid: w.patientUhid, items: [] } as any, DOC);
+    const load = rxService.findOne.bind(rxService);
+    rxService.findOne = async (id: string) => {
+      const doc = await load(id);
+      await m.Prescription.collection.updateOne({ _id: doc._id }, { $unset: { pharmacyPending: '' } });
+      return doc;
+    };
+    await rxService.update(String(created._id), { additionalInstructions: 'a' } as any, DOC);
+    const stored = await m.Prescription.findById(created._id).lean<any>().exec();
+    assert.equal(stored.pharmacyRev, 2);
+    assert.equal(stored.pharmacyPending, true);
   });
 
   test('two concurrent saves advance the stored revision twice (an atomic increment, not read plus one)', async () => {

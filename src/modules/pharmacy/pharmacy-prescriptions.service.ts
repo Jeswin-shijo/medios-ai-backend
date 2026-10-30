@@ -38,7 +38,7 @@ export function prescriptionLine(item: PrescriptionItem & { _id?: unknown }, rev
       dose: null,
       doseText: item.dose,
       unit: '',
-      route: routeFromText(item.route) ?? '',
+      route: routeFromText(item.route) ?? String(item.route ?? '').trim().toLowerCase().slice(0, 30),
       frequency: item.frequency,
       durationDays: days,
       quantity: null,
