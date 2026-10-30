@@ -98,14 +98,17 @@ export interface PharmacyOrderView {
   lines: PharmacyLineView[];
 }
 
-/** A flag as the views show it. */
-export const flagView = (f: Flag): FlagView => ({
+/**
+ * A flag as the views show it. With the line's `version`, a confirmation or review made on an older version is
+ * hidden (null), the same rule as needsDoctor, needsReason and needsReview in pharmacy-rules.ts.
+ */
+export const flagView = (f: Flag, version?: number): FlagView => ({
   key: f.key,
   kind: f.kind,
   severity: f.severity,
   text: f.text,
-  confirmed: f.confirmed ? { by: f.confirmed.by, reason: f.confirmed.reason, at: iso(f.confirmed.at)! } : null,
-  reviewed: f.reviewed ? { by: f.reviewed.by, at: iso(f.reviewed.at)! } : null,
+  confirmed: f.confirmed && (version === undefined || f.version === version) ? { by: f.confirmed.by, reason: f.confirmed.reason, at: iso(f.confirmed.at)! } : null,
+  reviewed: f.reviewed && (version === undefined || f.version === version) ? { by: f.reviewed.by, at: iso(f.reviewed.at)! } : null,
 });
 
 /** The views of lines, built from what the service read: the orders, the targets, each patient's facts and each case's location. Pure. */
@@ -149,7 +152,7 @@ export function buildLineViews(
         issueUnit: product?.issueUnit ?? '',
         note: l.note ?? '',
         version: l.version,
-        flags: ((l.flags ?? []) as Flag[]).map(flagView),
+        flags: ((l.flags ?? []) as Flag[]).map((f) => flagView(f, l.version)),
         query: q
           ? {
               seq: q.seq,

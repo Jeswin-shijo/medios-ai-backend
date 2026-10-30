@@ -8,6 +8,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { UserRole } from '../users/schemas/user.schema';
 import { AnswerDto, PharmacyOrderDto } from './dto/pharmacy.dto';
 import { PharmacyController } from './pharmacy.controller';
+import { MEDICINES } from './pharmacy-catalogue';
 
 const R = UserRole;
 const READ = [R.ADMIN, R.DOCTOR, R.NURSE, R.PHARMACIST];
@@ -112,5 +113,17 @@ describe('PharmacyController bodies', () => {
       () => pipe.transform({ patientId: '507f1f77bcf86cd799439011', priority: 'routine', lines: Array.from({ length: 11 }, () => line) }, { type: 'body', metatype: PharmacyOrderDto }),
       BadRequestException,
     );
+  });
+});
+
+describe('PharmacyController catalogue', () => {
+  test('each medicine carries its aliases', async () => {
+    const settings = { get: async () => ({ targets: {}, nearExpiryDays: 90 }) };
+    const controller = new PharmacyController(...([null, null, null, null, null, settings, null, null] as unknown as ConstructorParameters<typeof PharmacyController>));
+    const { medicines } = await controller.catalogue();
+    assert.equal(medicines.length, MEDICINES.length);
+    const furosemide = medicines.find((m) => m.key === 'furosemide');
+    assert.deepEqual(furosemide?.aliases, ['frusemide']);
+    for (const m of medicines) assert.ok(Array.isArray(m.aliases), `${m.key} has aliases`);
   });
 });

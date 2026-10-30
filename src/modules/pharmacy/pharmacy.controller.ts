@@ -78,6 +78,7 @@ export class PharmacyController {
       medicines: MEDICINES.map((m) => ({
         key: m.key,
         name: m.name,
+        aliases: m.aliases,
         unit: m.unit,
         classKey: m.classKey,
         classLabel: m.classLabel,
