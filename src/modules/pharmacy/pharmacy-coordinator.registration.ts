@@ -216,12 +216,21 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     if (w) await this.orders.setLocation(message.case, w.area, w.ward);
   }
 
-  /** 'n/a' with no lines on the case; 'fail' while a line waits for its check or has an open query; else 'pass'. Approved OPD lines at the counter don't block. */
+  /**
+   * 'n/a' with no lines on the case. 'fail' while a line waits for its check, has an open query, or is approved
+   * but not issued in the ER or a ward (including waiting for stock). Approved OPD lines wait at the counter and don't block.
+   */
   private async closeCheck(caseId: string): Promise<'pass' | 'fail' | 'n/a'> {
-    const ids = await this.orderDocs.find({ case: caseId }).distinct('_id').exec();
-    const lines = await this.lines.find({ order: { $in: ids } }).select('status query').lean<{ status: string; query?: { answer?: unknown } }[]>().exec();
+    const orders = await this.orderDocs.find({ case: caseId }).select('_id setting').lean<{ _id: unknown; setting: string }[]>().exec();
+    const lines = await this.lines.find({ order: { $in: orders.map((o) => o._id) } }).select('order status query').lean<{ order: unknown; status: string; query?: { answer?: unknown } }[]>().exec();
     if (!lines.length) return 'n/a';
-    const blocked = lines.some((l) => l.status === 'to-check' || (['query', 'approved', 'issued'].includes(l.status) && l.query && !l.query.answer));
+    const opd = new Set(orders.filter((o) => o.setting === 'OPD').map((o) => String(o._id)));
+    const blocked = lines.some(
+      (l) =>
+        l.status === 'to-check' ||
+        (['query', 'approved', 'issued'].includes(l.status) && l.query && !l.query.answer) ||
+        (l.status === 'approved' && !opd.has(String(l.order))),
+    );
     return blocked ? 'fail' : 'pass';
   }
 }

@@ -46,14 +46,61 @@ describe('Pharmacy overview, close check, status, snapshots and settings', () =>
     await w.checks.approve(PHARM, v.lines[0].id, { reason: 'ok' });
     assert.equal(await closeCheck(erCase), 'fail');
     await w.checks.approve(PHARM, v.lines[1].id, { reason: 'ok' });
+    // Approved ER lines that are not issued yet still block (Y32).
+    assert.equal(await closeCheck(erCase), 'fail');
+    await m.PharmacyLine.updateOne({ _id: v.lines[1].id }, { $set: { status: 'issued' } });
+    assert.equal(await closeCheck(erCase), 'fail');
+    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { status: 'issued' } });
     assert.equal(await closeCheck(erCase), 'pass');
 
     // An issued line with an open query still blocks.
     const query = { seq: 1, kind: 'dose', question: 'q', by: { id: PHARM.id, name: PHARM.name }, at: new Date(), openedRealAt: new Date(), dueAt: new Date(), suggestions: [] };
-    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { status: 'issued', query } });
+    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { query } });
     assert.equal(await closeCheck(erCase), 'fail');
     await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { 'query.answer': { outcome: 'keep', by: { id: DOC.id, name: DOC.name }, reason: 'r', at: new Date(), realAt: new Date() } } });
     assert.equal(await closeCheck(erCase), 'pass');
+  });
+
+  test('an approved ER line waiting for stock fails the close check until it is issued or cancelled (Y32)', async () => {
+    await w.openEr();
+    const erCase = await caseOf();
+    const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [aspirin300] });
+    await w.checks.approve(PHARM, v.lines[0].id, { reason: 'ok' });
+    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { waitingForStock: true } });
+    assert.equal(await closeCheck(erCase), 'fail');
+    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $set: { status: 'cancelled' } });
+    assert.equal(await closeCheck(erCase), 'pass');
+  });
+
+  test('a case really closes through the Coordinator once every line is issued or cancelled (no stub)', async () => {
+    await resetTestDb();
+    w = await buildWorld(m, { stubClose: false });
+    s = buildStock(m, w);
+    await w.openEr();
+    const erCase = await caseOf();
+    await s.batch('aspirin-tab-300', 'er', 'A1', 100, 100);
+    const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [aspirin300, enoxaparin60] });
+    assert.equal(await w.cases.evaluateClose(String(erCase)), false);
+    await w.checks.approve(PHARM, v.lines[0].id, { reason: 'ok' });
+    await w.checks.approve(PHARM, v.lines[1].id, { reason: 'ok' });
+    assert.equal(await w.cases.evaluateClose(String(erCase)), false);
+    await s.issue.issue(PHARM, v.lines[0].id, { quantity: 2 });
+    await m.PharmacyLine.updateOne({ _id: v.lines[1].id }, { $set: { status: 'cancelled' } });
+    assert.equal(await w.cases.evaluateClose(String(erCase)), true);
+    const closed = (await m.Case.findById(erCase).lean<any>())!;
+    assert.deepEqual([closed.state, closed.closedReason], ['closed', 'Medicine orders checked']);
+  });
+
+  test('a line sent back to To check after a check does not skew the check-time figures', async () => {
+    await w.openEr();
+    const stat = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [aspirin300, enoxaparin60] });
+    const now = Date.now();
+    await m.PharmacyLine.updateOne({ _id: stat.lines[0].id }, { $set: { enteredCheckAt: new Date(now - 10 * MIN), checkedAt: new Date(now) } });
+    // Sent back: a fresh enteredCheckAt after the old checkedAt.
+    await m.PharmacyLine.updateOne({ _id: stat.lines[1].id }, { $set: { enteredCheckAt: new Date(now + MIN), checkedAt: new Date(now - 5 * MIN) } });
+    const o = await overview.overview();
+    const row = o.checkTime.find((r) => r.priority === 'stat')!;
+    assert.deepEqual([row.count, row.avgMin, row.onTimePct, o.performance.avgCheckMin, o.performance.checkOnTimePct], [1, 10, 100, 10, 100]);
   });
 
   test('approved OPD lines waiting at the counter do not block the close check', async () => {

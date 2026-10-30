@@ -149,7 +149,10 @@ export class PharmacyOverviewService {
       .exec();
     const priorityOf = new Map(parents.map((o) => [String(o._id), o.priority]));
     const minutes = (l: { enteredCheckAt: Date; checkedAt: Date }) => (new Date(l.checkedAt).getTime() - new Date(l.enteredCheckAt).getTime()) / MIN_MS;
-    const timed = checkedToday.map((l) => ({ priority: priorityOf.get(String(l.order)) ?? 'routine', min: minutes(l) }));
+    // A line sent back to To check is not a finished check until it is checked again.
+    const timed = checkedToday
+      .filter((l) => new Date(l.checkedAt).getTime() >= new Date(l.enteredCheckAt).getTime() && priorityOf.has(String(l.order)))
+      .map((l) => ({ priority: priorityOf.get(String(l.order))!, min: minutes(l) }));
 
     const checkTime: PharmacyCheckTimeRow[] = PRIORITIES.map((priority) => {
       const mine = timed.filter((t) => t.priority === priority);

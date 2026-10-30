@@ -29,7 +29,7 @@ export const amoxicillin500: LineInput = { medicine: 'amoxicillin', product: 'am
 export const ceftriaxone1: LineInput = { medicine: 'ceftriaxone', product: 'ceftriaxone-vial-1', dose: 1, route: 'iv', frequency: 'STAT' };
 
 /** The pharmacy agent wired to a test database, with a stub Lab agent that can send lab.resulted. */
-export async function buildWorld(m: ReturnType<typeof models>) {
+export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose?: boolean } = {}) {
   const registry = new AgentRegistry();
   const events = new CoordinatorEvents();
   const messages = new MessagesService(m.AgentMessage, registry, events);
@@ -48,7 +48,7 @@ export async function buildWorld(m: ReturnType<typeof models>) {
     key: 'lab',
     messageTypes: [{ type: 'lab.resulted', agent: 'lab', description: 'x', payload: { test: 'string' } }],
     // Keeps every case open, so a test's second order joins the same ER case (the pharmacy close check passes once nothing waits to be checked).
-    closeChecks: [{ agent: 'lab', label: 'Stub', check: async () => 'fail' as const }],
+    closeChecks: opts.stubClose === false ? [] : [{ agent: 'lab', label: 'Keeps the test case open', check: async () => 'fail' as const }],
     status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
   });
   const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });

@@ -178,7 +178,7 @@ export class PharmacyQueries {
     const done = await this.lines
       .updateOne(
         { _id: line._id, status: 'approved', version: line.version, flags: line.flags },
-        { $set: { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false }, $unset: { approved: '', issuing: '' } },
+        { $set: { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false }, $unset: { approved: '', issuing: '', checkedAt: '' } },
       )
       .exec();
     if (!done.modifiedCount) return false;
@@ -290,6 +290,7 @@ export class PharmacyQueries {
       if (!issued) {
         Object.assign(set, { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false });
         unset.approved = '';
+        unset.checkedAt = '';
       }
     } else if (outcome === 'change' || outcome === 'switch') {
       const c = outcome === 'change' ? input.change : input.switchTo;
@@ -313,6 +314,7 @@ export class PharmacyQueries {
         });
         if (spec.medicine !== line.medicine) set.medicine = spec.medicine;
         unset.approved = '';
+        unset.checkedAt = '';
         extra.$push = {
           history: { version: line.version, product: line.product, dose: line.dose, unit: line.unit, route: line.route, frequency: line.frequency, durationDays: line.durationDays, quantity: line.quantity, flags: line.flags ?? [], by, at: now },
         };
@@ -338,6 +340,7 @@ export class PharmacyQueries {
       if (needsDoctor(flags, line.version).length || needsReason(flags, line.version).length || needsReview(flags, line.version).length) {
         Object.assign(set, { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false });
         unset.approved = '';
+        unset.checkedAt = '';
       } else {
         Object.assign(set, { status: 'approved', waitingForStock: true });
       }
