@@ -124,7 +124,8 @@ describe('stock DTOs', () => {
   test('receive: expiry 30/10/2026, a bad batch, quantity 0 and 10001 are 400', async () => {
     await ok(ReceiveDto, rec);
     await bad(ReceiveDto, { ...rec, expiry: '30/10/2026' });
-    await bad(ReceiveDto, { ...rec, batchNo: 'a b' });
+    await ok(ReceiveDto, { ...rec, batchNo: 'B.12 34' });
+    await bad(ReceiveDto, { ...rec, batchNo: 'a;b' });
     await bad(ReceiveDto, { ...rec, batchNo: 'x'.repeat(41) });
     await bad(ReceiveDto, { ...rec, quantity: 0 });
     await bad(ReceiveDto, { ...rec, quantity: 10001 });
