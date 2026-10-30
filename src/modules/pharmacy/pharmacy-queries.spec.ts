@@ -741,27 +741,27 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal(redFlag(await w.lineDoc(id), 'clash').confirmed.reason, 'Short course, monitored');
   });
 
-  test("the recheck's kidney query asks only about the kidney flag: on an issued line, a red clash already there gets its own query after the kidney Keep", async () => {
+  test("the recheck's kidney query asks only about the kidney flag: on an issued line, a clash asked at once (Y30) and the kidney flag that arrives during that query each get their own question, in turn", async () => {
     const { case: theCase } = await w.openEr();
     const { id } = await order('stat', [{ ...enoxaparin60 }]);
     await w.checks.approve(PHARM, id, {});
     await issueLine(id);
-    // A later order adds a red clash to the issued line (no query opens for it).
+    // A later order adds a red clash to the issued line: its question opens at once (Y30).
     await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [ibuprofen400] });
-    assert.deepEqual([redFlag(await w.lineDoc(id), 'clash').confirmed, (await w.lineDoc(id)).querySeq], [undefined, 0]);
+    let line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.redKeys], ['issued', 'clash', 1, ['clash.ibuprofen']]);
+    // The kidney result arrives while it is open: no second query opens beside it.
     await w.kidneyReport(2.5, { labLine: 'k1' });
     await w.labResulted(String(theCase._id), 'rft');
-    let line = await w.lineDoc(id);
-    assert.deepEqual([line.status, line.query.kind, line.query.redKeys], ['issued', 'kidney', ['kidney.0-30']]);
-    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Renal-dosed already' });
-    line = await w.lineDoc(id);
-    assert.equal(redFlag(line, 'kidney').confirmed.reason, 'Renal-dosed already');
-    assert.equal(redFlag(line, 'clash').confirmed, undefined, 'a kidney answer never confirms a clash');
-    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.answer, line.query.redKeys], ['issued', 'clash', 2, undefined, ['clash.ibuprofen']]);
-    assert.equal(line.query.question, `${redFlag(line, 'clash').text}. Please review.`);
-    await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'Bleeding risk accepted' });
+    assert.equal((await w.lineDoc(id)).querySeq, 1);
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Bleeding risk accepted' });
     line = await w.lineDoc(id);
     assert.equal(redFlag(line, 'clash').confirmed.reason, 'Bleeding risk accepted');
+    assert.equal(redFlag(line, 'kidney').confirmed, undefined, 'a clash answer never confirms a kidney flag');
+    assert.deepEqual([line.status, line.query.kind, line.query.seq, line.query.answer, line.query.redKeys], ['issued', 'kidney', 2, undefined, ['kidney.0-30']]);
+    await w.checks.answer(DOC, id, { querySeq: 2, outcome: 'keep', reason: 'Renal-dosed already' });
+    line = await w.lineDoc(id);
+    assert.equal(redFlag(line, 'kidney').confirmed.reason, 'Renal-dosed already');
     assert.deepEqual([line.querySeq, line.query.answer.outcome], [2, 'keep']);
   });
 });
