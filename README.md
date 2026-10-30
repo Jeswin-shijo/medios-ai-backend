@@ -101,7 +101,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `CLINIC_DATE` | unset | Development only: pins "today" to the seeded demo day (`2026-09-26`), like the web app's `VITE_CLINIC_DATE` |
 | `CALL_PROVIDER` | `simulated` (dev), `none` (production) | AI call agent voice provider: `snapserve`, `simulated` (dev only, no phone rings) or `none` |
 | `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID`, `SNAPSERVE_BOOKING_AGENT_ID` | — | Required with `CALL_PROVIDER=snapserve` |
-| `CALL_WEBHOOK_SECRET` | — | Required with `snapserve` (24+ characters); authenticates the post-call webhook |
+| `SNAPSERVE_INBOUND_AGENT_ID` | — | The agent on the hospital's number; its call results are logged as inbound calls |
+| `CALL_WEBHOOK_SECRET` | — | Required with `snapserve` (24+ characters); authenticates the post-call webhook, sent in the `X-MediOS-Webhook-Token` header or as `?token=` |
+| `CALL_ALLOWED_NUMBERS` | — | Testing real calls: comma-separated numbers; when set, no other number is ever dialled |
+| `CALL_TOOLS_SECRET` | — | 24+ characters; turns on the inbound agent's mid-call tools (only while `CALL_PROVIDER` is `snapserve`, or `simulated` in development), which must send it as `X-Webhook-Secret` |
+| `SNAPSERVE_SIGNING_SECRET` | — | Optional: when set, post-call webhooks must also carry a valid `X-SnapServe-Signature` |
 | `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
@@ -156,10 +160,11 @@ Send it as `Authorization: Bearer <accessToken>`. When it expires, `POST /api/au
 
 ## 📞 AI Call Agent
 
-An AI voice agent phones patients for two jobs:
+An AI voice agent phones patients for two jobs, and a third agent answers the hospital's line:
 
 - **Confirmation:** "Will you be able to come on Sunday, 27 September at 10 AM?" The patient confirms, picks one of two alternative slots, or cancels. The appointment is updated to match.
 - **Booking:** offers two free slots (on different days when possible) for a stated reason. If the patient picks one, the appointment is created and marked confirmed, and a linked follow-up is updated.
+- **Inbound:** a patient phones the hospital. The agent verifies them, then tells them their appointments and can confirm, move, cancel or book one while on the call (see below).
 
 **How a call works**
 1. A person (or the scheduler) asks for a call. The API checks the patient can be called (valid number, not do-not-call), fills the agent's script variables and records the call (`agentcalls` collection).
@@ -192,12 +197,41 @@ An AI voice agent phones patients for two jobs:
 **Providers** (`CALL_PROVIDER`):
 - `simulated` (development default): no phone rings. Outcomes come with a scripted transcript after a few seconds; choose the pretend patient's answer in the AI Call Agent screen. The API refuses to start with it in production.
 - `snapserve`: real calls through [SnapServe AI](https://app.snapserve.ai) and the carrier attached to its agents (e.g. Vobiz). Steps:
-  1. Create two agents from the scripts (the same variables, outcome labels and data fields).
-  2. Set `SNAPSERVE_*` and `CALL_WEBHOOK_SECRET`.
-  3. Give each agent the post-call notify URL `https://<api-host>/api/calls/webhook/snapserve?token=<CALL_WEBHOOK_SECRET>`.
-  4. Make one test call and compare its webhook payload with `parseSnapServeResult`.
+  1. Create the agents from the scripts (AI Call Agent → Agent Scripts shows them with the exact variables, outcome labels, data fields and inbound tools).
+  2. Set `CALL_PROVIDER=snapserve`, the `SNAPSERVE_*` ids, `SNAPSERVE_API_KEY`, `CALL_WEBHOOK_SECRET` and (for inbound) `CALL_TOOLS_SECRET`, then restart.
+  3. Make the API reachable over https. For a test, `cloudflared tunnel --url http://localhost:4000` prints a temporary `https://….trycloudflare.com` address. Enter it under AI Call Agent → Automation → Public address, and the Agent Scripts tab shows every URL to paste.
+  4. Give each agent the post-call notify URL `https://<api-host>/api/calls/webhook/snapserve`. If SnapServe lets you add headers to it, send `CALL_WEBHOOK_SECRET` in an `X-MediOS-Webhook-Token` header. If it only takes a URL, add `?token=<CALL_WEBHOOK_SECRET>` instead. Error logs replace the token in a URL with `[redacted]`, but proxies and tunnels may still log it, so prefer the header.
+  5. Press **Check connection** on the AI Call Agent screen. It reads each agent (found, active) and the wallet balance with your key, and places no call.
+  6. Make one test call to your own number. A result whose outcome cannot be read is kept on the call (`rawResult`, shown as "What the provider sent") so the mapping can be fixed.
+
+  Results follow SnapServe's documented shapes. Post-call notify sends the call object; event subscriptions wrap it in `data`. The outcome and the data fields arrive in `dispositionResult`, keyed by field name. Field names are matched without case or punctuation.
 
   The API never retries a failed start request on its own, because the call may have gone out anyway.
+
+**Inbound calls** (`src/modules/calls/inbound.service.ts`). The inbound agent has mid-call tools, set up in SnapServe under the agent's Tools → Custom tools. Each is a POST to `/api/calls/tools/<name>` with `CALL_TOOLS_SECRET` in `X-Webhook-Secret`:
+
+| Tool | Does |
+|---|---|
+| `find_patient` | Verifies the caller and returns a `caller_ref` plus their next three appointments (first name, day, time, doctor, type) |
+| `list_appointments` | Lists them again |
+| `find_free_slots` | Three free slots from a preferred day |
+| `book_appointment`, `reschedule_appointment`, `cancel_appointment`, `confirm_appointment` | Change the verified patient's appointments |
+| `request_callback` | Front-desk task; `urgent` makes it a high-priority alert |
+
+- **Verification.** The agent always collects the registered mobile number, the patient's full name (spelt in English letters) and the date of birth. The full name must match: every word on record longer than one letter, honorifics ignored, at most two extra words. Then:
+  - **Calling from the registered number** (caller ID): the date of birth must match too, when one is on file.
+  - **From another number, or with no caller ID:** a date of birth must be on file and must match. Without one, the caller cannot be verified on the line, and the agent offers a call back to the number on record.
+  - A family sharing one number is told apart by full name, then by date of birth. A wrong date of birth for a patient who has one on file counts as a failure, even when a relative with no date of birth shares the name, so a guess is never verified as that relative.
+  - Every mismatch gets the same answer, which never says which detail was wrong or how many tries are left. A missing date of birth always gets the same "ask for the date of birth" answer, whether or not the name matched.
+  - **Where the caller ID comes from.** The caller's number and the call id are read only from SnapServe's headers (`X-SnapServe-From`, `X-SnapServe-Call-Id`; the names are assumed until the go-live check below) or from the request envelope around wrapped arguments (`args`, `arguments`, `parameters` or `input`). They are never read from the arguments themselves, which the language model fills in. Without them, every caller needs a date of birth on file.
+  - Three failures within 30 minutes of each other lock checks for that number and create a task to call back. A success does not clear the count. Locks within 24 hours grow: 30 minutes, then 2 hours, then 24 hours. From the second, an admin alert names only the number's last four digits.
+- **Sessions.** A match opens a 20-minute session (`inboundsessions`). Every later tool must quote its `caller_ref`, and the session is bound to the call that opened it (the call id, or the caller's number when there is none), so changes only ever touch the verified patient on that call. It ends when the call is logged. Appointments and slots are referred to by short codes (`A1`, `S2`), never by database ids.
+- **What callers hear.** First names, dates, times, the doctor and the visit type; never UHIDs or clinical details. Answers are plain JSON with a `message` telling the agent what to do next.
+- **Changes by phone** can be switched off by an admin (Automation → Calls to the hospital). The agent then takes a message for the front desk instead. Callers cannot change an appointment whose time has passed, or book more than 90 days ahead.
+- **The call log.** When an inbound call's result arrives (`direction: inbound`, or from `SNAPSERVE_INBOUND_AGENT_ID`), it is logged as an `inbound` call, once per provider call id. The changes come from the caller's session, found by the call id or, failing that, by the caller's number during the call. When more than one session could fit, none is attached. An unverified caller is logged without a patient. The agent's "Needs staff", "Wrong number" and "Not verified" outrank what the call changed. "Needs staff" creates an urgent alert unless the agent already raised an urgent callback.
+- **Go-live checks for the first live inbound call:**
+  - **Where the caller's number arrives.** Confirm where SnapServe puts it on tool requests: a header or the envelope. If it is somewhere else, update `toolContext` in `calls.controller.ts`, never by reading the arguments. The call log's "What happened" says "Verified by caller ID…" only when the number arrived.
+  - **The call id.** Confirm that SnapServe's tool requests carry the call id. With it, a result always finds its session, however late it arrives. Without it, a result that arrives more than about 2 minutes after the call ends is logged as "Unverified caller", even though the changes were made.
 - `none` (production default): call endpoints answer 503.
 
 Before using real calls, get patients' consent to automated calls and follow TRAI calling-hours and DND rules. Transcripts are health data: restrict who can read them.
@@ -434,6 +468,8 @@ Specs that touch the database use `medios_test` only, never your working databas
 | | `POST` | `/api/calls/run-due` | Run the scheduler now (admin, doctor) |
 | | `DELETE` | `/api/calls/do-not-call/:uhid` | Allow calls to a patient again (admin, doctor) |
 | | `POST` | `/api/calls/webhook/snapserve?token=` | Provider post-call webhook (no user token) |
+| | `POST` | `/api/calls/provider-check` | Read the provider's agents and wallet with the server's key; no call (admin, doctor) |
+| | `POST` | `/api/calls/tools/:tool` | Inbound agent mid-call tools (`X-Webhook-Secret`, no user token) |
 | **Token Queue** | `GET` | `/api/queue?date=` | A day's tokens with places in line, counts and queue settings |
 | | `POST` | `/api/queue/tokens` | Check in and issue today's token (UHID or appointmentId; returns an existing one) |
 | | `POST` | `/api/queue/next` | Finish the room's current token and call the next |

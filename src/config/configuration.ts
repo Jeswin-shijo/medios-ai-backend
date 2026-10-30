@@ -50,6 +50,10 @@ export default () => ({
     provider: (process.env.CALL_PROVIDER || (isProduction ? 'none' : 'simulated')).toLowerCase(),
     // Appended as ?token= to the post-call webhook URL given to the provider.
     webhookSecret: process.env.CALL_WEBHOOK_SECRET || '',
+    // While testing real calls: the only numbers that may be dialled (empty = any).
+    allowedNumbers: list(process.env.CALL_ALLOWED_NUMBERS, ''),
+    // Sent by the inbound agent's mid-call tools as X-Webhook-Secret; unset turns the tools off.
+    toolsSecret: process.env.CALL_TOOLS_SECRET || '',
     // 0 turns the scheduler (automatic confirmations, retries, callbacks) off.
     schedulerIntervalSeconds: int(process.env.CALL_SCHEDULER_INTERVAL_SECONDS, 60),
     simulatedDelayMs: int(process.env.CALL_SIMULATED_DELAY_MS, 4000),
@@ -58,6 +62,10 @@ export default () => ({
       apiKey: process.env.SNAPSERVE_API_KEY || '',
       confirmationAgentId: process.env.SNAPSERVE_CONFIRMATION_AGENT_ID || '',
       bookingAgentId: process.env.SNAPSERVE_BOOKING_AGENT_ID || '',
+      // The agent answering the hospital's number (inbound calls); optional.
+      inboundAgentId: process.env.SNAPSERVE_INBOUND_AGENT_ID || '',
+      // When set, post-call webhooks must carry a valid X-SnapServe-Signature.
+      signingSecret: process.env.SNAPSERVE_SIGNING_SECRET || '',
     },
   },
   ai: {

@@ -3,7 +3,8 @@ import { Document } from 'mongoose';
 
 export type AgentCallDocument = AgentCall & Document;
 
-export const CALL_PURPOSES = ['confirmation', 'booking'] as const;
+/** confirmation and booking calls go out; inbound ones are patients phoning the hospital. */
+export const CALL_PURPOSES = ['confirmation', 'booking', 'inbound'] as const;
 export type CallPurpose = (typeof CALL_PURPOSES)[number];
 
 /** scheduled → calling → completed | failed; or canceled before it is placed. */
@@ -24,11 +25,13 @@ export const CALL_OUTCOMES = [
   'wrong_number',
   'do_not_call', // asked never to be called again
   'escalated', // reported symptoms or asked for a person; staff must call back
+  'enquiry', // inbound: questions answered, nothing changed
+  'unverified', // inbound: the caller could not be matched to a patient record
   'failed', // the call was not placed, or its result could not be understood
 ] as const;
 export type CallOutcome = (typeof CALL_OUTCOMES)[number];
 
-export const CALL_TRIGGERS = ['manual', 'scheduler', 'retry', 'callback'] as const;
+export const CALL_TRIGGERS = ['manual', 'scheduler', 'retry', 'callback', 'inbound'] as const;
 
 @Schema({ _id: false })
 export class OfferedSlot {
@@ -78,13 +81,14 @@ export class AgentCall {
   @Prop({ enum: CALL_OUTCOMES })
   outcome?: string;
 
-  @Prop({ required: true, index: true })
+  /** Empty for an inbound caller who was never verified. */
+  @Prop({ default: '', index: true })
   uhid: string;
 
   @Prop({ required: true })
   patientName: string;
 
-  /** E.164. */
+  /** E.164 (for inbound calls, the caller's number as the provider reported it). */
   @Prop({ required: true })
   phone: string;
 
@@ -158,8 +162,14 @@ export class AgentCall {
 
   @Prop({ default: '' })
   error: string;
+
+  /** The provider's result payload, kept when its outcome was not understood, to check the field mapping. */
+  @Prop({ type: Object })
+  rawResult?: Record<string, unknown>;
 }
 
 export const AgentCallSchema = SchemaFactory.createForClass(AgentCall);
 AgentCallSchema.index({ activeKey: 1 }, { unique: true, partialFilterExpression: { activeKey: { $type: 'string' } } });
 AgentCallSchema.index({ createdAt: -1 });
+// One log row per provider call: a result delivered twice (even at once) is logged once.
+AgentCallSchema.index({ provider: 1, providerCallId: 1 }, { unique: true, partialFilterExpression: { providerCallId: { $type: 'string' } } });

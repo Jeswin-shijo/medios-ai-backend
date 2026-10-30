@@ -56,6 +56,13 @@ export function validateEnv(config: Record<string, unknown>) {
   if (config.AI_TIMEOUT_MS !== undefined && !/^[1-9]\d*$/.test(String(config.AI_TIMEOUT_MS))) {
     errors.push('AI_TIMEOUT_MS must be a positive number of milliseconds.');
   }
+  const allowed = String(config.CALL_ALLOWED_NUMBERS ?? '').split(',').map((n) => n.trim()).filter(Boolean);
+  const notIndian = allowed.filter((n) => !/^(\+?91|0)?[6-9]\d{9}$/.test(n.replace(/[\s-]/g, '')));
+  if (notIndian.length) errors.push(`CALL_ALLOWED_NUMBERS has numbers that are not 10-digit Indian mobiles: ${notIndian.join(', ')}`);
+  const toolsSecret = config.CALL_TOOLS_SECRET;
+  if (toolsSecret !== undefined && toolsSecret !== '' && String(toolsSecret).length < 24) {
+    errors.push('CALL_TOOLS_SECRET must be 24+ random characters; it authenticates the inbound agent\'s mid-call tools.');
+  }
   if (config.CLINIC_DATE !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(config.CLINIC_DATE))) {
     errors.push('CLINIC_DATE must be YYYY-MM-DD.');
   }

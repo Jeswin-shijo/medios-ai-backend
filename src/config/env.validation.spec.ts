@@ -22,3 +22,24 @@ describe('validateEnv (AI)', () => {
     assert.doesNotThrow(() => validateEnv({ ...base, AI_PROVIDER: 'claude', ANTHROPIC_API_KEY: 'k' }));
   });
 });
+
+describe('validateEnv (call agent)', () => {
+  test('CALL_TOOLS_SECRET: 24+ characters when set', () => {
+    assert.throws(() => validateEnv({ ...base, CALL_TOOLS_SECRET: 'short' }), /CALL_TOOLS_SECRET must be 24\+ random characters/);
+    assert.doesNotThrow(() => validateEnv({ ...base, CALL_TOOLS_SECRET: 'a'.repeat(24) }));
+    assert.doesNotThrow(() => validateEnv({ ...base, CALL_TOOLS_SECRET: '' }), 'empty means inbound tools are off');
+  });
+
+  test('CALL_ALLOWED_NUMBERS: Indian mobiles only, in any common shape', () => {
+    assert.doesNotThrow(() => validateEnv({ ...base, CALL_ALLOWED_NUMBERS: '+91 98765 43210, 09876543211,919876543212' }));
+    assert.throws(() => validateEnv({ ...base, CALL_ALLOWED_NUMBERS: '+91 98765 43210, 12345' }), /CALL_ALLOWED_NUMBERS has numbers that are not 10-digit Indian mobiles: 12345/);
+    assert.throws(() => validateEnv({ ...base, CALL_ALLOWED_NUMBERS: '+44 7700 900123' }), /CALL_ALLOWED_NUMBERS/);
+  });
+
+  test('snapserve needs its key, agent ids and a webhook secret', () => {
+    assert.throws(() => validateEnv({ ...base, CALL_PROVIDER: 'snapserve' }), /SNAPSERVE_API_KEY is required/);
+    const snapserve = { ...base, CALL_PROVIDER: 'snapserve', SNAPSERVE_API_KEY: 'k', SNAPSERVE_CONFIRMATION_AGENT_ID: '1', SNAPSERVE_BOOKING_AGENT_ID: '2' };
+    assert.throws(() => validateEnv({ ...snapserve, CALL_WEBHOOK_SECRET: 'short' }), /CALL_WEBHOOK_SECRET/);
+    assert.doesNotThrow(() => validateEnv({ ...snapserve, CALL_WEBHOOK_SECRET: 'w'.repeat(24) }));
+  });
+});

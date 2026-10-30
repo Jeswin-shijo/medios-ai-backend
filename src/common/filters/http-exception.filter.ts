@@ -10,6 +10,12 @@ import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { Error as MongooseError, mongo } from 'mongoose';
 
+/** Query values whose names end in token, secret, key or signature, e.g. the webhook's ?token=. */
+const SECRET_PARAM = /([?&][^=&#]*(?:token|secret|key|signature)=)[^&#]*/gi;
+
+/** The URL with secret-looking query values replaced, for logs and error bodies. */
+export const redactUrl = (url: string) => url.replace(SECRET_PARAM, '$1[redacted]');
+
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
@@ -46,8 +52,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       message = exception.message;
     }
 
+    const path = redactUrl(request.url);
     this.logger.error(
-      `HTTP Status: ${status} Error Message: ${JSON.stringify(message)} Path: ${request.url}`,
+      `HTTP Status: ${status} Error Message: ${JSON.stringify(message)} Path: ${path}`,
       exception instanceof Error ? exception.stack : '',
     );
 
@@ -55,7 +62,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       success: false,
       statusCode: status,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path,
       message,
     });
   }

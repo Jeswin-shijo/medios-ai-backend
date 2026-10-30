@@ -10,6 +10,7 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model, Types } from 'mongoose';
 import { AgentCall, AgentCallDocument, CallOutcome, CallPurpose } from './schemas/agent-call.schema';
@@ -20,7 +21,9 @@ import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
 import { CallAgentSettings, nextCallingTime, resolveCallAgentSettings, withinCallingHours } from './call-agent-settings';
-import { CallResult, ProviderError, VOICE_PROVIDER, VoiceProvider } from './providers/voice-provider';
+import { CallResult, ProviderCheck, ProviderError, VOICE_PROVIDER, VoiceProvider } from './providers/voice-provider';
+import { InboundService } from './inbound.service';
+import { AGENT_SCRIPTS } from './agent-scripts';
 import { maskPhone, toE164India } from './phone';
 import {
   appointmentStart,
@@ -98,6 +101,8 @@ export class CallsService implements OnModuleInit {
     private readonly tasks: TasksAlertsService,
     private readonly settings: SettingsService,
     private readonly slots: SlotsService,
+    private readonly inbound: InboundService,
+    private readonly config: ConfigService,
     @Inject(VOICE_PROVIDER) private readonly provider: VoiceProvider,
   ) {}
 
@@ -113,6 +118,25 @@ export class CallsService implements OnModuleInit {
     return (await this.context()).cfg;
   }
 
+  /** The agents' scripts; the inbound agent's variables come with this hospital's values as defaults. */
+  async scripts() {
+    const { common } = await this.context();
+    return Object.values(AGENT_SCRIPTS).map((script) =>
+      script.purpose === 'inbound' ? { ...script, defaults: Object.fromEntries(script.variables.map((v) => [v, common[v as keyof typeof common] ?? ''])) } : script,
+    );
+  }
+
+  /** Proves the provider's key and agent ids without placing a call. */
+  async checkProvider(): Promise<ProviderCheck> {
+    if (this.provider.check) return this.provider.check();
+    return {
+      provider: this.provider.name,
+      ok: this.provider.name !== 'none',
+      agents: [],
+      detail: this.provider.name === 'simulated' ? 'Simulated calls: nothing to connect to.' : 'No call provider is configured.',
+    };
+  }
+
   // ---------------------------------------------------------------- reading
 
   async list(filter: ListCallsFilter) {
@@ -121,11 +145,12 @@ export class CallsService implements OnModuleInit {
       if (filter[key]) query[key] = filter[key];
     }
     const limit = Math.min(Math.max(Number(filter.limit) || 50, 1), 200);
-    return this.calls.find(query, { transcript: 0, variables: 0 }).sort({ createdAt: -1 }).limit(limit).exec();
+    return this.calls.find(query, { transcript: 0, variables: 0, rawResult: 0 }).sort({ createdAt: -1 }).limit(limit).exec();
   }
 
-  async findOne(id: string): Promise<AgentCallDocument> {
-    const call = isValidObjectId(id) ? await this.calls.findById(id).exec() : null;
+  /** One call; the provider's raw payload (rawResult) only when asked for (admins). */
+  async findOne(id: string, withRawResult = true): Promise<AgentCallDocument> {
+    const call = isValidObjectId(id) ? await this.calls.findById(id, withRawResult ? undefined : { rawResult: 0 }).exec() : null;
     if (!call) throw new NotFoundException(`Call ${id} not found`);
     return call;
   }
@@ -151,6 +176,7 @@ export class CallsService implements OnModuleInit {
 
     return {
       callsToday: today.length,
+      inboundToday: await this.calls.countDocuments({ purpose: 'inbound', createdAt: { $gte: since } }),
       answeredToday: answered,
       contactRate: completed.length ? Math.round((answered / completed.length) * 100) : null,
       confirmedToday: count('confirmed', 'rescheduled'),
@@ -401,6 +427,8 @@ export class CallsService implements OnModuleInit {
         await this.calls.updateOne({ _id: call._id }, { $set: { status: 'scheduled', scheduledFor: next }, $unset: { startedAt: 1 } }).exec();
         return (await this.calls.findById(call._id).exec())!;
       }
+      const refused = this.refuseToDial(call);
+      if (refused) return this.finish(call, { status: 'failed', outcome: 'failed', error: refused, actionTaken: 'Call not placed; nothing was changed.' });
 
       const { providerCallId } = await this.provider.startCall({
         callId: String(call._id),
@@ -424,29 +452,45 @@ export class CallsService implements OnModuleInit {
     }
   }
 
+  /** Last checks before the phone rings: the call's provider, and the test safety list. */
+  private refuseToDial(call: AgentCallDocument): string | null {
+    if (call.provider !== this.provider.name) return 'Queued under another call provider';
+    if (!this.onSafetyList(call.phone)) return 'Not on the test safety list';
+    return null;
+  }
+
   /** Re-checks at dial time, since hours may have passed since the call was scheduled. */
   private async reasonNotToCall(call: AgentCallDocument, cfg: CallAgentSettings): Promise<string | null> {
     const patient = await this.patients.findOne({ uhid: call.uhid }, { doNotCall: 1, doNotCallReason: 1 }).lean().exec();
     if (patient?.doNotCall) return `Not called: ${patient.doNotCallReason || 'the patient is marked do-not-call'}.`;
 
+    let changed = false;
     if (call.purpose === 'confirmation') {
       const apt = await this.appointmentById(call.appointmentId);
       if (!apt) return 'Not called: the appointment no longer exists.';
       if (apt.status !== 'Scheduled') return `Not called: the appointment is now ${apt.status}.`;
       if (call.trigger !== 'manual' && apt.confirmation === 'Confirmed') return 'Not called: the appointment was confirmed meanwhile.';
       if (appointmentStart(apt.date, apt.time) <= clinicNow()) return 'Not called: the appointment time has passed.';
+      // The appointment may have moved since the call was queued (an inbound call, the front desk).
+      const day = spokenDay(parseIsoDay(apt.date));
+      if (call.variables.appointment_day !== day || call.variables.appointment_time !== apt.time) {
+        call.variables = { ...call.variables, appointment_day: day, appointment_time: apt.time };
+        changed = true;
+      }
     }
 
     // Offered slots can be booked by someone else before the call goes out.
     const free = await Promise.all(call.offeredSlots.map((s) => this.slots.isFree(cfg, s.date, s.time)));
-    if (free.every(Boolean) && call.offeredSlots.length) return null;
-    const firstDay = call.offeredSlots[0]?.date;
-    const fresh = await this.slots.findFree(cfg, this.searchStart(firstDay), 2);
-    if (call.purpose === 'booking' && !fresh.length) return 'Not called: no free slots left to offer.';
-    const [a, b] = call.purpose === 'confirmation' ? ['alt_slot_1', 'alt_slot_2'] : ['slot_1', 'slot_2'];
-    call.offeredSlots = fresh;
-    call.variables = { ...call.variables, [a]: fresh[0]?.label ?? '', [b]: fresh[1]?.label ?? '' };
-    await call.save();
+    if (!free.every(Boolean) || !call.offeredSlots.length) {
+      const firstDay = call.offeredSlots[0]?.date;
+      const fresh = await this.slots.findFree(cfg, this.searchStart(firstDay), 2);
+      if (call.purpose === 'booking' && !fresh.length) return 'Not called: no free slots left to offer.';
+      const [a, b] = call.purpose === 'confirmation' ? ['alt_slot_1', 'alt_slot_2'] : ['slot_1', 'slot_2'];
+      call.offeredSlots = fresh;
+      call.variables = { ...call.variables, [a]: fresh[0]?.label ?? '', [b]: fresh[1]?.label ?? '' };
+      changed = true;
+    }
+    if (changed) await call.save();
     return null;
   }
 
@@ -470,6 +514,9 @@ export class CallsService implements OnModuleInit {
     let found = result.callId && isValidObjectId(result.callId) ? await this.calls.findById(result.callId).exec() : null;
     if (!found && providerCallId) found = await this.calls.findOne({ providerCallId, provider: this.provider.name }).exec();
     if (!found) {
+      // Patients phoning the hospital: we did not place the call, so it is logged now.
+      const inboundAgentId = this.config.get<string>('callAgent.snapserve.inboundAgentId');
+      if (result.direction === 'inbound' || (inboundAgentId && result.agentId === inboundAgentId)) return this.inbound.recordCall(result, this.provider.name);
       this.logger.warn(`Result for an unknown call (${providerCallId ?? result.callId ?? 'no id'}) ignored`);
       return { matched: false };
     }
@@ -487,6 +534,7 @@ export class CallsService implements OnModuleInit {
             endedAt: result.endedAt ?? new Date(),
             result: { chosenSlot: result.chosenSlot, callbackAt: result.callbackAt, notes: result.notes },
             ...(providerCallId && { providerCallId }),
+            ...(result.raw && { rawResult: result.raw }),
           },
           $unset: { activeKey: 1 },
         },
@@ -512,7 +560,8 @@ export class CallsService implements OnModuleInit {
           await this.requestConfirmation(call.appointmentId!, 'Retry', 'retry', call.attempt + 1, next);
         } else {
           const request = { uhid: call.uhid, visitReason: call.visitReason, appointmentType: call.appointmentType, followUpId: call.followUpId };
-          await this.requestBooking(request, effect.retryAt ? 'Retry' : 'Callback', effect.retryAt ? 'retry' : 'callback', effect.retryAt ? call.attempt + 1 : 1, next);
+          // A callback counts as an attempt too, so it shares the retry cap.
+          await this.requestBooking(request, effect.retryAt ? 'Retry' : 'Callback', effect.retryAt ? 'retry' : 'callback', call.attempt + 1, next);
         }
       } catch (err) {
         action += ` The next call could not be scheduled: ${(err as Error).message}`;
@@ -570,6 +619,8 @@ export class CallsService implements OnModuleInit {
 
       case 'no_answer':
       case 'busy':
+      // Someone else answered and the patient was not available: try again later.
+      case 'callback':
         return this.unanswered(call, r.outcome, cfg, apt);
 
       default:
@@ -641,9 +692,19 @@ export class CallsService implements OnModuleInit {
       }
 
       case 'callback': {
+        // Counted like an unanswered attempt: a relative who always answers must not mean a call every day.
+        if (call.attempt >= cfg.maxAttempts) {
+          await this.alert(call, {
+            title: `Call ${call.patientName} to book`,
+            subtitle: `Asked for a call back on ${call.attempt} AI call${call.attempt > 1 ? 's' : ''} to book: ${call.visitReason}. Please call ${call.phone}.`,
+            priority: 'Medium',
+            category: 'Follow-up',
+          });
+          return { outcome: 'callback', action: `Asked for a call back after ${call.attempt} attempt${call.attempt > 1 ? 's' : ''}; front desk asked to call.` };
+        }
         const wanted = r.callbackAt && r.callbackAt.getTime() > Date.now() && r.callbackAt.getTime() < Date.now() + 14 * DAY_MS ? r.callbackAt : undefined;
         const at = nextCallingTime(wanted ?? new Date(Date.now() + DAY_MS), cfg);
-        return { outcome: 'callback', action: `Call back scheduled for ${when(at)}.`, callbackAt: at };
+        return { outcome: 'callback', action: `Call back scheduled for ${when(at)} (attempt ${call.attempt + 1} of ${cfg.maxAttempts}).`, callbackAt: at };
       }
 
       case 'declined':
@@ -662,7 +723,7 @@ export class CallsService implements OnModuleInit {
   private async unanswered(call: AgentCallDocument, outcome: CallOutcome, cfg: CallAgentSettings, apt?: AppointmentDocument): Promise<Effect> {
     const retryAt = nextCallingTime(new Date(Date.now() + cfg.retryMinutes * call.attempt * 60_000), cfg);
     const deadline = apt ? appointmentStart(apt.date, apt.time).getTime() + clinicOffsetMs() - MIN_CONFIRM_LEAD_MS : Infinity;
-    const missed = outcome === 'busy' ? 'Line busy' : 'No answer';
+    const missed = outcome === 'busy' ? 'Line busy' : outcome === 'callback' ? 'Patient not available' : 'No answer';
 
     if (call.attempt < cfg.maxAttempts && retryAt.getTime() <= deadline) {
       return { outcome, action: `${missed}. Attempt ${call.attempt + 1} of ${cfg.maxAttempts} at ${when(retryAt)}.`, retryAt };
@@ -746,7 +807,16 @@ export class CallsService implements OnModuleInit {
     const raw = patient?.phone || fallbackPhone;
     const phone = toE164India(raw);
     if (!phone) throw new UnprocessableEntityException(`${name} has no valid phone number on record ("${raw || 'none'}").`);
+    if (!this.onSafetyList(phone)) {
+      throw new ConflictException(`Test mode: only the numbers in CALL_ALLOWED_NUMBERS can be called, and ${name}'s number is not one of them.`);
+    }
     return phone;
+  }
+
+  /** Testing real calls: when CALL_ALLOWED_NUMBERS is set, only those numbers ring, never a demo record's. */
+  private onSafetyList(phone: string): boolean {
+    const allowed = (this.config.get<string[]>('callAgent.allowedNumbers') ?? []).map((n) => toE164India(n)).filter(Boolean);
+    return !allowed.length || allowed.includes(toE164India(phone));
   }
 
   /** Slot search start: `from` (YYYY-MM-DD) when it is later than now. */

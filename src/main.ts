@@ -10,7 +10,8 @@ import { CLIENT_HEADER } from './common/guards/client-header.guard';
 
 async function bootstrap() {
   const logger = new Logger('MediOS-Bootstrap');
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // rawBody: SnapServe webhook signatures are computed over the exact bytes sent.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
 
   const configService = app.get(ConfigService);
   const port = configService.get<number>('port') || 4000;

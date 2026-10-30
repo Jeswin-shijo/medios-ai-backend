@@ -33,6 +33,22 @@ export interface CallResult {
   endedAt?: Date;
   /** Set when the provider's outcome label was not recognised. */
   unrecognised?: string;
+  /** Calls we did not place (a patient phoning the hospital) are identified by these. */
+  direction?: 'inbound' | 'outbound';
+  agentId?: string;
+  fromNumber?: string;
+  toNumber?: string;
+  /** The provider's payload, kept when its outcome was not understood. */
+  raw?: Record<string, unknown>;
+}
+
+/** What a provider connection check found (API key, agents, balance), for staff. */
+export interface ProviderCheck {
+  provider: string;
+  ok: boolean;
+  agents: { role: string; agentId: string; ok: boolean; name?: string; active?: boolean; detail: string }[];
+  wallet?: { ok: boolean; balanceInr?: number; detail: string };
+  detail?: string;
 }
 
 export type CallResultHandler = (result: CallResult) => Promise<unknown>;
@@ -44,6 +60,8 @@ export interface VoiceProvider {
   startCall(request: StartCallRequest): Promise<{ providerCallId: string }>;
   /** Providers without a webhook deliver results through this handler. */
   attachResultHandler?(handler: CallResultHandler): void;
+  /** Checks the credentials and agents without placing a call. */
+  check?(): Promise<ProviderCheck>;
 }
 
 /** A provider-side refusal or outage; the message is shown to staff as is. */
