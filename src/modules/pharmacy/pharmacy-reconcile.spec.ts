@@ -216,7 +216,7 @@ describe('PharmacyReconcileService', () => {
     assert.equal(line.status, 'to-check');
   });
 
-  test('an answered query whose clock still runs gets query-answered resent, and its escalation closes', async () => {
+  test('an answered query whose clock still runs gets query-answered resent: the clock is met and the alert completes', async () => {
     const v = await order();
     const lineId = v.lines[0].id as string;
     await w.checks.query(PHARM, lineId, { kind: 'dose', question: 'Is this dose right?' });
