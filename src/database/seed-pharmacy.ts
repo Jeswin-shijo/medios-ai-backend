@@ -900,17 +900,11 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
   for (const who of ['k1', 'k2'] as const) {
     const c = kidneyCase(who);
     if (c && !records.has(String(c.patient))) {
-      // The next UHID in the hospital's own sequence, numbered the way the ER seed numbers its made-up patients; the case carries it too.
-      const prefix = `MHK${new Date(nowMs).getFullYear()}`;
-      const last = await patients.findOne({ uhid: { $regex: `^${prefix}\\d{5}$` } }).sort({ uhid: -1 }).select('uhid').lean<any>();
-      const uhid = `${prefix}${String((last ? Number(String(last.uhid).slice(prefix.length)) : 0) + 1).padStart(5, '0')}`;
-      await cases.updateOne({ _id: c._id }, { $set: { patientUhid: uhid } }, { timestamps: false });
-      c.patientUhid = uhid;
       await patients.create({
-        _id: c.patient, uhid, name: c.patientName, ...MADE_UP[who], phone: who === 'k1' ? '9000009301' : '9000009302', address: PHARMACY_MARK, doctor: doctor.name, department: 'General Medicine',
+        _id: c.patient, uhid: c.patientUhid, name: c.patientName, ...MADE_UP[who], phone: who === 'k1' ? '9000009301' : '9000009302', address: PHARMACY_MARK, doctor: doctor.name, department: 'General Medicine',
         createdAt: new Date(nowMs), updatedAt: new Date(nowMs),
       });
-      console.log(`Pharmacy seed: ${c.patientName} had no Patient record; a made-up one was added for the kidney story.`);
+      console.log(`Pharmacy seed: ${c.patientUhid} had no Patient record; a made-up one was added for the kidney story.`);
     }
   }
 

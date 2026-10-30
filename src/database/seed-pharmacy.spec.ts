@@ -380,19 +380,18 @@ describe('seedPharmacy', () => {
     assert.deepEqual(seen.sort(), [26, 27]);
   });
 
-  test("the made-up patient's UHID is the next one in the sequence", async () => {
-    const made = (await m.Patient.find({ address: 'Seed: pharmacy demo' }).lean<any[]>().exec());
+  test("the made-up patient keeps the sample inpatient's UHID: the same one is on its case, admission and bed request", async () => {
+    const made = await m.Patient.find({ address: 'Seed: pharmacy demo' }).lean<any[]>().exec();
     assert.ok(made.length >= 1);
-    const serial = (u: string) => Number(u.slice(-5));
-    const all = (await m.Patient.find({ uhid: /^MHK2026\d{5}$/ }).lean<any[]>().exec()).map((p) => serial(p.uhid)).sort((a, b) => a - b);
-    // Highest serial is the seed's own, and the serials after the fixtures run on without a gap.
-    const own = made.map((p) => serial(p.uhid)).sort((a, b) => a - b);
-    assert.equal(all.at(-1), own.at(-1));
-    const erMade = (await m.Patient.find({ address: { $ne: 'Seed: pharmacy demo' }, uhid: /^MHK2026\d{5}$/ }).lean<any[]>().exec()).map((p) => serial(p.uhid));
-    assert.equal(own[0], Math.max(...erMade) + 1);
     for (const p of made) {
       const c = await m.Case.findOne({ patient: p._id }).lean<any>().exec();
       assert.equal(c!.patientUhid, p.uhid);
+      const admission = await m.Admission.findOne({ patient: p._id }).lean<any>().exec();
+      assert.ok(admission, 'the patient has an admission');
+      assert.equal(admission.patientUhid, p.uhid);
+      const request = await m.BedRequest.findOne({ patient: p._id }).lean<any>().exec();
+      assert.ok(request, 'the patient has a bed request');
+      assert.equal(request.patientUhid, p.uhid);
       assert.ok(await m.PharmacyOrder.exists({ patient: p._id, patientUhid: p.uhid }).exec());
     }
   });
