@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, test } from 'node:test';
 import { Types } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
-import { PHARM, DOC, World, amoxicillin500, aspirin300, buildWorld, clopidogrel300, enoxaparin60 } from '../../test/pharmacy-fixtures';
+import { PHARM, DOC, World, amoxicillin500, aspirin300, buildWorld, ceftriaxone1, clopidogrel300, enoxaparin60 } from '../../test/pharmacy-fixtures';
 import { StockWorld, buildStock, inDays } from '../../test/pharmacy-stock-fixtures';
 
 const ASP = 'aspirin-tab-300';
@@ -234,14 +234,15 @@ describe('PharmacyIssueService: issuing from stock', () => {
   test('issue refuses a line with an unconfirmed red allergy flag (and holds it) or an unreviewed amber allergy flag', async () => {
     const b = await s.batch(ASP, 'er', 'A', 100, 50);
     const red = await one();
-    await w.redAllergy(red, 'aspirin');
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Aspirin'] } });
     await assert.rejects(() => s.issue.issue(PHARM, red, {}), { status: 409 });
     const held = await w.lineDoc(red);
     assert.deepEqual([held.status, held.query.kind, held.issuing], ['query', 'allergy', undefined]);
     assert.equal(await qty(b._id), 50);
-    const v = await s.approved([enoxaparin60]);
-    await s.batch('enoxaparin-syringe-60', 'er', 'E', 100, 50);
-    await m.PharmacyLine.updateOne({ _id: v.lines[0].id }, { $push: { flags: { key: 'allergy.cross-nsaid', kind: 'allergy', severity: 'amber', text: 'x', version: 1 } } });
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: [] } });
+    const v = await s.approved([ceftriaxone1]);
+    await s.batch('ceftriaxone-vial-1', 'er', 'E', 100, 50);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
     await assert.rejects(() => s.issue.issue(PHARM, v.lines[0].id, {}), { status: 409 });
     // Y28 backstop: not a dead end, the line is back in To check.
     assert.equal((await w.lineDoc(v.lines[0].id)).status, 'to-check');
@@ -333,6 +334,8 @@ describe('PharmacyIssueService: issuing from stock', () => {
         if (!fired) {
           fired = true;
           await w.redAllergy(id, 'aspirin');
+          // A real allergy on the record, so a later recheck keeps the flag.
+          await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Aspirin'] } });
         }
         return r;
       };
@@ -451,5 +454,17 @@ describe('PharmacyIssueService: issuing from stock', () => {
     const bd = await m.PharmacyBatch.findById(b._id).lean<any>();
     assert.deepEqual([bd.quantity, bd.takes.length], [40, 0]);
     assert.equal(await m.PharmacyMovement.countDocuments({}), 0);
+  });
+
+  test('Y48: an allergy recorded after approval refuses the issue and holds the line', async () => {
+    await s.batch('amoxicillin-cap-500', 'er', 'A', 100, 100);
+    const id = (await s.approved([amoxicillin500])).lines[0].id as string;
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
+    await assert.rejects(() => s.issue.issue(PHARM, id, {}), { status: 409 });
+    const line = await w.lineDoc(id);
+    assert.notEqual(line.status, 'issued');
+    assert.ok(['query', 'to-check'].includes(line.status));
+    assert.equal(line.query?.kind, 'allergy');
+    assert.equal(await qty((await m.PharmacyBatch.findOne({ batchNo: 'A' }).lean<any>())!._id), 100);
   });
 });

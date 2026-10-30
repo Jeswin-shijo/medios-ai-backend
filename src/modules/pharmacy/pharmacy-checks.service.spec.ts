@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
-import { DOC, MIN, PHARM, World, aspirin300, buildWorld, clopidogrel300, ceftriaxone1, enoxaparin60, ibuprofen400 } from '../../test/pharmacy-fixtures';
+import { DOC, MIN, PHARM, World, amoxicillin500, aspirin300, buildWorld, clopidogrel300, ceftriaxone1, enoxaparin60, ibuprofen400 } from '../../test/pharmacy-fixtures';
 
 describe('PharmacyChecksService: the pharmacist checks', () => {
   const m = models();
@@ -49,15 +49,13 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     await w.openEr();
     const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [aspirin300] });
     const id = v.lines[0].id;
-    await w.redAllergy(id);
-    const msg = 'A doctor must confirm this allergy first. Query the doctor.';
-    await assert.rejects(() => w.checks.approve(PHARM, id, {}), { status: 409, message: msg });
-    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'I checked it' }), { status: 409, message: msg });
-    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'I checked it', allergyReviewed: true }), { status: 409, message: msg });
-    assert.equal((await w.lineDoc(id)).status, 'to-check');
+    // A real allergy on the record (Y48: every approval rechecks it). The first approval holds the line in an allergy query.
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Aspirin'] } });
+    await assert.rejects(() => w.checks.approve(PHARM, id, {}), { status: 409 });
+    assert.equal((await w.lineDoc(id)).status, 'query');
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'I checked it', allergyReviewed: true }), { status: 409 });
     assert.equal((await w.sent('pharmacy.approved')).length, 0);
-    // The pharmacist queries the doctor; Keep confirms the red allergy flag with the doctor's reason.
-    await w.checks.query(PHARM, id, { kind: 'allergy', question: 'Reaction was a rash in 2019' });
+    // The doctor's Keep confirms the red allergy flag with the doctor's reason, and the line is back in To check.
     await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'keep', reason: 'Tolerated it since' });
     const kept = await w.lineDoc(id);
     assert.equal(kept.status, 'to-check');
@@ -87,6 +85,29 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     const approved = await w.lineDoc(cef);
     assert.equal(approved.status, 'approved');
     assert.equal(approved.flags.find((f: any) => f.kind === 'allergy').reviewed.by, 'Neethu George');
+  });
+
+  test('Y48: an allergy recorded after ordering is seen at approval (red: refused and held; amber: needs Allergy reviewed)', async () => {
+    await w.openEr();
+    const v = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [amoxicillin500] });
+    const id = v.lines[0].id;
+    assert.deepEqual((await w.lineDoc(id)).flags, []);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
+    await assert.rejects(() => w.checks.approve(PHARM, id, { reason: 'ok', allergyReviewed: true }), { status: 409 });
+    const held = await w.lineDoc(id);
+    assert.equal(held.status, 'query');
+    assert.equal(held.query.kind, 'allergy');
+    assert.ok(held.flags.some((f: any) => f.kind === 'allergy' && f.severity === 'red'));
+
+    // Amber: a cephalosporin ordered first, penicillin recorded after.
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: [] } });
+    const v2 = await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [ceftriaxone1] });
+    const cef = v2.lines[0].id;
+    assert.deepEqual((await w.lineDoc(cef)).flags, []);
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
+    await assert.rejects(() => w.checks.approve(PHARM, cef, {}), { status: 400, message: 'Tick Allergy reviewed to approve' });
+    const ok = await w.checks.approve(PHARM, cef, { allergyReviewed: true });
+    assert.equal(ok.status, 'approved');
   });
 
   test('approving the earliest of two waiting lines moves the check due to the other line, and an expired round raises no second escalation', async () => {

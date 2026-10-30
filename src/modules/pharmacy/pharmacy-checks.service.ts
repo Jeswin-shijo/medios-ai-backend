@@ -43,6 +43,9 @@ export class PharmacyChecksService {
   // ---------- the pharmacist ----------
 
   async approve(actor: Actor, lineId: string, input: { reason?: string; allergyReviewed?: boolean }): Promise<PharmacyLineView> {
+    const first = await this.queries.load(lineId);
+    // Y48: an allergy recorded after ordering is seen now, before the gates read the flags.
+    await this.orders.recheckPatient(String(first.patient), 'order', { kinds: ['allergy'] });
     const line = await this.queries.load(lineId);
     if (line.status !== 'to-check') throw new ConflictException('This line is not waiting to be checked');
     const flags = (line.flags ?? []) as Flag[];

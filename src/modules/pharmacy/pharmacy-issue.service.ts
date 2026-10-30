@@ -90,6 +90,9 @@ export class PharmacyIssueService {
   // ---------- issuing ----------
 
   async issue(actor: Actor, lineId: string, input: { store?: string; batchNo?: string; quantity?: number } = {}): Promise<PharmacyLineView> {
+    const first = await this.load(lineId);
+    // Y48: an allergy recorded after ordering or approval is seen now, before the barrier reads the flags.
+    if (first.status === 'approved') await this.orders.recheckPatient(String(first.patient), 'order', { kinds: ['allergy'] });
     const line = await this.load(lineId);
     if (line.status !== 'approved') throw new ConflictException('This line is not approved for issue');
     if (line.issuing) throw new ConflictException('This line is being issued');
