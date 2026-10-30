@@ -73,6 +73,7 @@ const DEFAULT_SETTINGS = {
   coordinator: { rules: {} as Record<string, boolean> },
   er: { targets: {} as Record<string, number> },
   lab: {} as Record<string, unknown>,
+  pharmacy: {} as Record<string, unknown>,
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];
@@ -99,7 +100,7 @@ export class SettingsService {
 
   /**
    * Merges each supplied section over the stored one, key by key; unknown sections are ignored, and so is
-   * the lab section (see LabSettingsService). Only an admin may change "Allocate beds automatically",
+   * the lab and pharmacy sections (see LabSettingsService, PharmacySettingsService). Only an admin may change "Allocate beds automatically",
    * coordination rules, pathway targets, changes by phone and the call agent's public address: a save
    * from anyone else that carries the stored value (or leaves it out) goes through.
    */
@@ -140,6 +141,11 @@ export class SettingsService {
     // which validates them and records who changed a limit: a generic patch's lab section is dropped, for every role.
     if (updates && typeof updates === 'object' && 'lab' in updates) {
       const { lab: _ignored, ...rest } = updates as Record<string, unknown>;
+      updates = rest as Partial<HospitalSettings>;
+    }
+    // The pharmacy section (targets, near-expiry window) changes only through PharmacySettingsService, the same way.
+    if (updates && typeof updates === 'object' && 'pharmacy' in updates) {
+      const { pharmacy: _ignored, ...rest } = updates as Record<string, unknown>;
       updates = rest as Partial<HospitalSettings>;
     }
     for (const section of SECTIONS) {

@@ -48,6 +48,13 @@ export class HospitalSettings {
     criticalLimits?: Record<string, { low?: number | null; high?: number | null }>;
     limitsHistory?: { by: string; at: Date; changes: { key: string; from: unknown; to: unknown }[] }[];
   };
+
+  /** Pharmacy: check, issue and query targets in minutes per priority, and the near-expiry window in days (see PharmacySettingsService). */
+  @Prop({ type: Object, default: {} })
+  pharmacy: {
+    targets?: Partial<Record<'check' | 'issue' | 'query', Partial<Record<'stat' | 'urgent' | 'routine', number>>>>;
+    nearExpiryDays?: number;
+  };
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

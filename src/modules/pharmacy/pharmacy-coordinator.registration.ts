@@ -1,0 +1,186 @@
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { AgentRegistry } from '../coordinator/agent-registry';
+import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
+import { MessagesService } from '../coordinator/messages.service';
+import { medicineLabel } from './pharmacy-rounds';
+import { PharmacyOrdersService } from './pharmacy-orders.service';
+
+type Fields = MessageTypeDef['payload'];
+
+const type = (t: string, description: string, payload: Fields): MessageTypeDef => ({ type: t, agent: 'pharmacy', description, payload });
+
+/** The fields every line message carries. */
+const LINE: Fields = {
+  orderId: 'string',
+  orderNumber: 'string',
+  lineId: 'string',
+  medicine: 'string',
+  priority: 'string',
+  setting: 'string',
+  version: 'number',
+  checkRound: 'number',
+  checkDueAt: 'date',
+  issueRound: 'number',
+  issueDueAt: 'date',
+};
+
+const MESSAGE_TYPES: MessageTypeDef[] = [
+  type('pharmacy.ordered', 'Medicines were ordered', { orderId: 'string', orderNumber: 'string', priority: 'string', setting: 'string', source: 'string', medicines: 'string[]' }),
+  type('pharmacy.to-check', 'A medicine line is waiting for the pharmacist to check', LINE),
+  type('pharmacy.approved', 'A pharmacist approved a medicine line', LINE),
+  type('pharmacy.to-issue', 'A medicine line is waiting to be issued', LINE),
+  type('pharmacy.query', 'A pharmacist asked the doctor about a medicine line', { ...LINE, querySeq: 'number', kind: 'string', queryDueAt: 'date' }),
+  type('pharmacy.query-answered', 'A doctor answered a query about a medicine line', { ...LINE, querySeq: 'number', outcome: 'string' }),
+  type('pharmacy.rejected', 'A pharmacist rejected a medicine line', LINE),
+  type('pharmacy.issued', 'A medicine line was issued from stock', { ...LINE, store: 'string', quantity: 'number' }),
+  type('pharmacy.cancelled', 'A medicine line was cancelled', { ...LINE, querySeq: 'number' }),
+  type('pharmacy.stopped', 'An issued medicine line was stopped', { ...LINE, querySeq: 'number' }),
+  type('pharmacy.check-done', 'Every medicine line of an order is checked', { orderId: 'string', orderNumber: 'string', checkRound: 'number' }),
+  type('pharmacy.issue-done', 'Every approved medicine line of an order is issued', { orderId: 'string', orderNumber: 'string', issueRound: 'number' }),
+];
+
+export const PHARMACY_MESSAGE_TYPES = MESSAGE_TYPES;
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const date = (key: string) => (payload: Record<string, unknown>): Date | null => {
+  const v = payload[key];
+  const d = typeof v === 'string' || v instanceof Date ? new Date(v) : null;
+  return d && !isNaN(d.getTime()) ? d : null;
+};
+
+/** A round's clock ref carries the round number, so a message about an older round never reaches a newer clock. */
+const roundRef = (letter: 'c' | 'i', round: string) => (_t: string, p: Record<string, unknown>): string | null => {
+  const order = str(p.orderId);
+  const n = num(p[round]);
+  return order && n !== null ? `${order}:${letter}${n}` : null;
+};
+const queryRef = (_t: string, p: Record<string, unknown>): string | null => {
+  const line = str(p.lineId);
+  const n = num(p.querySeq);
+  return line && n !== null ? `${line}:q${n}` : null;
+};
+
+/** "MO-0001 · Enoxaparin": what an escalation is about, never a name. */
+const lineDetail = (p: Record<string, unknown>): string | null => {
+  const number = str(p.orderNumber);
+  const medicine = str(p.medicine);
+  return number && medicine ? `${number} · ${medicineLabel(medicine === 'unlisted' ? null : medicine)}` : number;
+};
+
+/** The messages that move a running clock to the due time they carry. */
+const LINE_TYPES = [
+  'pharmacy.to-check',
+  'pharmacy.approved',
+  'pharmacy.to-issue',
+  'pharmacy.query',
+  'pharmacy.query-answered',
+  'pharmacy.rejected',
+  'pharmacy.issued',
+  'pharmacy.cancelled',
+  'pharmacy.stopped',
+];
+
+/** Exported for the demo seed, so seeded clocks carry the same detail the live ones do. */
+export const PHARMACY_CLOCKS: ClockDef[] = [
+  {
+    key: 'pharmacy-check',
+    agent: 'pharmacy',
+    label: 'Medicine check',
+    startOn: 'pharmacy.to-check',
+    stopOn: ['pharmacy.check-done'],
+    minutes: 240,
+    ladder: 'pharmacy',
+    dueFrom: date('checkDueAt'),
+    refFrom: roundRef('c', 'checkRound'),
+    updateOn: LINE_TYPES,
+    detailFrom: lineDetail,
+  },
+  {
+    key: 'pharmacy-issue',
+    agent: 'pharmacy',
+    label: 'Medicine issue',
+    startOn: 'pharmacy.to-issue',
+    stopOn: ['pharmacy.issue-done'],
+    minutes: 240,
+    ladder: 'pharmacy',
+    // An OPD patient collects at the counter: no issue clock.
+    match: (_t, p) => p.setting !== 'OPD',
+    dueFrom: date('issueDueAt'),
+    refFrom: roundRef('i', 'issueRound'),
+    updateOn: LINE_TYPES,
+    detailFrom: lineDetail,
+  },
+  {
+    key: 'pharmacy-query',
+    agent: 'pharmacy',
+    label: 'Pharmacy query answer',
+    startOn: 'pharmacy.query',
+    stopOn: ['pharmacy.query-answered', 'pharmacy.cancelled', 'pharmacy.stopped'],
+    minutes: 120,
+    ladder: 'pharmacy-query',
+    dueFrom: date('queryDueAt'),
+    refFrom: queryRef,
+    // One answer path: the query itself. Its escalation rides on the line's alert and closes with the answer.
+    resolveEscalationOnStop: true,
+    resolvedBy: 'Query answered',
+    alertLink: (ref) => (ref ? `pharmacy-line:${ref.split(':')[0]}` : null),
+    detailFrom: (p) => {
+      const base = lineDetail(p);
+      const kind = str(p.kind);
+      return base && kind ? `${base} · ${kind}` : base;
+    },
+  },
+];
+
+/** Tells the Coordinator what the Pharmacy agent sends, and the clocks and rule it brings. */
+@Injectable()
+export class PharmacyCoordinatorRegistration implements OnModuleInit {
+  constructor(
+    private readonly registry: AgentRegistry,
+    private readonly orders: PharmacyOrdersService,
+    private readonly messages: MessagesService,
+  ) {}
+
+  onModuleInit(): void {
+    this.registry.register(this.definition());
+  }
+
+  private definition(): AgentDefinition {
+    return {
+      key: 'pharmacy',
+      messageTypes: MESSAGE_TYPES,
+      clocks: PHARMACY_CLOCKS,
+      handles: [
+        { type: 'er.arrived', handler: (id) => this.locate(id, () => ({ area: 'ER' })) },
+        { type: 'bed.assigned', handler: (id) => this.locate(id, (p) => ({ area: 'Ward', ward: str(p.ward) ?? undefined })) },
+        { type: 'bed.transferred', handler: (id) => this.locate(id, (p) => ({ area: 'Ward', ward: str(p.ward) ?? undefined })) },
+        // Leaving the ER for a bed is not a move home: bed.assigned places the patient.
+        { type: 'er.left', handler: (id) => this.locate(id, (p) => (p.reason === 'admitted' ? null : { area: 'OPD' })) },
+        { type: 'bed.discharged', handler: (id) => this.locate(id, () => ({ area: 'OPD' })) },
+      ],
+      rules: [
+        {
+          key: 'medicine-safety-checks',
+          agent: 'pharmacy',
+          label: 'Medicine safety checks',
+          description: 'Check every medicine order for allergy, clashes, doubles, dose and kidney function',
+          default: true,
+          locked: true,
+        },
+      ],
+      // Task 7 adds the real figures.
+      status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
+    };
+  }
+
+  private async locate(
+    messageId: string,
+    where: (payload: Record<string, unknown>) => { area: 'ER' | 'Ward' | 'OPD'; ward?: string } | null,
+  ): Promise<void> {
+    const message = await this.messages.get(messageId);
+    if (!message?.case) return;
+    const w = where(message.payload ?? {});
+    if (w) await this.orders.setLocation(message.case, w.area, w.ward);
+  }
+}

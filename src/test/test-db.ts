@@ -30,6 +30,9 @@ import { LabLine, LabLineDocument, LabLineSchema } from '../modules/lab/schemas/
 import { LabSample, LabSampleDocument, LabSampleSchema } from '../modules/lab/schemas/lab-sample.schema';
 import { LabLocation, LabLocationDocument, LabLocationSchema } from '../modules/lab/schemas/lab-location.schema';
 import { LabSnapshot, LabSnapshotDocument, LabSnapshotSchema } from '../modules/lab/schemas/lab-snapshot.schema';
+import { PharmacyOrder, PharmacyOrderDocument, PharmacyOrderSchema } from '../modules/pharmacy/schemas/pharmacy-order.schema';
+import { PharmacyLine, PharmacyLineDocument, PharmacyLineSchema } from '../modules/pharmacy/schemas/pharmacy-line.schema';
+import { PharmacyLocation, PharmacyLocationDocument, PharmacyLocationSchema } from '../modules/pharmacy/schemas/pharmacy-location.schema';
 import { LabTestReport, LabReportDocument, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
 import { Appointment, AppointmentDocument, AppointmentSchema } from '../modules/appointments/schemas/appointment.schema';
@@ -92,6 +95,9 @@ export function models() {
     LabLocation: model(LabLocation, LabLocationSchema) as Model<LabLocationDocument>,
     LabSnapshot: model(LabSnapshot, LabSnapshotSchema) as Model<LabSnapshotDocument>,
     LabTestReport: model(LabTestReport, LabTestReportSchema) as Model<LabReportDocument>,
+    PharmacyOrder: model(PharmacyOrder, PharmacyOrderSchema) as Model<PharmacyOrderDocument>,
+    PharmacyLine: model(PharmacyLine, PharmacyLineSchema) as Model<PharmacyLineDocument>,
+    PharmacyLocation: model(PharmacyLocation, PharmacyLocationSchema) as Model<PharmacyLocationDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
     Appointment: model(Appointment, AppointmentSchema) as Model<AppointmentDocument>,
