@@ -452,6 +452,21 @@ export class PharmacyOrdersService {
     return this.lineViews(await this.lines.find(filter).sort({ createdAt: -1, _id: -1 }).limit(WORKLIST_LIMIT).exec());
   }
 
+  /** The ids of approved lines, oldest issue time first, for ER and Ward orders (`urgent`) or for OPD counter orders. */
+  private async approvedIds(urgent: boolean): Promise<Types.ObjectId[]> {
+    const rows = await this.lines
+      .aggregate<{ _id: Types.ObjectId }>([
+        { $match: { status: 'approved' } },
+        { $lookup: { from: this.orders.collection.name, localField: 'order', foreignField: '_id', as: 'o' } },
+        { $match: { 'o.setting': urgent ? { $ne: 'OPD' } : 'OPD' } },
+        { $sort: { issueFrom: 1, _id: 1 } },
+        { $limit: WORKLIST_LIMIT },
+        { $project: { _id: 1 } },
+      ])
+      .exec();
+    return rows.map((r) => r._id);
+  }
+
   /** The pharmacist's lists: lines to check, lines to issue, and queries (open, then answered in the last 24 h). */
   async worklist(view: 'check' | 'issue' | 'queries'): Promise<PharmacyLineView[]> {
     if (view === 'check') {
@@ -477,7 +492,12 @@ export class PharmacyOrdersService {
       return this.lineViews(ranked.flatMap((r) => (byId.has(String(r._id)) ? [byId.get(String(r._id))!] : [])));
     }
     if (view === 'issue') {
-      const rows = await this.lines.find({ status: 'approved' }).sort({ issueFrom: 1, _id: 1 }).limit(WORKLIST_LIMIT).exec();
+      // ER and ward lines are fetched apart from OPD counter lines, each with its own limit, so uncollected counter lines can never hide an urgent one.
+      const urgent = await this.approvedIds(true);
+      const counter = await this.approvedIds(false);
+      const rows = await this.lines.find({ _id: { $in: [...urgent, ...counter] } }).exec();
+      const rank = new Map([...urgent, ...counter].map((id, i) => [String(id), i] as [string, number]));
+      rows.sort((a, b) => rank.get(String(a._id))! - rank.get(String(b._id))!);
       const views = await this.lineViews(rows);
       return views.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
     }

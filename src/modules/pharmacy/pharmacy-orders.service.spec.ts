@@ -450,6 +450,21 @@ describe('PharmacyOrdersService', () => {
     assert.ok(again[1].flags.some((f) => f.severity === 'red'));
   });
 
+  test('Y50: 300+ approved OPD counter lines never hide an approved ER line from the To issue worklist', async () => {
+    const mk = (number: string, setting: string, priority: string) =>
+      m.PharmacyOrder.create({ number, patient: patientId, patientUhid: 'MHK202600901', patientName: 'Ravi Kumar', case: new Types.ObjectId(), setting, orderedBy: { id: 'd', name: 'D' }, priority, source: 'order', orderedAt: new Date() });
+    const opd = await mk('MO-9001', 'OPD', 'routine');
+    const er = await mk('MO-9002', 'ER', 'stat');
+    const old = new Date(Date.now() - 48 * HOUR);
+    const base = { patient: patientId, medicine: 'aspirin', product: 'aspirin-tab-300', dose: 300, unit: 'mg', route: 'oral', frequency: 'OD', durationDays: 1, status: 'approved', flags: [], version: 1 };
+    await m.PharmacyLine.insertMany(Array.from({ length: 305 }, () => ({ ...base, order: opd._id, issueFrom: old })));
+    const erLine = await m.PharmacyLine.create({ ...base, order: er._id, issueFrom: new Date() });
+    const list = await service.worklist('issue');
+    assert.ok(list.some((l) => l.id === String(erLine._id)), 'the ER line is listed');
+    assert.equal(list[0].id, String(erLine._id), 'ER and ward lines come first');
+    assert.equal(list.length, 301, 'the counter lines fill their own limit of 300');
+  });
+
   test('order() leaves no empty order behind when adding the lines fails', async () => {
     const model: any = m.PharmacyLine;
     const original = model.create;
