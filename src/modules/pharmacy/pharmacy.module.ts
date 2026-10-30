@@ -14,6 +14,7 @@ import { PharmacyIssueService } from './pharmacy-issue.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 import { PharmacyOverviewService } from './pharmacy-overview.service';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
+import { PharmacyPrescriptionsService } from './pharmacy-prescriptions.service';
 import { PharmacyReconcileService } from './pharmacy-reconcile.service';
 import { PharmacySettingsService } from './pharmacy-settings.service';
 import { PharmacyStockService } from './pharmacy-stock.service';
@@ -30,9 +31,8 @@ import { PharmacyStockLevel, PharmacyStockLevelSchema } from './schemas/pharmacy
 /**
  * The Pharmacy agent. It talks to the other agents only through the Coordinator, so PrescriptionsModule, LabModule,
  * ErModule and BedsModule are not imported. The Prescription model is registered here (Mongoose reuses an existing
- * model) for the prescription flow of the next task. PharmacyQueries is not a provider: PharmacyChecksService builds it.
- * Task 10 adds its own prescription service to this module and exports that one; the checks and orders services are
- * used only inside the module, so nothing is exported yet.
+ * model) for the prescription flow. PharmacyQueries is not a provider: PharmacyChecksService builds it.
+ * Only PharmacyPrescriptionsService is exported, for PrescriptionsModule; the checks and orders services stay inside.
  */
 @Module({
   imports: [
@@ -61,11 +61,13 @@ import { PharmacyStockLevel, PharmacyStockLevelSchema } from './schemas/pharmacy
     PharmacyChecksService,
     PharmacyIssueService,
     PharmacyStockService,
+    PharmacyPrescriptionsService,
     PharmacyReconcileService,
     PharmacyOverviewService,
     PharmacyAiService,
     PharmacyCoordinatorRegistration,
     PharmacyScheduler,
   ],
+  exports: [PharmacyPrescriptionsService],
 })
 export class PharmacyModule {}

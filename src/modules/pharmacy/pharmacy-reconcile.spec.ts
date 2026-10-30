@@ -5,6 +5,8 @@ import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test
 import { DOC, PHARM, World, aspirin300, buildWorld } from '../../test/pharmacy-fixtures';
 import { StockWorld, buildStock } from '../../test/pharmacy-stock-fixtures';
 import { PHARMACY_AGENT } from './pharmacy-queries.service';
+import { PatientsService } from '../patients/patients.service';
+import { PharmacyPrescriptionsService } from './pharmacy-prescriptions.service';
 import { PharmacyReconcileService } from './pharmacy-reconcile.service';
 
 const aspirin10 = { ...aspirin300, frequency: 'BD', durationDays: 5 };
@@ -16,6 +18,7 @@ describe('PharmacyReconcileService', () => {
   let w: World;
   let s: StockWorld;
   let rec: PharmacyReconcileService;
+  let rxSvc: PharmacyPrescriptionsService;
   let logged: string[];
 
   before(async () => {
@@ -28,7 +31,8 @@ describe('PharmacyReconcileService', () => {
     await resetTestDb();
     w = await buildWorld(m);
     s = buildStock(m, w);
-    rec = new PharmacyReconcileService(m.PharmacyOrder, m.PharmacyLine, m.Clock, m.AgentMessage, w.orders, w.checks, s.issue, s.stock);
+    rxSvc = new PharmacyPrescriptionsService(m.Prescription, m.PharmacyOrder, m.PharmacyLine, w.orders, w.checks, new PatientsService(m.Patient));
+    rec = new PharmacyReconcileService(m.PharmacyOrder, m.PharmacyLine, m.Clock, m.AgentMessage, w.orders, w.checks, s.issue, s.stock, m.Prescription, rxSvc);
     // The deliberate failures stay out of the test output; tests read what was logged.
     logged = [];
     (rec as any).logger = { error: (x: string) => logged.push(x), log: () => undefined, warn: () => undefined };
@@ -53,7 +57,7 @@ describe('PharmacyReconcileService', () => {
   const alertOf = (lineId: string) => m.TaskAlertItem.findOne({ link: `pharmacy-line:${lineId}` }).lean<any>().exec();
   const order = async (lines: any[] = [aspirin10], priority: 'stat' | 'urgent' | 'routine' = 'urgent') => w.orders.order(DOC, { patientId: w.patientId, priority, lines });
   const orderDoc = (id: string) => m.PharmacyOrder.findById(id).lean<any>().exec();
-  const ZERO = { ordered: 0, rounds: 0, done: 0, queries: 0, answers: 0, issued: 0, takes: 0, replacements: 0, holds: 0, released: 0 };
+  const ZERO = { ordered: 0, rounds: 0, done: 0, queries: 0, answers: 0, issued: 0, takes: 0, replacements: 0, holds: 0, released: 0, prescriptions: 0 };
 
   test('an order whose pharmacy.ordered was lost is announced once; one younger than 30 s is left alone', async () => {
     const v = await order();

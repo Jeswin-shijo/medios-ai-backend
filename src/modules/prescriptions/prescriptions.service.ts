@@ -1,15 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { Actor } from '../beds/actor';
+import { PharmacyPrescriptionsService } from '../pharmacy/pharmacy-prescriptions.service';
+import { nameChecks } from '../pharmacy/pharmacy-rules';
 import { Prescription, PrescriptionDocument } from './schemas/prescription.schema';
-
-const KNOWN_INTERACTIONS: Record<string, string[]> = {
-  metformin: ['cimetidine', 'furosemide', 'iodinated contrast agents'],
-  telmisartan: ['potassium supplements', 'spironolactone', 'nsaids', 'ibuprofen'],
-  atorvastatin: ['clarithromycin', 'itraconazole', 'grapefruit juice', 'gemfibrozil'],
-  amlodipine: ['simvastatin', 'diltiazem'],
-  aspirin: ['warfarin', 'ibuprofen', 'heparin'],
-};
 
 const ALTERNATIVES: Record<string, { generic: string; alternatives: string[] }> = {
   metformin: {
@@ -26,11 +21,22 @@ const ALTERNATIVES: Record<string, { generic: string; alternatives: string[] }> 
   },
 };
 
+/** The server owns these: a client body (the web PUTs the whole record back) never sets them. */
+function withoutPharmacyFields<T extends object>(body: T): T {
+  const clean = { ...body } as Record<string, unknown>;
+  delete clean.pharmacyRev;
+  delete clean.pharmacyBy;
+  return clean as T;
+}
+
 @Injectable()
 export class PrescriptionsService {
+  private readonly logger = new Logger(PrescriptionsService.name);
+
   constructor(
     @InjectModel(Prescription.name)
     private prescriptionModel: Model<PrescriptionDocument>,
+    private readonly pharmacy: PharmacyPrescriptionsService,
   ) {}
 
   async findByPatient(uhid: string): Promise<Prescription[]> {
@@ -45,33 +51,35 @@ export class PrescriptionsService {
     return rx;
   }
 
-  async create(data: Partial<Prescription>): Promise<PrescriptionDocument> {
-    const rx = new this.prescriptionModel(data);
-    return rx.save();
+  async create(data: Partial<Prescription>, actor: Actor): Promise<PrescriptionDocument> {
+    const rx = new this.prescriptionModel({ ...withoutPharmacyFields(data), pharmacyRev: 1, pharmacyBy: { id: actor.id, name: actor.name } });
+    const saved = await rx.save();
+    await this.handOff(saved);
+    return saved;
   }
 
-  async update(id: string, updates: Partial<Prescription>): Promise<PrescriptionDocument> {
+  async update(id: string, updates: Partial<Prescription>, actor: Actor): Promise<PrescriptionDocument> {
     const rx = await this.findOne(id);
-    Object.assign(rx, updates);
-    return rx.save();
+    Object.assign(rx, withoutPharmacyFields(updates));
+    // An atomic increment of the stored value: a stale copy of the record can never repeat a revision.
+    rx.$inc('pharmacyRev', 1);
+    rx.pharmacyBy = { id: actor.id, name: actor.name };
+    const saved = await rx.save();
+    await this.handOff(saved);
+    return saved;
+  }
+
+  /** Tells Pharmacy about the saved revision. The save never fails because of Pharmacy: reconcile picks it up later. */
+  private async handOff(rx: PrescriptionDocument): Promise<void> {
+    try {
+      await this.pharmacy.sync(String(rx._id));
+    } catch (e) {
+      this.logger.error(`Prescription ${String(rx._id)} was saved but not sent to Pharmacy yet: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async checkInteractions(medicines: string[]) {
-    const warnings: string[] = [];
-    const normalized = medicines.map(m => m.toLowerCase());
-
-    for (const med of normalized) {
-      for (const [key, interactList] of Object.entries(KNOWN_INTERACTIONS)) {
-        if (med.includes(key)) {
-          for (const otherMed of normalized) {
-            if (otherMed !== med && interactList.some(i => otherMed.includes(i))) {
-              warnings.push(`Potential interaction between ${med} and ${otherMed}: Monitor patient or adjust dosage.`);
-            }
-          }
-        }
-      }
-    }
-
+    const warnings = nameChecks(medicines).map((f) => `${f.severity === 'red' ? 'Red' : 'Amber'}: ${f.text}`);
     return {
       hasInteractions: warnings.length > 0,
       warnings,

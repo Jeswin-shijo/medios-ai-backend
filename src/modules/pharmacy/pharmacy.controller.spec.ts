@@ -23,6 +23,7 @@ const TABLE: Record<string, UserRole[]> = {
   'GET snapshots': READ,
   'GET orders': READ,
   'GET orders/:id': READ,
+  'GET prescriptions/:id/status': READ,
   'GET lines/:id': READ,
   'GET patients/:id/lines': READ,
   'GET worklist': READ,

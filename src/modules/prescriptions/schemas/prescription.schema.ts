@@ -79,6 +79,14 @@ export class Prescription {
 
   @Prop({ type: PrescriptionOptions, default: () => ({}) })
   options: PrescriptionOptions;
+
+  /** Advanced by the server on every save (never from a client body); Pharmacy syncs the revisions it has not seen. */
+  @Prop({ default: 0 })
+  pharmacyRev: number;
+
+  /** The doctor who saved the current revision, set by the server from the signed-in user. */
+  @Prop({ type: { id: String, name: String }, _id: false })
+  pharmacyBy?: { id: string; name: string };
 }
 
 export const PrescriptionSchema = SchemaFactory.createForClass(Prescription);

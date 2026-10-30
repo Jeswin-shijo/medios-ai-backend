@@ -30,6 +30,7 @@ import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyIssueService } from './pharmacy-issue.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 import { PharmacyOverviewService } from './pharmacy-overview.service';
+import { PharmacyPrescriptionsService } from './pharmacy-prescriptions.service';
 import { PharmacySettingsService } from './pharmacy-settings.service';
 import { PharmacyStockService } from './pharmacy-stock.service';
 import { QUERY_KINDS } from './schemas/pharmacy-line.schema';
@@ -63,6 +64,7 @@ export class PharmacyController {
     private readonly overview: PharmacyOverviewService,
     private readonly settings: PharmacySettingsService,
     private readonly ai: PharmacyAiService,
+    private readonly prescriptions: PharmacyPrescriptionsService,
   ) {}
 
   // ---------- reference data and overview ----------
@@ -120,6 +122,13 @@ export class PharmacyController {
   @ApiOperation({ summary: 'One order with its lines' })
   getOrder(@Param() p: IdParam) {
     return this.orders.get(p.id);
+  }
+
+  @Get('prescriptions/:id/status')
+  @Roles(...PHARMACY_READ)
+  @ApiOperation({ summary: 'Where each item of a prescription is in Pharmacy' })
+  prescriptionStatus(@Param() p: IdParam) {
+    return this.prescriptions.status(p.id);
   }
 
   @Get('lines/:id')

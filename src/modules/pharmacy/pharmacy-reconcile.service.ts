@@ -4,9 +4,11 @@ import { Model, Types, isValidObjectId } from 'mongoose';
 import { DUPLICATE_WINDOW_MS } from '../coordinator/messages.service';
 import { AgentMessage, MessageDocument } from '../coordinator/schemas/agent-message.schema';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
+import { Prescription, PrescriptionDocument } from '../prescriptions/schemas/prescription.schema';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyIssueService } from './pharmacy-issue.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
+import { PharmacyPrescriptionsService } from './pharmacy-prescriptions.service';
 import { Flag, needsDoctor, needsReason } from './pharmacy-rules';
 import { PharmacyStockService } from './pharmacy-stock.service';
 import { PharmacyLine, PharmacyLineDocument } from './schemas/pharmacy-line.schema';
@@ -37,6 +39,8 @@ export interface ReconcileResult {
   holds: number;
   /** Waiting lines whose stock arrived. */
   released: number;
+  /** Prescriptions whose latest revision was not in Pharmacy and was synced. */
+  prescriptions: number;
 }
 
 type Row = { _id: Types.ObjectId };
@@ -63,10 +67,12 @@ export class PharmacyReconcileService {
     private readonly checks: PharmacyChecksService,
     private readonly issue: PharmacyIssueService,
     private readonly stock: PharmacyStockService,
+    @InjectModel(Prescription.name) private readonly rxs: Model<PrescriptionDocument>,
+    private readonly prescriptions: PharmacyPrescriptionsService,
   ) {}
 
   async reconcile(): Promise<ReconcileResult> {
-    const out: ReconcileResult = { ordered: 0, rounds: 0, done: 0, queries: 0, answers: 0, issued: 0, takes: 0, replacements: 0, holds: 0, released: 0 };
+    const out: ReconcileResult = { ordered: 0, rounds: 0, done: 0, queries: 0, answers: 0, issued: 0, takes: 0, replacements: 0, holds: 0, released: 0, prescriptions: 0 };
     const guard = async (what: string, fn: () => Promise<void>) => {
       try {
         await fn();
@@ -88,6 +94,7 @@ export class PharmacyReconcileService {
     await guard('the waiting lines branch', async () => void (out.released = await this.stock.releaseWaitingWithStock()));
     await guard('the allergy holds branch', async () => void (out.holds += await this.holdOpenAllergies()));
     await guard('the issued red flags branch', async () => void (out.holds += await this.askIssuedFlags()));
+    await guard('the prescriptions branch', async () => void (out.prescriptions = await this.syncPrescriptions()));
     await guard('the issued branch', async () => void (out.issued = await this.announceIssued()));
     return out;
   }
@@ -340,6 +347,26 @@ export class PharmacyReconcileService {
       { status: 'issued', 'issued.announcedAt': { $exists: false }, 'issued.realAt': { $lt: new Date(Date.now() - GRACE_MS) } },
       (l) => `announcing line ${String(l._id)}`,
       (l) => this.issue.announceIssued(String(l._id)),
+    );
+  }
+
+  // ---------- (g) a saved prescription Pharmacy has not caught up with ----------
+
+  /**
+   * A prescription whose revision is above its order's (or that has no order yet), untouched for 30 s, is synced.
+   * Revision 0 (saved before Pharmacy existed) is never swept in.
+   */
+  private syncPrescriptions(): Promise<number> {
+    return this.scan<PrescriptionDocument & Row>(
+      'prescriptions',
+      this.rxs,
+      { pharmacyRev: { $gt: 0 }, updatedAt: { $lt: new Date(Date.now() - GRACE_MS) } },
+      (r) => `syncing prescription ${String(r._id)}`,
+      async (r) => {
+        const order = await this.orderDocs.findOne({ prescription: r._id }).select('prescriptionRev').lean<{ prescriptionRev: number }>().exec();
+        if (order && order.prescriptionRev >= r.pharmacyRev) return false;
+        return (await this.prescriptions.sync(String(r._id))) === 'synced';
+      },
     );
   }
 }
