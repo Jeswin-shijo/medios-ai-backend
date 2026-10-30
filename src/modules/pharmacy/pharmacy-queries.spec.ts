@@ -334,6 +334,33 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal(await m.PharmacyLine.countDocuments({ query: { $exists: true } }), 0);
   });
 
+  test('M2: a Change on a line not yet issued rechecks the patient\'s other lines: the enoxaparin line gains the ibuprofen clash', async () => {
+    await w.openEr();
+    const enox = await order('stat', [{ ...enoxaparin60 }]);
+    const { id } = await order('stat', [{ medicine: 'amlodipine', product: 'amlodipine-tab-5', dose: 5, route: 'oral', frequency: 'OD', durationDays: 3 }]);
+    assert.equal((await w.lineDoc(enox.id)).flags.some((f: any) => f.key === 'clash.ibuprofen'), false);
+    await w.checks.query(PHARM, id, { kind: 'other', question: 'Is this the right medicine?' });
+    await w.checks.answer(DOC, id, { querySeq: 1, outcome: 'change', change: { product: 'ibuprofen-tab-400', dose: 400, route: 'oral', frequency: 'STAT' } });
+    assert.equal((await w.lineDoc(id)).medicine, 'ibuprofen');
+    const flag = (await w.lineDoc(enox.id)).flags.find((f: any) => f.key === 'clash.ibuprofen');
+    assert.ok(flag && flag.severity === 'red');
+  });
+
+  test('M5: an issued line with an unconfirmed red allergy that gains a new red clash is asked about the allergy first', async () => {
+    await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.checks.approve(PHARM, id, {});
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by: { id: 'p', name: 'P' }, at: new Date(), realAt: new Date(), store: 'er', batches: [] } } });
+    // The allergy was recorded earlier and is already on the line (not new), with no query open.
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Enoxaparin'] } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $push: { flags: { key: 'allergy.enoxaparin', kind: 'allergy', severity: 'red', text: 'Allergy recorded to enoxaparin', version: 1 } } });
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [ibuprofen400] });
+    const line = await w.lineDoc(id);
+    assert.ok(line.flags.some((f: any) => f.key === 'clash.ibuprofen' && f.severity === 'red'));
+    assert.equal(line.status, 'issued');
+    assert.equal(line.query?.kind, 'allergy', 'the allergy is asked first, not the clash');
+  });
+
   test('a new red kidney flag on an issued line opens a query and the line stays issued; Keep closes it, Stop stops the line', async () => {
     const { case: theCase } = await w.openEr();
     const { id } = await order('stat', [{ ...enoxaparin60 }]);

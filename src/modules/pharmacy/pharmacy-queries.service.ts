@@ -233,7 +233,11 @@ export class PharmacyQueries {
           const now = await this.load(id);
           const flags = (now.flags ?? []) as Flag[];
           const asked = r.newRed.find((f) => f.kind !== 'allergy' && flags.some((x) => x.key === f.key && x.severity === 'red' && !(x.confirmed && x.version === now.version)));
-          if (asked && !this.hasOpenQuery(now)) await this.askAboutFlag(id, asked);
+          if (asked && !this.hasOpenQuery(now)) {
+            // An unconfirmed red allergy on a medicine already given is the more urgent question: it is asked first.
+            if (needsDoctor(flags, now.version).length) await this.holdAtOnce([now]);
+            else await this.askAboutFlag(id, asked);
+          }
         }
       } catch (e) {
         this.logger.error(`Holding a rechecked line failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -354,6 +358,9 @@ export class PharmacyQueries {
 
     const saved = await this.lines.updateOne(guard, { $set: set, ...(Object.keys(unset).length ? { $unset: unset } : {}), ...extra }).exec();
     if (!saved.modifiedCount) throw new ConflictException('This query was already answered, or the line just changed. Reload and try again.');
+
+    // M2: a changed medicine can clash with the patient's other lines, as a new order does.
+    if (outcome === 'change' && !issued) await this.orders.recheckPatient(String(line.patient), 'order', { skip: [lineId] });
 
     if (set.status === 'to-check') {
       const back = await this.load(lineId);
