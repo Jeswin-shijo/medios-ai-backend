@@ -170,4 +170,11 @@ export class SettingsService {
     settings.set('lab', { ...(settings.get('lab') ?? {}), criticalLimits, limitsHistory });
     await settings.save();
   }
+
+  /** Saves the pharmacy section (targets, near-expiry window). Only PharmacySettingsService.save calls this. */
+  async setPharmacy(section: NonNullable<HospitalSettings['pharmacy']>): Promise<void> {
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    settings.set('pharmacy', section);
+    await settings.save();
+  }
 }

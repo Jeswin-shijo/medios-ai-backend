@@ -43,10 +43,12 @@ export async function buildWorld(m: ReturnType<typeof models>) {
     new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport),
   );
   const checks = new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, settings);
-  new PharmacyCoordinatorRegistration(registry, orders, messages, checks).onModuleInit();
+  new PharmacyCoordinatorRegistration(registry, orders, messages, checks, m.PharmacyOrder, m.PharmacyLine, m.Clock).onModuleInit();
   registry.register({
     key: 'lab',
     messageTypes: [{ type: 'lab.resulted', agent: 'lab', description: 'x', payload: { test: 'string' } }],
+    // Keeps every case open, so a test's second order joins the same ER case (the pharmacy close check passes once nothing waits to be checked).
+    closeChecks: [{ agent: 'lab', label: 'Stub', check: async () => 'fail' as const }],
     status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
   });
   const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });

@@ -35,7 +35,7 @@ describe('PharmacyCoordinatorRegistration', () => {
       m.PharmacyOrder, m.PharmacyLine, m.PharmacyLocation, m.CoordinatorCounter,
       new PatientsService(m.Patient), cases, messages, new PharmacySettingsService(new SettingsService(m.HospitalSettings)), new PharmacyPatientsService(m.Patient, m.LabTestReport),
     );
-    new PharmacyCoordinatorRegistration(registry, orders, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, new PharmacySettingsService(new SettingsService(m.HospitalSettings)))).onModuleInit();
+    new PharmacyCoordinatorRegistration(registry, orders, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, new PharmacySettingsService(new SettingsService(m.HospitalSettings))), m.PharmacyOrder, m.PharmacyLine, m.Clock).onModuleInit();
   });
 
   test('the pharmacy agent registers its 12 message types, 3 clocks, the locked rule and the location handlers', async () => {

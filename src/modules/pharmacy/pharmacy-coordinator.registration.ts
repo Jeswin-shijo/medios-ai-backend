@@ -1,7 +1,12 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
 import { MessagesService } from '../coordinator/messages.service';
+import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
+import { PharmacyLine, PharmacyLineDocument } from './schemas/pharmacy-line.schema';
+import { PharmacyOrder, PharmacyOrderDocument } from './schemas/pharmacy-order.schema';
 import { medicineLabel } from './pharmacy-rounds';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
@@ -134,6 +139,20 @@ export const PHARMACY_CLOCKS: ClockDef[] = [
   },
 ];
 
+/** A line with a question the doctor has not answered, whether the line waits to be checked, was approved, or was already issued. */
+export const OPEN_QUERY_FILTER = {
+  status: { $in: ['to-check', 'query', 'approved', 'issued'] },
+  query: { $exists: true },
+  'query.answer': { $exists: false },
+} as const;
+
+/** The share of Medicine check clocks stopped since `since` that were met in time; null when none stopped. */
+export async function pharmacyOnTimePct(clocks: Model<ClockDocument>, since: Date): Promise<number | null> {
+  const stopped = await clocks.find({ def: 'pharmacy-check', stoppedAt: { $gte: since } }).select('state').lean<{ state: string }[]>().exec();
+  if (!stopped.length) return null;
+  return Math.round((stopped.filter((c) => c.state === 'met').length / stopped.length) * 100);
+}
+
 /** Tells the Coordinator what the Pharmacy agent sends, and the clocks and rule it brings. */
 @Injectable()
 export class PharmacyCoordinatorRegistration implements OnModuleInit {
@@ -142,6 +161,9 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     private readonly orders: PharmacyOrdersService,
     private readonly messages: MessagesService,
     private readonly checks: PharmacyChecksService,
+    @InjectModel(PharmacyOrder.name) private readonly orderDocs: Model<PharmacyOrderDocument>,
+    @InjectModel(PharmacyLine.name) private readonly lines: Model<PharmacyLineDocument>,
+    @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
   ) {}
 
   onModuleInit(): void {
@@ -173,8 +195,14 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
           locked: true,
         },
       ],
-      // Task 7 adds the real figures.
-      status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
+      closeChecks: [{ agent: 'pharmacy', label: 'Medicine orders checked', check: (caseId) => this.closeCheck(caseId) }],
+      status: async () => ({
+        open: await this.lines
+          .countDocuments({ $or: [{ status: { $in: ['to-check', 'approved'] } }, OPEN_QUERY_FILTER as never] })
+          .exec(),
+        capacity: 0,
+        onTimePct: await pharmacyOnTimePct(this.clocks, new Date(Date.now() - 24 * 3_600_000)),
+      }),
     };
   }
 
@@ -186,5 +214,14 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     if (!message?.case) return;
     const w = where(message.payload ?? {});
     if (w) await this.orders.setLocation(message.case, w.area, w.ward);
+  }
+
+  /** 'n/a' with no lines on the case; 'fail' while a line waits for its check or has an open query; else 'pass'. Approved OPD lines at the counter don't block. */
+  private async closeCheck(caseId: string): Promise<'pass' | 'fail' | 'n/a'> {
+    const ids = await this.orderDocs.find({ case: caseId }).distinct('_id').exec();
+    const lines = await this.lines.find({ order: { $in: ids } }).select('status query').lean<{ status: string; query?: { answer?: unknown } }[]>().exec();
+    if (!lines.length) return 'n/a';
+    const blocked = lines.some((l) => l.status === 'to-check' || (['query', 'approved', 'issued'].includes(l.status) && l.query && !l.query.answer));
+    return blocked ? 'fail' : 'pass';
   }
 }
