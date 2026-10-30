@@ -6,7 +6,7 @@ import type { Actor } from '../beds/actor';
 import { CasesService } from '../coordinator/cases.service';
 import { MessagesService } from '../coordinator/messages.service';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
-import { PharmacyLineView, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
+import { LineEvent, PharmacyLineView, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
 import { AnswerInput, PharmacyQueries, QueryOpening, cleanText, lineName } from './pharmacy-queries.service';
 import { startKey } from './pharmacy-rounds';
 import { Flag, needsDoctor, needsReason, needsReview } from './pharmacy-rules';
@@ -49,7 +49,8 @@ export class PharmacyChecksService {
     if (needsDoctor(flags, line.version).length) throw new ConflictException('A doctor must confirm this allergy first. Query the doctor.');
     const reason = cleanText(input?.reason);
     const redOthers = needsReason(flags, line.version);
-    if (redOthers.length && (reason.length < 1 || reason.length > 300)) throw new BadRequestException('A reason is required to approve a red flag');
+    if (reason.length > 300) throw new BadRequestException('The reason can be at most 300 characters');
+    if (redOthers.length && reason.length < 1) throw new BadRequestException('A reason is required to approve a red flag');
     const unreviewed = needsReview(flags, line.version);
     if (unreviewed.length && !input?.allergyReviewed) throw new BadRequestException('Tick Allergy reviewed to approve');
 
@@ -79,8 +80,8 @@ export class PharmacyChecksService {
       .exec();
     if (!done.modifiedCount) throw new ConflictException(lineBusy);
     const order = await this.orderDocs.findById(line.order).exec();
-    const events = [{ type: 'pharmacy.approved' as const, lineId, dedupeKey: `pharmacy.approved:${lineId}:${line.version}:${real.getTime()}` }];
-    if (order && order.setting !== 'OPD') events.push({ type: 'pharmacy.to-issue' as never, lineId, dedupeKey: startKey('pharmacy.to-issue', { _id: line._id, issueFrom: real }) });
+    const events: LineEvent[] = [{ type: 'pharmacy.approved', lineId, dedupeKey: `pharmacy.approved:${lineId}:${line.version}:${real.getTime()}` }];
+    if (order && order.setting !== 'OPD') events.push({ type: 'pharmacy.to-issue', lineId, dedupeKey: startKey('pharmacy.to-issue', { _id: line._id, issueFrom: real }) });
     await this.orders.publish(String(line.order), events);
     return this.orders.line(lineId);
   }
@@ -93,8 +94,7 @@ export class PharmacyChecksService {
     if (question.length < 1 || question.length > 500) throw new BadRequestException('Write the question in 1 to 500 characters');
     const line = await this.queries.load(lineId);
     if (line.status !== 'to-check') throw new ConflictException('This line is not waiting to be checked');
-    await this.lines.updateOne({ _id: line._id, status: 'to-check' }, { $set: { checkedAt: new Date() } }).exec();
-    const opened = await this.queries.openQuery(lineId, { kind: input.kind, question, by: { id: actor.id, name: actor.name } });
+    const opened = await this.queries.openQuery(lineId, { kind: input.kind, question, by: { id: actor.id, name: actor.name }, markChecked: true });
     if (!opened) throw new ConflictException(lineBusy);
     return this.orders.line(lineId);
   }
@@ -151,7 +151,7 @@ export class PharmacyChecksService {
       )
       .exec();
     if (!done.modifiedCount) throw new ConflictException(lineBusy);
-    await this.orders.publish(String(line.order), [{ type: 'pharmacy.cancelled', lineId, dedupeKey: `pharmacy.cancelled:${lineId}` }]);
+    await this.orders.publish(String(line.order), [{ type: 'pharmacy.cancelled', lineId, extra: { querySeq: line.querySeq }, dedupeKey: `pharmacy.cancelled:${lineId}` }]);
     return this.orders.line(lineId);
   }
 
@@ -166,8 +166,11 @@ export class PharmacyChecksService {
   raiseQueryAlert(lineId: string): Promise<void> {
     return this.queries.raiseQueryAlert(lineId);
   }
-  completeQueryAlert(lineId: string): Promise<void> {
-    return this.queries.completeQueryAlert(lineId);
+  completeQueryAlert(lineId: string, seq?: number): Promise<void> {
+    return this.queries.completeQueryAlert(lineId, seq);
+  }
+  ensureReplacement(lineId: string): Promise<PharmacyLineDocument | null> {
+    return this.queries.ensureReplacement(lineId);
   }
   holdAtOnce(lines: PharmacyLineDocument[]): Promise<void> {
     return this.queries.holdAtOnce(lines);

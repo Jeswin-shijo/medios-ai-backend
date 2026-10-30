@@ -1,8 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
-import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
-import { DOC, MIN, PHARM, World, aspirin300, buildWorld, clopidogrel300, ceftriaxone1, enoxaparin60, ibuprofen400 } from './pharmacy-checks.fixture';
+import { DOC, MIN, PHARM, World, aspirin300, buildWorld, clopidogrel300, ceftriaxone1, enoxaparin60, ibuprofen400 } from '../../test/pharmacy-fixtures';
 
 describe('PharmacyChecksService: the pharmacist checks', () => {
   const m = models();
@@ -97,11 +96,11 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     const t = Date.now();
     await m.PharmacyLine.updateOne({ _id: a }, { $set: { enteredCheckAt: new Date(t - 10 * MIN) } });
     await m.PharmacyLine.updateOne({ _id: b }, { $set: { enteredCheckAt: new Date(t - 2 * MIN) } });
-    // Approving B first leaves A's due; approving A (the earliest) afterwards would close the round, so set the order up with a third line.
+    // Approving B leaves A's due as the round's due.
     await w.checks.approve(PHARM, b, {});
     let order: any = await m.PharmacyOrder.findById(v.id).lean();
     assert.equal(new Date(order.checkDueAt).getTime(), t - 10 * MIN + 15 * MIN);
-    // Let the round expire and escalate, then approve A's sibling flow: nothing escalates twice.
+    // Let the round expire and escalate, then approve A: nothing escalates twice.
     await m.Clock.collection.updateMany({ def: 'pharmacy-check' }, { $set: { startedAt: new Date(t - 20 * MIN), dueAt: new Date(t - 5 * MIN) } });
     await w.clocks.checkDue(new Date());
     assert.equal(await m.Escalation.countDocuments({ ladder: 'pharmacy' }), 1);
@@ -163,6 +162,5 @@ describe('PharmacyChecksService: the pharmacist checks', () => {
     await assert.rejects(() => w.checks.cancel(DOC, a, 'x'), { status: 409, message: 'An issued line can be stopped only by answering a query' });
     // A line that is already closed is refused too.
     await assert.rejects(() => w.checks.cancel(DOC, b, 'x'), { status: 409 });
-    void Types;
   });
 });

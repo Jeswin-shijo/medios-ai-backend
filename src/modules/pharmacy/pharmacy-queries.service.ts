@@ -1,14 +1,14 @@
 import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
-import { Model, isValidObjectId } from 'mongoose';
+import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow, displayDateTime } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { TaskAlertDocument } from '../tasks-alerts/schemas/task-alert.schema';
 import { productByKey } from './pharmacy-catalogue';
-import { LineEvent, PharmacyLineView, LineInput, LineSpec, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
+import { LineEvent, LineInput, LineSpec, PharmacyLineView, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
 import { medicineLabel, startKey } from './pharmacy-rounds';
-import { Flag, needsDoctor } from './pharmacy-rules';
+import { Flag, needsDoctor, needsReason, needsReview } from './pharmacy-rules';
 import { PharmacySettingsService } from './pharmacy-settings.service';
-import { PharmacyLineDocument, QueryKind } from './schemas/pharmacy-line.schema';
+import { PharmacyLineDocument, QueryKind, ReplacementSpec } from './schemas/pharmacy-line.schema';
 import type { PharmacyOrderDocument } from './schemas/pharmacy-order.schema';
 
 type By = { id: string; name: string };
@@ -28,6 +28,8 @@ export interface QueryOpening {
   question: string;
   by: By;
   suggestions?: string[];
+  /** The pharmacist's check of the line starts with this query: stamp `checkedAt` in the same guarded write. */
+  markChecked?: boolean;
 }
 
 const MIN_MS = 60_000;
@@ -82,6 +84,7 @@ export class PharmacyQueries {
     const targets = await this.settings.targets();
     const now = new Date();
     const seq = line.querySeq + 1;
+    const dueAt = new Date(now.getTime() + targets.query[order.priority] * MIN_MS);
     const opened = await this.lines
       .updateOne(
         { _id: line._id, status: line.status, querySeq: line.querySeq, $or: [{ query: { $exists: false } }, { 'query.answer': { $exists: true } }] },
@@ -89,6 +92,7 @@ export class PharmacyQueries {
           $inc: { querySeq: 1 },
           $set: {
             ...(line.status === 'issued' ? {} : { status: 'query' }),
+            ...(q.markChecked ? { checkedAt: now } : {}),
             query: {
               seq,
               kind: q.kind,
@@ -96,7 +100,7 @@ export class PharmacyQueries {
               by: q.by,
               at: clinicNow(),
               openedRealAt: now,
-              dueAt: new Date(now.getTime() + targets.query[order.priority] * MIN_MS),
+              dueAt,
               suggestions: q.suggestions ?? [],
             },
           },
@@ -105,7 +109,9 @@ export class PharmacyQueries {
       .exec();
     if (!opened.modifiedCount) return false;
     await this.raiseQueryAlert(lineId);
-    await this.orders.publish(String(line.order), [{ type: 'pharmacy.query', lineId, dedupeKey: `pharmacy.query:${lineId}:${seq}` }]);
+    const queryDueAt = dueAt;
+    // The message names the query it opens: it is never read from the line at send time.
+    await this.orders.publish(String(line.order), [{ type: 'pharmacy.query', lineId, extra: { querySeq: seq, kind: q.kind, queryDueAt }, dedupeKey: `pharmacy.query:${lineId}:${seq}` }]);
     return true;
   }
 
@@ -123,6 +129,7 @@ export class PharmacyQueries {
           $set: {
             title: `Pharmacy query: ${lineName(line)} (${line.query.kind})`,
             subtitle: `For ${order.orderedBy.name} · ${order.number} · answer within ${minutes} min`,
+            querySeq: line.query.seq,
             patientName: order.patientName,
             uhid: order.patientUhid,
             type: 'Medication Alert',
@@ -136,14 +143,17 @@ export class PharmacyQueries {
       )
       .exec();
     // The query may have been answered while the alert was written: leave nothing Pending for it.
-    await this.completeQueryAlert(lineId);
+    await this.completeQueryAlert(lineId, line.query.seq);
   }
 
-  /** Completes the line's alert, but only while the line has no open query (a newer query keeps its alert). */
-  async completeQueryAlert(lineId: string): Promise<void> {
+  /**
+   * Completes the line's alert. With `seq`, only that query's alert (an old answer never completes a newer
+   * query's alert); without it, only while the line has no open query.
+   */
+  async completeQueryAlert(lineId: string, seq?: number): Promise<void> {
     const line = await this.load(lineId);
-    if (this.hasOpenQuery(line)) return;
-    await this.alerts.updateOne({ link: `pharmacy-line:${lineId}` }, { $set: { status: 'Completed' } }).exec();
+    if (seq === undefined ? this.hasOpenQuery(line) : line.query?.seq === seq && !line.query.answer) return;
+    await this.alerts.updateOne({ link: `pharmacy-line:${lineId}`, ...(seq === undefined ? {} : { querySeq: seq }) }, { $set: { status: 'Completed' } }).exec();
   }
 
   /** Opens an allergy query (by the Pharmacy Agent) on each line that has an unconfirmed red allergy flag. */
@@ -194,19 +204,20 @@ export class PharmacyQueries {
     const allowed = q.kind === 'stock' ? ['switch', 'wait', 'cancel'] : issued ? ['change', 'keep', 'stop'] : ['change', 'keep', 'cancel'];
     const outcome = input?.outcome;
     if (typeof outcome !== 'string' || !allowed.includes(outcome)) throw new BadRequestException(NOT_FIT);
-    // A wait is for a line that was approved at this version: it can never skip the approve gates.
-    if (outcome === 'wait' && !(line.approved && ((line.approved as { version?: number }).version ?? line.version) === line.version)) throw new BadRequestException(NOT_FIT);
+    // A wait is for a line that was approved at this version.
+    if (outcome === 'wait' && !(line.approved && (line.approved.version ?? line.version) === line.version)) throw new BadRequestException(NOT_FIT);
     const reason = cleanText(input.reason);
     if (reason.length > 300 || (['keep', 'cancel', 'stop'].includes(outcome) && reason.length < 1)) throw new BadRequestException('Give a reason of 1 to 300 characters');
 
     const by = { id: actor.id, name: actor.name };
-    const answer = { outcome, by, reason, at: clinicNow(), realAt: new Date() };
+    const answer: NonNullable<NonNullable<PharmacyLineDocument['query']>['answer']> = { outcome, by, reason, at: clinicNow(), realAt: new Date() };
     const guard: Record<string, unknown> = { _id: line._id, status: line.status, version: line.version, 'query.seq': q.seq, 'query.answer': { $exists: false } };
     const set: Record<string, unknown> = { 'query.answer': answer };
     const extra: Record<string, unknown> = {};
-    const events: LineEvent[] = [{ type: 'pharmacy.query-answered', lineId, dedupeKey: `pharmacy.query-answered:${lineId}:${q.seq}` }];
-    let replacement: LineSpec | undefined;
-    const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, dedupeKey: `${type}:${lineId}` });
+    // Every message names the query it concerns: the clock ref is never read from the line at send time.
+    const events: LineEvent[] = [{ type: 'pharmacy.query-answered', lineId, extra: { querySeq: q.seq, outcome }, dedupeKey: `pharmacy.query-answered:${lineId}:${q.seq}` }];
+    const unset: Record<string, ''> = {};
+        const doneKey = (type: 'pharmacy.cancelled' | 'pharmacy.stopped'): LineEvent => ({ type, lineId, extra: { querySeq: q.seq }, dedupeKey: `${type}:${lineId}` });
     const confirmOf = (c?: { reason: string }) => (c && cleanText(c.reason) ? { by, reason: cleanText(c.reason) } : undefined);
 
     if (outcome === 'keep') {
@@ -214,12 +225,15 @@ export class PharmacyQueries {
       const flags = ((line.flags ?? []) as Flag[]).map((f) => (f.severity === 'red' && !(f.confirmed && f.version === line.version) ? { ...f, confirmed: { by: actor.name, reason, at: clinicNow() } } : f));
       guard.flags = line.flags;
       set.flags = flags;
-      if (!issued) Object.assign(set, { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false });
+      if (!issued) {
+        Object.assign(set, { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false });
+        unset.approved = '';
+      }
     } else if (outcome === 'change' || outcome === 'switch') {
       const c = outcome === 'change' ? input.change : input.switchTo;
       if (!c || typeof c !== 'object') throw new BadRequestException(outcome === 'change' ? 'Say what to change the line to' : 'Choose the medicine to switch to');
       const product = typeof c.product === 'string' ? productByKey(c.product) : undefined;
-      const spec = this.orders.validateInputs([{ ...(c as LineInput), medicine: outcome === 'switch' ? (c as LineInput).medicine : (product?.medicine ?? '') }])[0];
+      const spec = this.orders.validate([{ ...(c as LineInput), medicine: outcome === 'switch' ? (c as LineInput).medicine : (product?.medicine ?? '') }])[0];
       spec.note = line.note;
       const confirm = confirmOf(c.confirm);
       if (confirm) spec.confirm = confirm;
@@ -236,12 +250,17 @@ export class PharmacyQueries {
           durationDays: spec.durationDays, quantity: spec.quantity, flags, status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false,
         });
         if (spec.medicine !== line.medicine) set.medicine = spec.medicine;
+        unset.approved = '';
         extra.$push = {
           history: { version: line.version, product: line.product, dose: line.dose, unit: line.unit, route: line.route, frequency: line.frequency, durationDays: line.durationDays, quantity: line.quantity, flags: line.flags ?? [], by, at: now },
         };
       } else {
-        spec.replaces = lineId;
-        replacement = spec;
+        // The replacement is stored with the answer, under its own pre-made id, in the same guarded write as the flip.
+        const id = new Types.ObjectId();
+        answer.replacement = {
+          id: String(id), medicine: spec.medicine, product: spec.product, dose: spec.dose, unit: spec.unit, route: spec.route, frequency: spec.frequency,
+          durationDays: spec.durationDays, quantity: spec.quantity, note: spec.note, ...(spec.confirm ? { confirm: spec.confirm } : {}),
+        };
         if (outcome === 'change') {
           Object.assign(set, { status: 'stopped', stopped: { by, reason: reason || 'Changed by the doctor', at: clinicNow() } });
           events.push(doneKey('pharmacy.stopped'));
@@ -251,7 +270,15 @@ export class PharmacyQueries {
         }
       }
     } else if (outcome === 'wait') {
-      Object.assign(set, { status: 'approved', waitingForStock: true });
+      // A wait passes the approve gates like any approval: an open gate sends the line back to To check.
+      const flags = (line.flags ?? []) as Flag[];
+      guard.flags = line.flags;
+      if (needsDoctor(flags, line.version).length || needsReason(flags, line.version).length || needsReview(flags, line.version).length) {
+        Object.assign(set, { status: 'to-check', enteredCheckAt: new Date(), waitingForStock: false });
+        unset.approved = '';
+      } else {
+        Object.assign(set, { status: 'approved', waitingForStock: true });
+      }
     } else if (outcome === 'cancel') {
       Object.assign(set, { status: 'cancelled', cancelled: { by, reason, at: clinicNow() } });
       events.push(doneKey('pharmacy.cancelled'));
@@ -260,21 +287,46 @@ export class PharmacyQueries {
       events.push(doneKey('pharmacy.stopped'));
     }
 
-    const saved = await this.lines.updateOne(guard, { $set: set, ...extra }).exec();
+    const saved = await this.lines.updateOne(guard, { $set: set, ...(Object.keys(unset).length ? { $unset: unset } : {}), ...extra }).exec();
     if (!saved.modifiedCount) throw new ConflictException('This query was already answered, or the line just changed. Reload and try again.');
 
-    const order = await this.orderOf(line);
     if (set.status === 'to-check') {
       const back = await this.load(lineId);
       events.push({ type: 'pharmacy.to-check', lineId, dedupeKey: startKey('pharmacy.to-check', back) });
     }
-    if (replacement) {
-      const [added] = await this.orders.addLines(order, [replacement]);
-      await this.orders.recheckPatient(String(line.patient), 'order', { skip: [String(added._id)] });
-      events.push({ type: 'pharmacy.to-check', lineId: String(added._id), dedupeKey: startKey('pharmacy.to-check', added) });
+    if (answer.replacement) {
+      // A failure here is logged, not thrown: the answer stands and ensureReplacement (Task 6 reconcile) adds the stored line.
+      await this.ensureReplacement(lineId).catch((e) => this.logger.error(`Adding the replacement of line ${lineId} failed: ${e instanceof Error ? e.message : String(e)}`));
     }
-    await this.completeQueryAlert(lineId);
+    await this.completeQueryAlert(lineId, q.seq);
     await this.orders.publish(String(line.order), events);
+    if (outcome === 'wait' && set.status === 'to-check') await this.holdAtOnce([line]);
     return this.orders.line(lineId);
+  }
+
+  /**
+   * Adds the replacement stored on an answered Change or Switch if it is not there yet (it carries a pre-made id,
+   * so a repeat or a race adds nothing twice). Returns the line it added, or null.
+   */
+  async ensureReplacement(lineId: string): Promise<PharmacyLineDocument | null> {
+    const line = await this.load(lineId);
+    const r = line.query?.answer?.replacement;
+    if (!r || (await this.lines.exists({ _id: r.id }).exec())) return null;
+    const order = await this.orderOf(line);
+    const spec: LineSpec = {
+      id: r.id, replaces: lineId, medicine: r.medicine, product: r.product, dose: r.dose, unit: r.unit, route: r.route, frequency: r.frequency,
+      durationDays: r.durationDays, quantity: r.quantity, note: r.note, ...(r.confirm ? { confirm: r.confirm } : {}),
+    };
+    let added: PharmacyLineDocument;
+    try {
+      [added] = await this.orders.addLines(order, [spec]);
+    } catch (e) {
+      if ((e as { code?: number }).code === 11000) return null;
+      throw e;
+    }
+    await this.orders.recheckPatient(String(line.patient), 'order', { skip: [String(added._id)] });
+    await this.holdAtOnce([added]);
+    await this.orders.publish(String(line.order), [{ type: 'pharmacy.to-check', lineId: String(added._id), dedupeKey: startKey('pharmacy.to-check', added) }]);
+    return added;
   }
 }

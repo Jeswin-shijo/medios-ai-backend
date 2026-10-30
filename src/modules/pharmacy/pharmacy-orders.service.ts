@@ -62,6 +62,8 @@ export interface LineSpec {
   quantity: number | null;
   note?: string;
   replaces?: Types.ObjectId | string;
+  /** A pre-made line id: adding the same spec twice then makes one line. */
+  id?: Types.ObjectId | string;
   prescriptionItem?: string;
   prescriptionRev?: number;
   confirm?: { by: { id: string; name: string }; reason: string };
@@ -226,7 +228,7 @@ export class PharmacyOrdersService {
   }
 
   /** Checks the doctor's input against the list and turns it into line specs (with quantity). */
-  private validate(inputs: LineInput[]): LineSpec[] {
+  validate(inputs: LineInput[]): LineSpec[] {
     if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > MAX_LINES) throw new BadRequestException('Choose 1 to 10 medicines');
     return inputs.map((l, i) => {
       const n = `Line ${i + 1}`;
@@ -259,11 +261,6 @@ export class PharmacyOrdersService {
         note: text(l.note),
       };
     });
-  }
-
-  /** Checks doctor input against the list and turns it into line specs (with quantity), for a Change or a Switch. */
-  validateInputs(inputs: LineInput[]): LineSpec[] {
-    return this.validate(inputs);
   }
 
   /** The rule flags of specs for a patient, leaving out the lines in `exclude` (a line being changed must not clash with itself). */
@@ -310,6 +307,7 @@ export class PharmacyOrdersService {
       const quantity = product && s.dose !== null && isFrequency(s.frequency) ? quantityFor(product, s.dose, s.frequency, s.durationDays) : null;
       out.push(
         await this.lines.create({
+          ...(s.id ? { _id: s.id } : {}),
           order: order._id,
           patient: order.patient,
           medicine: s.medicine,

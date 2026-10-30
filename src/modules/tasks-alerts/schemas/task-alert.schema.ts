@@ -56,6 +56,10 @@ export class TaskAlertItem {
   @Prop()
   link?: string;
 
+  /** Pharmacy query alerts: the query this alert is about, so an old answer never completes a newer query's alert. */
+  @Prop()
+  querySeq?: number;
+
   /** Set on an escalation's alert: it is completed by Acknowledge, not by the toggle. */
   @Prop({
     type: {

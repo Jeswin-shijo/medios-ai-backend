@@ -302,7 +302,8 @@ export class EscalationsService {
       .findOneAndUpdate({ _id: id, state: 'open' }, { $set: { state: 'acknowledged', ackByName: by, ackAt: new Date() } }, { new: true })
       .exec();
     if (!done) return;
-    if (done.alert) await this.alertModel.updateOne({ _id: done.alert }, { $set: { status: 'Completed' } }).exec();
+    // Only while the alert still belongs to this escalation: a later query may have reused the alert.
+    if (done.alert) await this.alertModel.updateOne({ _id: done.alert, 'escalation.id': String(done._id) }, { $set: { status: 'Completed' } }).exec();
     this.emit(done);
   }
 

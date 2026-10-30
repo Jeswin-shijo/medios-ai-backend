@@ -10,6 +10,21 @@ export type QueryKind = (typeof QUERY_KINDS)[number];
 
 type By = { id: string; name: string };
 
+/** What an answered Change or Switch of an issued line will add, stored with the answer so a crash never loses it. */
+export interface ReplacementSpec {
+  id: string;
+  medicine: string | null;
+  product: string | null;
+  dose: number | null;
+  unit: string;
+  route: string;
+  frequency: string;
+  durationDays: number | null;
+  quantity: number | null;
+  note?: string;
+  confirm?: { by: By; reason: string };
+}
+
 export interface LineQuery {
   seq: number;
   kind: QueryKind;
@@ -21,7 +36,7 @@ export interface LineQuery {
   openedRealAt: Date;
   dueAt: Date;
   suggestions: string[];
-  answer?: { outcome: string; by: By; reason: string; at: Date; realAt: Date };
+  answer?: { outcome: string; by: By; reason: string; at: Date; realAt: Date; replacement?: ReplacementSpec };
 }
 
 export interface LineHistoryEntry {
@@ -80,7 +95,7 @@ export class PharmacyLine {
   @Prop({ type: Object }) query?: LineQuery;
 
   // Outcomes.
-  @Prop({ type: Object }) approved?: { by: By; at: Date; reason?: string };
+  @Prop({ type: Object }) approved?: { by: By; at: Date; reason?: string; version?: number };
   @Prop({ type: Object }) rejected?: { by: By; reason: string; at: Date };
   @Prop({ type: Object }) issuing?: { by: By; store: string; realAt: Date };
   @Prop({ type: Object }) issued?: {

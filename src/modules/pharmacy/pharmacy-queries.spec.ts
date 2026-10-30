@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
-import { DOC, MIN, PHARM, World, aspirin300, buildWorld, ceftriaxone1, enoxaparin60, amoxicillin500 } from './pharmacy-checks.fixture';
+import { DOC, MIN, PHARM, World, amoxicillin500, aspirin300, buildWorld, ceftriaxone1, enoxaparin60 } from '../../test/pharmacy-fixtures';
 
 describe('PharmacyChecksService: queries, answers and the kidney recheck', () => {
   const m = models();
@@ -26,8 +26,6 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
   const alertOf = (id: string) => m.TaskAlertItem.findOne({ link: `pharmacy-line:${id}` }).lean().exec() as Promise<any>;
   const backdateQueryClock = (minutes: number) =>
     m.Clock.collection.updateMany({ def: 'pharmacy-query' }, { $set: { startedAt: new Date(Date.now() - minutes * MIN), dueAt: new Date(Date.now() - 1000) } });
-  const unfilled = () => ({ product: 'x', dose: 1, route: 'oral', frequency: 'OD' });
-  void unfilled;
 
   test('query holds the line: alerts pharmacy-line:<id> (High, "For <doctor>"), starts a pharmacy-query clock due 30 min (STAT) or 120 (routine), and closes the check round', async () => {
     await w.openEr();
@@ -227,7 +225,6 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal(repl.status, 'to-check');
     assert.equal(repl.flags.find((f: any) => f.kind === 'allergy').confirmed.reason, 'Tolerates it');
     assert.equal((await w.sent('pharmacy.cancelled')).length, 1);
-    void amoxicillin500;
   });
 
   test("a query-answered for query 1 never stops query 2's clock or completes query 2's alert", async () => {
@@ -238,7 +235,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await w.checks.query(PHARM, id, { kind: 'other', question: 'two' });
     const clocks = await w.clocksOf('pharmacy-query');
     assert.deepEqual(clocks.map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
-    const o: any = await m.PharmacyOrder.findById(clocks[0].ref.split(':')[0] && (await w.lineDoc(id)).order).lean();
+    const o: any = await m.PharmacyOrder.findById((await w.lineDoc(id)).order).lean();
     await w.messages.send({
       case: String(o.case), from: 'pharmacy', to: ['coordinator'], type: 'pharmacy.query-answered', priority: 'high', summary: 'late',
       payload: { orderId: String(o._id), orderNumber: o.number, lineId: id, medicine: 'aspirin', priority: 'stat', setting: 'ER', version: 1, checkRound: 1, checkDueAt: new Date(), issueRound: 0, issueDueAt: new Date(), querySeq: 1, outcome: 'keep' },
@@ -284,8 +281,6 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     await m.PharmacyLine.updateOne({ _id: id }, { $pull: { flags: { kind: 'allergy' } } });
     await w.orders.recheckPatient(w.patientId, 'order');
     assert.equal((await w.lineDoc(id)).querySeq, 1);
-    // The doctor's Keep clears it; the pharmacist must approve again.
-    await m.PharmacyLine.updateOne({ _id: id }, { $set: { 'query.answer': undefined } });
   });
 
   test('holdAtOnce queries each line with an unconfirmed red allergy', async () => {
@@ -336,7 +331,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
 
   test('a new red kidney flag on an issued line opens a query and the line stays issued; Keep closes it, Stop stops the line', async () => {
     const { case: theCase } = await w.openEr();
-    const { v, id } = await order('stat', [{ ...enoxaparin60 }]);
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
     await w.checks.approve(PHARM, id, {});
     await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by: { id: 'p', name: 'P' }, at: new Date(), realAt: new Date(), store: 'er', batches: [] } } });
     await w.kidneyReport(2.5, { labLine: 'k1' });
@@ -361,6 +356,120 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     assert.equal(stopped.status, 'stopped');
     assert.equal((await w.sent('pharmacy.stopped')).length, 1);
     assert.equal((await w.lineDoc(id2)).stopped.reason, 'Kidney function too low');
-    void v;
+  });
+
+  test('wait passes the approve gates: a red allergy that arrived during the stock query sends the line to To check and holds it (not approved)', async () => {
+    await w.openEr();
+    const { id } = await order('stat', [amoxicillin500]);
+    await w.checks.approve(PHARM, id, {});
+    await w.checks.openQuery(id, { kind: 'stock', question: 'Out of stock', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
+    await m.Patient.updateOne({ _id: w.patientId }, { $set: { allergies: ['Penicillin'] } });
+    // Another order re-checks the stock-queried line: the red allergy is added and no second query opens.
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [{ medicine: 'paracetamol', product: 'paracetamol-tab-500', dose: 500, route: 'oral', frequency: 'STAT' }] });
+    const mid = await w.lineDoc(id);
+    assert.deepEqual([mid.status, mid.query.kind], ['query', 'stock']);
+    assert.equal(mid.flags.filter((f: any) => f.key === 'allergy.amoxicillin' && !f.confirmed).length, 1);
+    await w.checks.answer(DOC, id, { outcome: 'wait' });
+    const line = await w.lineDoc(id);
+    assert.notEqual(line.status, 'approved');
+    assert.equal(line.waitingForStock, false);
+    assert.equal(line.approved, undefined);
+    // Held at once: an allergy query for a doctor, so it cannot reach To issue.
+    assert.deepEqual([line.status, line.query.kind, line.query.seq], ['query', 'allergy', 2]);
+    assert.equal((await w.orders.worklist('issue')).length, 0);
+  });
+
+  test('wait with an unreviewed amber allergy goes back to To check (not approved)', async () => {
+    await w.openEr();
+    const { id } = await order('stat', [aspirin300]);
+    await w.checks.approve(PHARM, id, {});
+    await w.checks.openQuery(id, { kind: 'stock', question: 'Out of stock', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
+    await m.PharmacyLine.updateOne({ _id: id }, { $push: { flags: { key: 'allergy.cross-nsaid', kind: 'allergy', severity: 'amber', text: 'x', version: 1 } } });
+    await w.checks.answer(DOC, id, { outcome: 'wait' });
+    const line = await w.lineDoc(id);
+    assert.deepEqual([line.status, line.approved, line.waitingForStock], ['to-check', undefined, false]);
+    assert.equal((await w.sent('pharmacy.to-check')).length, 2);
+  });
+
+  test("a query opened while an answer is being finished is not stopped by the old answer, and its alert is not completed by it", async () => {
+    await w.openEr();
+    const { id } = await order();
+    await w.checks.query(PHARM, id, { kind: 'dose', question: 'one' });
+    const q = (w.checks as any).queries;
+    const original = q.completeQueryAlert.bind(q);
+    let once = false;
+    q.completeQueryAlert = async (lineId: string, seq?: number) => {
+      if (!once) {
+        once = true;
+        await q.openQuery(lineId, { kind: 'kidney', question: 'two', by: { id: 'pharmacy-agent', name: 'Pharmacy Agent' } });
+      }
+      return original(lineId, seq);
+    };
+    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'ok' });
+    const [answered] = await w.sent('pharmacy.query-answered');
+    assert.deepEqual([answered.payload.querySeq, answered.payload.outcome], [1, 'keep']);
+    assert.deepEqual((await w.clocksOf('pharmacy-query')).map((c) => [c.ref, c.state]), [[`${id}:q1`, 'met'], [`${id}:q2`, 'running']]);
+    const alert = await alertOf(id);
+    assert.deepEqual([alert.status, alert.querySeq, alert.title], ['Pending', 2, 'Pharmacy query: Aspirin 300 mg (kidney)']);
+    const queries = await w.sent('pharmacy.query');
+    assert.deepEqual(queries.map((x) => x.payload.querySeq), [1, 2]);
+  });
+
+  test("an old escalation never completes an alert a newer query now owns", async () => {
+    await w.openEr();
+    const { id } = await order();
+    await w.checks.query(PHARM, id, { kind: 'dose', question: 'one' });
+    await backdateQueryClock(40);
+    await w.clocks.checkDue(new Date());
+    const esc: any = await m.Escalation.findOne({ ladder: 'pharmacy-query' }).lean();
+    // The alert is reused by a newer query: escalation cleared, Pending again.
+    await m.TaskAlertItem.updateOne({ link: `pharmacy-line:${id}` }, { $unset: { escalation: '' }, $set: { status: 'Pending', querySeq: 2 } });
+    await w.escalations.resolve(String(esc._id), 'Query answered');
+    assert.equal((await alertOf(id)).status, 'Pending');
+    assert.equal(((await m.Escalation.findById(esc._id).lean()) as any).state, 'acknowledged');
+  });
+
+  test('a failure after the issued-line flip loses nothing: the replacement is stored with the answer and ensureReplacement adds exactly one, with the doctor\'s dose', async () => {
+    await w.openEr();
+    const { id } = await order();
+    await w.checks.approve(PHARM, id, {});
+    await m.PharmacyLine.updateOne({ _id: id }, { $set: { status: 'issued', issued: { by: { id: 'p', name: 'P' }, at: new Date(), realAt: new Date(), store: 'er', batches: [] } } });
+    await w.checks.openQuery(id, { kind: 'dose', question: 'Lower?', by: { id: PHARM.id, name: PHARM.name } });
+    const real = w.orders.addLines.bind(w.orders);
+    let fail = true;
+    (w.orders as any).addLines = async (...args: any[]) => {
+      if (fail) {
+        fail = false;
+        throw new Error('transient db error');
+      }
+      return (real as any)(...args);
+    };
+    const out = await w.checks.answer(DOC, id, { outcome: 'change', reason: 'Lower', change: { product: 'aspirin-tab-150', dose: 150, route: 'oral', frequency: 'STAT' } });
+    assert.equal(out.status, 'stopped');
+    const stored = (await w.lineDoc(id)).query.answer.replacement;
+    assert.deepEqual([stored.dose, stored.product], [150, 'aspirin-tab-150']);
+    assert.equal(await m.PharmacyLine.countDocuments({ replaces: id }), 0);
+    // The answer still finished: alert completed, message sent.
+    assert.equal((await alertOf(id)).status, 'Completed');
+    assert.equal((await w.sent('pharmacy.query-answered')).length, 1);
+    const added = await w.checks.ensureReplacement(id);
+    assert.equal(String(added!._id), stored.id);
+    assert.equal(await w.checks.ensureReplacement(id), null);
+    const all: any[] = await m.PharmacyLine.find({ replaces: id }).lean();
+    assert.equal(all.length, 1);
+    assert.deepEqual([all[0].dose, all[0].status], [150, 'to-check']);
+    assert.equal((await w.sent('pharmacy.to-check')).filter((x) => x.payload.lineId === stored.id).length, 1);
+  });
+
+  test('the recheck listener acts only on newly added red flags: a changed flag with no new red key opens no query', async () => {
+    const { case: theCase } = await w.openEr();
+    const { id } = await order('stat', [{ ...enoxaparin60 }]);
+    await w.kidneyReport(2.5, { labLine: 'k1' });
+    await w.labResulted(String(theCase._id), 'rft');
+    await w.checks.answer(DOC, id, { outcome: 'keep', reason: 'Renal-dosed already' });
+    const line = await m.PharmacyLine.findById(id).exec();
+    await (w.checks as any).queries.onRechecked([{ line, newRed: [], reason: 'kidney' }]);
+    assert.equal((await w.lineDoc(id)).querySeq, 1);
+    assert.equal((await w.lineDoc(id)).approved, undefined, 'a Kept line has no stale approval');
   });
 });
