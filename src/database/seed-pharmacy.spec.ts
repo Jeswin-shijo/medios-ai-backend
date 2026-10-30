@@ -380,6 +380,23 @@ describe('seedPharmacy', () => {
     assert.deepEqual(seen.sort(), [26, 27]);
   });
 
+  test("the made-up patient's UHID is the next one in the sequence", async () => {
+    const made = (await m.Patient.find({ address: 'Seed: pharmacy demo' }).lean<any[]>().exec());
+    assert.ok(made.length >= 1);
+    const serial = (u: string) => Number(u.slice(-5));
+    const all = (await m.Patient.find({ uhid: /^MHK2026\d{5}$/ }).lean<any[]>().exec()).map((p) => serial(p.uhid)).sort((a, b) => a - b);
+    // Highest serial is the seed's own, and the serials after the fixtures run on without a gap.
+    const own = made.map((p) => serial(p.uhid)).sort((a, b) => a - b);
+    assert.equal(all.at(-1), own.at(-1));
+    const erMade = (await m.Patient.find({ address: { $ne: 'Seed: pharmacy demo' }, uhid: /^MHK2026\d{5}$/ }).lean<any[]>().exec()).map((p) => serial(p.uhid));
+    assert.equal(own[0], Math.max(...erMade) + 1);
+    for (const p of made) {
+      const c = await m.Case.findOne({ patient: p._id }).lean<any>().exec();
+      assert.equal(c!.patientUhid, p.uhid);
+      assert.ok(await m.PharmacyOrder.exists({ patient: p._id, patientUhid: p.uhid }).exec());
+    }
+  });
+
   test('no patient name in any seeded pharmacy message', async () => {
     const names = (await m.Patient.find().lean<any[]>().exec()).map((p) => p.name);
     const msgs = await m.AgentMessage.find({ from: 'pharmacy' }).lean<any[]>().exec();
@@ -439,7 +456,8 @@ describe('seedPharmacy', () => {
     // A case an earlier run opened for the pharmacy is cleared and opened again: no order is left pointing at a missing case.
     const used = new Set((await m.PharmacyOrder.distinct('case').exec()).map(String));
     const labOpd = (await m.Case.find({ openedBy: 'lab', kind: 'opd' }).lean<any[]>().exec()).find((c) => used.has(String(c._id)));
-    if (labOpd) await m.Case.updateOne({ _id: labOpd._id }, { $set: { openedBy: 'pharmacy' } });
+    assert.ok(labOpd, 'a lab-opened outpatient case holds a pharmacy order, so the rerun check is not vacuous');
+    await m.Case.updateOne({ _id: labOpd!._id }, { $set: { openedBy: 'pharmacy' } });
     await quiet(() => seedPharmacy(DAY, PINNED));
     for (const o of await m.PharmacyOrder.find().lean<any[]>().exec()) {
       assert.ok(await m.Case.exists({ _id: o.case }).exec(), `${o.number} has its case`);
