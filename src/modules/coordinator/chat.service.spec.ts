@@ -17,6 +17,7 @@ import { ClocksService } from './clocks.service';
 import { CoordinatorEvents } from './coordinator-events';
 import { EscalationsService } from './escalations.service';
 import { MessagesService } from './messages.service';
+import { PHARMACY_CLOCKS, PHARMACY_MESSAGE_TYPES } from '../pharmacy/pharmacy-coordinator.registration';
 
 const status = async () => ({ open: 1, capacity: 4, onTimePct: null });
 const actor: Actor = { id: 'u1', name: 'Dr Test', role: UserRole.DOCTOR };
@@ -41,6 +42,7 @@ describe('ChatService', () => {
   let clocks: ClocksService;
   let messages: MessagesService;
   let patientId: string;
+  let registry: AgentRegistry;
 
   before(async () => {
     await connectTestDb();
@@ -51,7 +53,7 @@ describe('ChatService', () => {
 
   beforeEach(async () => {
     await resetTestDb();
-    const registry = new AgentRegistry();
+    registry = new AgentRegistry();
     registry.register({
       key: 'bed',
       messageTypes: [{ type: 'bed.requested', agent: 'bed', description: 'asked', payload: {} }],
@@ -120,6 +122,29 @@ describe('ChatService', () => {
     const log = (await ChatLog.findOne({ question: /^Status of/ }).lean())!;
     assert.deepEqual((log.aiInput as any).input.facts.agents, ['bed']);
     assert.match(log.answer, /Zarathustra/);
+  });
+
+  test('the Ask box sends no MO- number to the AI for a case with a running pharmacy-check clock', async () => {
+    const c = await openCase();
+    // The pharmacy agent's own message types and clocks, so its check clock really runs on the case.
+    registry.register({ key: 'pharmacy', messageTypes: PHARMACY_MESSAGE_TYPES, clocks: PHARMACY_CLOCKS, status });
+    const line = { orderId: String(new Types.ObjectId()), orderNumber: 'MO-0042', lineId: String(new Types.ObjectId()), medicine: 'enoxaparin', priority: 'urgent', setting: 'ER', version: 1, checkRound: 1, checkDueAt: new Date(Date.now() + 30 * 60_000).toISOString(), issueRound: 0, issueDueAt: new Date().toISOString() };
+    await messages.send({ case: String(c._id), from: 'pharmacy', to: ['coordinator'], type: 'pharmacy.to-check', priority: 'high', summary: 'MO-0042: Enoxaparin 60 mg to check (URGENT)', payload: line });
+    const running = await Clock.find({ case: String(c._id), def: 'pharmacy-check' }).lean();
+    assert.equal(running.length, 1);
+    assert.equal(running[0].state, 'running');
+    assert.match(String(running[0].detail ?? ''), /MO-0042/, 'the clock itself does carry the order number');
+
+    const res = await service.ask(actor, 'Status of MHK202577777');
+    assert.match(res.answer, /Medicine check has \d+ min left/);
+    const sent = JSON.stringify(ai.tasks.map((t) => ({ instructions: t.instructions, input: t.input })));
+    const logged = JSON.stringify((await ChatLog.find().lean()).map((l) => l.aiInput));
+    for (const blob of [sent, logged]) {
+      assert.ok(!/\bMO-\d+/.test(blob), 'an order number reached the AI');
+      assert.ok(!blob.includes('Enoxaparin'), 'a line summary reached the AI');
+      assert.ok(!/MHK\d{9}/i.test(blob) && !/\b[a-f\d]{24}\b/i.test(blob));
+    }
+    assert.deepEqual((ai.tasks[0].input as any).facts.clocks.map((k: any) => k.label).sort(), ['Bed wait', 'Medicine check']);
   });
 
   const approval = (type: string, agent: string, summary: string) =>
