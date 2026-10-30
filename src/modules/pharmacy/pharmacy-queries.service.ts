@@ -194,7 +194,11 @@ export class PharmacyQueries {
           continue;
         }
         const kidney = r.reason === 'kidney' ? r.newRed.find((f) => f.kind === 'kidney') : undefined;
-        if (kidney) await this.openQuery(id, { kind: 'kidney', question: kidneyQuestion(kidney), by: PHARMACY_AGENT });
+        if (kidney) {
+          // Y26: the kidney question asks only about the kidney flag(s): its Keep never confirms a clash, dose or double.
+          const redKeys = ((fresh.flags ?? []) as Flag[]).filter((f) => f.kind === 'kidney' && f.severity === 'red' && !(f.confirmed && f.version === fresh.version)).map((f) => f.key);
+          await this.openQuery(id, { kind: 'kidney', question: kidneyQuestion(kidney), by: PHARMACY_AGENT, redKeys });
+        }
       } catch (e) {
         this.logger.error(`Holding a rechecked line failed: ${e instanceof Error ? e.message : String(e)}`);
       }
