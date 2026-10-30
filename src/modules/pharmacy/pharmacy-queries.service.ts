@@ -144,7 +144,7 @@ export class PharmacyQueries {
             patientName: order.patientName,
             uhid: order.patientUhid,
             type: 'Medication Alert',
-            category: 'Medication',
+            category: 'Critical',
             priority: 'High',
             status: 'Pending',
             dueDateTime: displayDateTime(new Date(clinicNow().getTime() + minutes * MIN_MS)),

@@ -37,7 +37,7 @@ describe('PharmacyChecksService: queries, answers and the kidney recheck', () =>
     const alert = await alertOf(id);
     assert.equal(alert.title, 'Pharmacy query: Aspirin 300 mg (dose)');
     assert.equal(alert.subtitle, `For Dr. Shajin · ${v.number} · answer within 30 min`);
-    assert.deepEqual([alert.type, alert.category, alert.priority, alert.status], ['Medication Alert', 'Medication', 'High', 'Pending']);
+    assert.deepEqual([alert.type, alert.category, alert.priority, alert.status], ['Medication Alert', 'Critical', 'High', 'Pending']);
     assert.deepEqual([alert.patientName, alert.uhid], ['Ravi Kumar', w.patientUhid]);
     const [clock] = await w.clocksOf('pharmacy-query');
     assert.equal(clock.ref, `${id}:q1`);

@@ -249,7 +249,7 @@ describe('seedPharmacy', () => {
     assert.ok(inMin > 17 && inMin < 22, `the query clock is due in ${inMin} min`);
     const alerts = await m.TaskAlertItem.find({ link: `pharmacy-line:${line._id}` }).lean<any[]>().exec();
     assert.equal(alerts.length, 1);
-    assert.deepEqual([alerts[0].status, alerts[0].type, alerts[0].category, alerts[0].priority], ['Pending', 'Medication Alert', 'Medication', 'High']);
+    assert.deepEqual([alerts[0].status, alerts[0].type, alerts[0].category, alerts[0].priority], ['Pending', 'Medication Alert', 'Critical', 'High']);
     assert.equal(alerts[0].title, 'Pharmacy query: Amoxicillin-clavulanate 625 mg (allergy)');
     const order = (await m.PharmacyOrder.findById(line.order).lean<any>().exec())!;
     assert.equal(order.setting, 'Ward');

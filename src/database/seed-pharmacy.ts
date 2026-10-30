@@ -765,7 +765,7 @@ function simulateOrder(ob: OB, ctx: SimContext): void {
       const answered = l.query.answer ? new Date(l.query.answer.realAt).getTime() : undefined;
       alertDocs.push({
         _id: new Types.ObjectId(), title: `Pharmacy query: ${name} (${l.query.kind})`, subtitle: `For ${doctor.name} · ${ob.number} · answer within ${minutes} min`, querySeq: 1,
-        patientName: ob.patient.name, uhid: ob.patient.uhid, type: 'Medication Alert', category: 'Medication', priority: 'High', status: answered ? 'Completed' : 'Pending',
+        patientName: ob.patient.name, uhid: ob.patient.uhid, type: 'Medication Alert', category: 'Critical', priority: 'High', status: answered ? 'Completed' : 'Pending',
         dueDateTime: displayDateTime(new Date(clinicOf(openMs).getTime() + minutes * MIN)), link: `pharmacy-line:${l._id}`, createdAt: new Date(openMs), updatedAt: new Date(answered ?? openMs),
       });
     }
