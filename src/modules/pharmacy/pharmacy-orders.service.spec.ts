@@ -184,6 +184,25 @@ describe('PharmacyOrdersService', () => {
     assert.equal(await m.PharmacyLine.countDocuments(), 1, 'a preview saves nothing');
   });
 
+  test('preview with replacingLineId leaves that line out of the doubles and clash comparison, keeps a real double, and refuses another patient\'s line (Y46)', async () => {
+    const order = await service.order(DOC, { patientId, priority: 'routine', lines: [aspirin300, { ...aspirin300, frequency: 'OD', durationDays: 3 }] });
+    const [first, second] = order.lines;
+    const twice = (p: Awaited<ReturnType<typeof service.preview>>) => p.lines[0].flags.filter((f) => f.kind === 'double');
+
+    // Without it, the line being replaced counts as a second copy.
+    assert.ok(twice(await service.preview({ patientId, lines: [aspirin300] })).length >= 1);
+    // (b) With it, the other active aspirin line is still a real double.
+    const withOther = await service.preview({ patientId, lines: [aspirin300], replacingLineId: first.id });
+    assert.ok(twice(withOther).some((f) => f.key === 'double.aspirin'), 'a real double against another line is still flagged');
+    // (a) With only one aspirin line, replacing it raises no double.
+    await m.PharmacyLine.updateOne({ _id: second.id }, { status: 'cancelled' });
+    assert.equal(twice(await service.preview({ patientId, lines: [aspirin300], replacingLineId: first.id })).length, 0, 'the line itself raises no "Same medicine twice"');
+    // (c) Another patient's line, or no such line.
+    const other = await m.Patient.create({ uhid: 'MHK202600955', name: 'Other', age: 40, gender: 'Female', phone: '9100000055' });
+    await assert.rejects(() => service.preview({ patientId: String(other._id), lines: [aspirin300], replacingLineId: first.id }), { status: 400 });
+    await assert.rejects(() => service.preview({ patientId, lines: [aspirin300], replacingLineId: 'nope' }), { status: 400 });
+  });
+
   test('facts take creatinine 2.5 for a man of 62 from the latest Lab Agent kidney report (eGFR 28) and ignore a report older than 72 h or one without labLine', async () => {
     const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport);
     await kidneyReport(2.5); // no labLine: entered by hand, not the Lab Agent

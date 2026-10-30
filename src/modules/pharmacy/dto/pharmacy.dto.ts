@@ -92,6 +92,11 @@ export class CheckDto {
   @ApiProperty({ type: [LineDto] }) @IsArray() @ArrayMinSize(1) @ArrayMaxSize(10) @ValidateNested({ each: true }) @Type(() => LineDto) lines: LineDto[];
 }
 
+/** A check that previews the answer to a query: the line being replaced is left out of the comparison. */
+export class PreviewCheckDto extends CheckDto {
+  @ApiPropertyOptional({ description: 'A line of this patient that the new lines would replace' }) @IsOptional() @IsMongoId() replacingLineId?: string;
+}
+
 export class PharmacyOrderDto extends CheckDto {
   @ApiProperty({ enum: PHARMACY_PRIORITIES }) @IsIn(PHARMACY_PRIORITIES as readonly string[]) priority: 'stat' | 'urgent' | 'routine';
   @ApiPropertyOptional() @IsOptional() @Transform(trim) @IsString() @MaxLength(500) note?: string;

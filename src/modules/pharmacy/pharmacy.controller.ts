@@ -8,13 +8,13 @@ import {
   AdjustDto,
   AnswerDto,
   ApproveDto,
-  CheckDto,
   FlagParam,
   IdParam,
   IssueDto,
   LevelDto,
   MovementsQueryDto,
   PharmacyOrderDto,
+  PreviewCheckDto,
   OrdersQueryDto,
   QueryDto,
   PharmacyReasonDto,
@@ -159,8 +159,8 @@ export class PharmacyController {
   @Roles(...PHARMACY_ORDER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Check lines against the patient and their other medicines, without saving' })
-  check(@Body() dto: CheckDto) {
-    return this.orders.preview({ patientId: dto.patientId, lines: dto.lines });
+  check(@Body() dto: PreviewCheckDto) {
+    return this.orders.preview({ patientId: dto.patientId, lines: dto.lines, replacingLineId: dto.replacingLineId });
   }
 
   @Post('orders')

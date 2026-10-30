@@ -150,11 +150,18 @@ export class PharmacyOrdersService {
   // ---------- ordering ----------
 
   /** Checks a doctor's lines against the patient and their active medicines, without saving anything. */
-  async preview(input: { patientId: string; lines: LineInput[] }): Promise<{ patient: PatientFactsView; lines: { flags: FlagView[]; quantity: number | null }[] }> {
+  async preview(input: { patientId: string; lines: LineInput[]; replacingLineId?: string }): Promise<{ patient: PatientFactsView; lines: { flags: FlagView[]; quantity: number | null }[] }> {
     const patient = await this.patients.findOne(String(input.patientId));
     const specs = this.validate(input.lines);
     const facts = await this.facts.facts(String(patient._id));
-    const drafts = await this.draftFlags(String(patient._id), facts, specs);
+    // A line being replaced by an answer (Change, Switch) is left out of the comparison, as the answer's own check does.
+    const exclude: string[] = [];
+    if (input.replacingLineId !== undefined) {
+      const own = isValidObjectId(input.replacingLineId) ? await this.lines.findOne({ _id: input.replacingLineId, patient: patient._id }).select('_id').lean().exec() : null;
+      if (!own) throw new BadRequestException('replacingLineId must be a medicine line of this patient');
+      exclude.push(String(own._id));
+    }
+    const drafts = await this.draftFlags(String(patient._id), facts, specs, exclude);
     return {
       patient: facts,
       lines: specs.map((s, i) => ({ flags: drafts[i].map((d) => flagView({ ...d, version: 1 })), quantity: s.quantity })),
