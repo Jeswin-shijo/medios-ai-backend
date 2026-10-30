@@ -338,6 +338,20 @@ The Lab agent runs the lab's day: orders, sample collection, receiving and rejec
 
 ---
 
+## 💊 Pharmacy Agent
+
+The Pharmacy agent runs the medicine side of the hospital: doctors order medicines (and OPD prescriptions flow in on their own), fixed rules flag every line, a pharmacist approves, queries the doctor or rejects, and approved lines are issued from stock, oldest expiry first. Rules flag and people decide: the agent and the AI never change a dose, swap a drug or approve. It lives in `src/modules/pharmacy`.
+
+- **Checks:** allergy, clashes, doubles, dose, kidney function (eGFR from the latest Kidney function report) and age, over every active line of the patient. An unconfirmed red allergy flag can only be confirmed by a doctor; a released kidney result re-checks the doses that depend on it and can open a kidney query.
+- **Queries:** a pharmacist (or the agent, for an allergy or a new red kidney flag) asks the doctor; the doctor answers once on the Pharmacy page (Keep, Change, Cancel, Stop). A query alert in Tasks & Alerts (`pharmacy-line:<id>`) can only be closed by answering.
+- **Stores and stock:** the Main pharmacy holds every product; the ER holds the emergency set. Reorder levels raise one low-stock alert per product and store, and a restock clears it. Batches near expiry (90 days by default) and expired ones are listed.
+- **With the Coordinator:** each order joins the patient's case and the agent sends `pharmacy.*` messages (never a name or free text). Its clocks are `pharmacy-check`, `pharmacy-issue` (ER and wards only; OPD patients collect at the counter) and `pharmacy-query`, escalating up the `pharmacy` and `pharmacy-query` ladders.
+- **Roles:** admin and doctor order and answer queries; admin and pharmacist check, issue and manage stock; nurses read; lab and front desk have no access.
+- **Routes** (all under `/api/pharmacy`): see `pharmacy.controller.ts`.
+- **Demo data.** `npm run seed` also loads the pharmacy day (`src/database/seed-pharmacy.ts`, run after the Lab seed): stock (Main holds all 75 products, the ER the emergency set, three products low, ER ticagrelor at 0, two batches near expiry and one expired, each low pair with its alert) and 25 medicine orders in every state across the ER, the wards and the outpatient counter. The ER chest-pain man (Mohan Raj, 62, 64 kg) has aspirin, clopidogrel and isosorbide dinitrate issued, atorvastatin approved with a running issue clock, and enoxaparin waiting to be checked with "Kidney function not known". His Kidney function test is received in Lab and waits for a result: enter creatinine 2.5 and release it, and a kidney query opens on enoxaparin (eGFR 28). An admitted patient with a Patient record gets a Penicillin allergy and an amoxicillin-clavulanate line held in an allergy query. Five prescription orders (the demo prescription and four new ones, marked `Pharmacy demo`) wait at the counter. `pharmacy@medios.ai` ("Neethu George") holds Pharmacist on duty; password `Admin@123`, local only. The Pharmacy seed clears only Pharmacy data first (its orders, lines, locations, stock, snapshots, messages, clocks, escalations, alerts, cases and the `Pharmacy demo` prescriptions). Reseed right before a demo: clocks run on real time, so seeded work goes overdue within minutes.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.

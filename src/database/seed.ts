@@ -30,6 +30,7 @@ import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
 import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
+import { seedPharmacy } from './seed-pharmacy';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
@@ -201,6 +202,8 @@ async function seed() {
   await seedEr(process.env.CLINIC_DATE ?? DEMO_DAY);
   // The lab day: requests on the ER, ward and outpatient cases above, with samples, results, reports, clocks and messages.
   await seedLab(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // The pharmacy day: stock and about 25 medicine orders on the ER, ward and outpatient cases above, with their checks, queries, issues, clocks and messages.
+  await seedPharmacy(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,

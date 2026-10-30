@@ -101,7 +101,7 @@ const NORMAL: Record<string, Values> = {
 const L = (test: string, stage: Stage, extra: Partial<LineSpec> = {}): LineSpec => ({ test, stage, ...extra });
 
 const ER_SPECS: ReqSpec[] = [
-  { key: 'e1', area: 'ER', who: /Pressure in the chest/, priority: 'stat', t: 7, c: 2, r: 4, note: 'Chest pain, rule out a heart attack', lines: [L('cbc', 'received'), L('troponin', 'received')] },
+  { key: 'e1', area: 'ER', who: /Pressure in the chest/, priority: 'stat', t: 7, c: 2, r: 4, note: 'Chest pain, rule out a heart attack', lines: [L('cbc', 'received'), L('troponin', 'received'), L('rft', 'received')] },
   { key: 'e2', area: 'ER', who: /Crushing chest pain/, priority: 'stat', t: 4, lines: [L('troponin', 'waiting'), L('abg', 'waiting')] },
   {
     key: 'e3', area: 'ER', who: /Road accident/, priority: 'stat', t: 31, c: 2, r: 4,
