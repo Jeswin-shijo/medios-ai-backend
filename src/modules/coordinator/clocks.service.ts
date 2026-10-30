@@ -10,7 +10,7 @@ import type { MessageDocument } from './schemas/agent-message.schema';
 
 const MINUTE_MS = 60_000;
 /** Who closed an escalation whose work was done (resolveEscalationOnStop). */
-const RESOLVED_BY = 'Result acknowledged';
+const DEFAULT_RESOLVED_BY = 'Result acknowledged';
 
 export interface ClockView {
   id: string;
@@ -201,7 +201,7 @@ export class ClocksService implements OnModuleInit {
         const stopped = await this.model
           .findOneAndUpdate({ _id: c._id, stoppedAt: { $exists: false } }, { $set: { stoppedAt: at, metMinutes: metOf(c) } }, { new: true })
           .exec();
-        if (stopped?.escalation) await this.escalations.resolve(String(stopped.escalation), RESOLVED_BY);
+        if (stopped?.escalation) await this.escalations.resolve(String(stopped.escalation), def.resolvedBy ?? DEFAULT_RESOLVED_BY);
       }
       return;
     }
@@ -298,7 +298,7 @@ export class ClocksService implements OnModuleInit {
     if (def.resolveEscalationOnStop) {
       // A stop that landed while the ladder was being raised found no escalation to close: close it now.
       const now = await this.model.findById(c._id).select('stoppedAt').lean().exec();
-      if (now?.stoppedAt) await this.escalations.resolve(String(esc._id), RESOLVED_BY);
+      if (now?.stoppedAt) await this.escalations.resolve(String(esc._id), def.resolvedBy ?? DEFAULT_RESOLVED_BY);
     }
   }
 

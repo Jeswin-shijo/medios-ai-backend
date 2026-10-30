@@ -41,6 +41,8 @@ export class TasksAlertsService {
   private refuseEscalation(task: TaskAlertDocument): void {
     // A critical lab result has one acknowledgement path, the result itself: nobody, admin included, ticks it off here.
     if (task.link?.startsWith('lab-line:')) throw new ConflictException('Acknowledge this critical result on the Lab page.');
+    // A pharmacy query has one answer path, the query itself.
+    if (task.link?.startsWith('pharmacy-line:')) throw new ConflictException('Answer this query on the Pharmacy Agent page.');
     if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
   }
 

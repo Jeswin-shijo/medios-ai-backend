@@ -32,4 +32,16 @@ describe('TasksAlertsService', () => {
     assert.equal((await service.toggleStatus(String(plain._id))).status, 'Completed');
     assert.equal((await service.updateStatus(String(plain._id), 'Pending')).status, 'Pending');
   });
+
+  test('a pharmacy-line alert can not be toggled or set Completed (409); a pharmacy-rejected alert toggles', async () => {
+    const q = await m.TaskAlertItem.create({ title: 'Pharmacy query: Amoxicillin 500 mg (allergy)', type: 'Medication Alert', category: 'Medication', priority: 'High', link: 'pharmacy-line:abc' });
+    const refusal = { status: 409, message: 'Answer this query on the Pharmacy Agent page.' };
+    await assert.rejects(() => service.toggleStatus(String(q._id)), refusal);
+    for (const status of ['Completed', 'In Progress', 'Pending']) {
+      await assert.rejects(() => service.updateStatus(String(q._id), status), refusal);
+    }
+    assert.equal(((await m.TaskAlertItem.findById(q._id).lean()) as any).status, 'Pending');
+    const rej = await m.TaskAlertItem.create({ title: 'Rejected', type: 'Medication Alert', category: 'Medication', link: 'pharmacy-rejected:x' });
+    assert.equal((await service.toggleStatus(String(rej._id))).status, 'Completed');
+  });
 });

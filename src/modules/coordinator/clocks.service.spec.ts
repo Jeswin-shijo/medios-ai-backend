@@ -43,6 +43,8 @@ describe('ClocksService', () => {
         { type: 'test.ref.bad', agent: 'er', description: 'bad ref', payload: {} },
         { type: 'test.result', agent: 'er', description: 'a result needing acknowledgement', payload: {} },
         { type: 'test.result.acked', agent: 'er', description: 'the result was acknowledged', payload: {} },
+        { type: 'test.query', agent: 'er', description: 'a query was opened', payload: {} },
+        { type: 'test.query.answered', agent: 'er', description: 'the query was answered', payload: {} },
       ],
       clocks: [
         { key: 'test-wait', agent: 'er', label: 'Test wait', startOn: 'test.wait', stopOn: ['test.done'], minutes: 10, ladder: 'default' },
@@ -103,6 +105,19 @@ describe('ClocksService', () => {
           resolveEscalationOnStop: true,
           alertLink: (ref) => (ref ? `test-item:${ref}` : null),
           detailFrom: (p) => (typeof p.label === 'string' ? p.label : null),
+        },
+        {
+          key: 'test-query',
+          agent: 'er',
+          label: 'Query answer',
+          startOn: 'test.query',
+          stopOn: ['test.query.answered'],
+          minutes: 15,
+          ladder: 'default',
+          refFrom: (_t, p) => (typeof p.item === 'string' ? p.item : null),
+          resolveEscalationOnStop: true,
+          resolvedBy: 'Query answered',
+          alertLink: (ref) => (ref ? `pharmacy-line:${ref}` : null),
         },
       ],
       status,
@@ -386,6 +401,18 @@ describe('ClocksService', () => {
     await sendWith('test.result.acked', { item: 'a' }, caseId);
     assert.equal(await Clock.countDocuments({ def: 'test-result', state: 'running' }), 0);
     assert.equal(((await Escalation.findOne().lean()) as any).state, 'acknowledged');
+  });
+
+  test('a clock def with resolvedBy "Query answered" closes its expired escalation with ackByName "Query answered"', async () => {
+    const caseId = String(new Types.ObjectId());
+    await sendWith('test.query', { item: 'q1' }, caseId);
+    assert.equal(await service.checkDue(new Date(Date.now() + 16 * MIN)), 1);
+    const esc: any = await Escalation.findOne().lean();
+    assert.equal(esc.closesOnStop, true);
+    await sendWith('test.query.answered', { item: 'q1' }, caseId);
+    const closed: any = await Escalation.findById(esc._id).lean();
+    assert.equal(closed.state, 'acknowledged');
+    assert.equal(closed.ackByName, 'Query answered');
   });
 
   test('a def without the new fields escalates as before: no detail, its own escalation alert, acknowledged directly', async () => {

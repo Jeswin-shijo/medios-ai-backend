@@ -77,6 +77,8 @@ export interface ClockDef {
    * acknowledged directly.
    */
   resolveEscalationOnStop?: boolean;
+  /** The name recorded on an escalation its work closed. Defaults to "Result acknowledged". */
+  resolvedBy?: string;
   /** The link its escalation's alert carries (one alert per link). Null, absent or a failure keeps `escalation:<id>`. */
   alertLink?: (ref: string | null) => string | null;
   /** A short detail from the start message (a request number and test, never a patient name), stored on the clock and shown in its escalation. */

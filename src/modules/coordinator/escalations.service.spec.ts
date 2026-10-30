@@ -279,9 +279,9 @@ describe('EscalationsService', () => {
     await service.ensureDefaults();
     await service.ensureDefaults();
     const titles = await service.titles();
-    assert.equal(titles.length, 8);
+    assert.equal(titles.length, 9);
     assert.deepEqual(titles.find((t) => t.key === 'er-consultant')!.holders, [nurse.id]);
-    assert.equal((await service.ladders()).length, 5);
+    assert.equal((await service.ladders()).length, 7);
 
     await assert.rejects(service.saveTitle(nurse, { key: 'x', label: 'x', holders: [] }), { status: 403 });
     await assert.rejects(service.saveTitle(admin, { key: 'x', label: 'x', holders: [String(new Types.ObjectId())] }), { status: 400 });
@@ -293,7 +293,7 @@ describe('EscalationsService', () => {
       { status: 400 },
     );
     await service.saveLadder(admin, { key: 'l', label: 'l', steps: [{ title: 'er-consultant', waitMinutes: 5 }, { title: 'er-consultant', waitMinutes: 0 }] });
-    assert.equal((await service.ladders()).length, 6);
+    assert.equal((await service.ladders()).length, 8);
   });
 
   test('the lab and lab-critical ladders and the two titles exist after seeding defaults', async () => {
@@ -310,6 +310,35 @@ describe('EscalationsService', () => {
       { title: 'duty-doctor', waitMinutes: 10 },
       { title: 'medical-superintendent', waitMinutes: 0 },
     ]);
+  });
+
+  test('the pharmacy and pharmacy-query ladders and the chief pharmacist title exist after ensureDefaults', async () => {
+    await service.ensureDefaults();
+    const titles = await service.titles();
+    assert.equal(titles.find((t) => t.key === 'chief-pharmacist')!.label, 'Chief pharmacist');
+    const ladders = await service.ladders();
+    assert.deepEqual(ladders.find((l) => l.key === 'pharmacy')!.steps, [
+      { title: 'pharmacist-on-duty', waitMinutes: 15 },
+      { title: 'chief-pharmacist', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
+    assert.deepEqual(ladders.find((l) => l.key === 'pharmacy-query')!.steps, [
+      { title: 'duty-doctor', waitMinutes: 10 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
+  });
+
+  test('a closes-on-stop escalation refuses Acknowledge with the wording of its page: Pharmacy for pharmacy-line, Lab for lab-line', async () => {
+    const ph = await service.raise({ ladder: 'default', reason: 'Query late', source: { kind: 'clock', id: 'c1' }, alertLink: 'pharmacy-line:l1', closesOnStop: true });
+    await assert.rejects(() => service.acknowledge(admin, String(ph._id)), {
+      status: 409,
+      message: 'Answer the query on the Pharmacy Agent page; this alert closes when it is answered.',
+    });
+    const lab = await service.raise({ ladder: 'default', reason: 'Result late', source: { kind: 'clock', id: 'c2' }, alertLink: 'lab-line:l2', closesOnStop: true });
+    await assert.rejects(() => service.acknowledge(admin, String(lab._id)), {
+      status: 409,
+      message: 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+    });
   });
 
   test('holders leave out inactive users', async () => {

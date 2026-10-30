@@ -21,6 +21,7 @@ export const DEFAULT_TITLES: { key: string; label: string }[] = [
   { key: 'pharmacist-on-duty', label: 'Pharmacist on duty' },
   { key: 'lab-in-charge', label: 'Lab in charge' },
   { key: 'duty-doctor', label: 'Duty doctor' },
+  { key: 'chief-pharmacist', label: 'Chief pharmacist' },
 ];
 
 export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] }[] = [
@@ -55,6 +56,20 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
   {
     key: 'lab-critical',
     label: 'Lab critical',
+    steps: [{ title: 'duty-doctor', waitMinutes: 10 }, { title: 'medical-superintendent', waitMinutes: 0 }],
+  },
+  {
+    key: 'pharmacy',
+    label: 'Pharmacy',
+    steps: [
+      { title: 'pharmacist-on-duty', waitMinutes: 15 },
+      { title: 'chief-pharmacist', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'pharmacy-query',
+    label: 'Pharmacy query',
     steps: [{ title: 'duty-doctor', waitMinutes: 10 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
 ];
@@ -254,7 +269,13 @@ export class EscalationsService {
     const e = await this.model.findById(id).exec();
     if (!e) throw new NotFoundException('Escalation not found');
     if (e.state === 'acknowledged') throw new ConflictException('Already acknowledged.');
-    if (e.closesOnStop) throw new ConflictException('Acknowledge the result on the Lab page; this alert closes when it is acknowledged.');
+    if (e.closesOnStop) {
+      throw new ConflictException(
+        e.alertLink?.startsWith('pharmacy-line:')
+          ? 'Answer the query on the Pharmacy Agent page; this alert closes when it is answered.'
+          : 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+      );
+    }
     if (actor.role !== UserRole.ADMIN) {
       const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
       const keys = (ladder?.steps ?? []).slice(e.step).map((s) => s.title);
