@@ -45,6 +45,8 @@ import { FollowUpItem, FollowUpDocument, FollowUpItemSchema } from '../modules/f
 import { AgentCall, AgentCallDocument, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
 import { InboundSession, InboundSessionDocument, InboundSessionSchema } from '../modules/calls/schemas/inbound-session.schema';
 import { CallerLookup, CallerLookupDocument, CallerLookupSchema } from '../modules/calls/schemas/caller-lookup.schema';
+import { Department, DepartmentDocument, DepartmentSchema } from '../modules/opd/schemas/department.schema';
+import { OpDoctor, OpDoctorDocument, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -115,6 +117,8 @@ export function models() {
     AgentCall: model(AgentCall, AgentCallSchema) as Model<AgentCallDocument>,
     InboundSession: model(InboundSession, InboundSessionSchema) as Model<InboundSessionDocument>,
     CallerLookup: model(CallerLookup, CallerLookupSchema) as Model<CallerLookupDocument>,
+    Department: model(Department, DepartmentSchema) as Model<DepartmentDocument>,
+    OpDoctor: model(OpDoctor, OpDoctorSchema) as Model<OpDoctorDocument>,
   };
 }
 

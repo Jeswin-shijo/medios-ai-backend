@@ -25,6 +25,14 @@ describe('SettingsService', () => {
     settings = new SettingsService(HospitalSettings);
   });
 
+  test('a call without a caller still cannot change an admin-only key', async () => {
+    await assert.rejects(
+      () => settings.updateSettings({ ai: { bedAutoAllocate: false } }),
+      (err) => err instanceof ForbiddenException,
+    );
+    assert.equal((await settings.getSettings()).ai.bedAutoAllocate, true);
+  });
+
   test('a doctor cannot change ai.bedAutoAllocate; an admin can', async () => {
     await assert.rejects(
       () => settings.updateSettings({ ai: { bedAutoAllocate: false } }, DOCTOR),

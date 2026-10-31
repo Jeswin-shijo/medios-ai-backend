@@ -5,6 +5,7 @@ import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 import { DEFAULT_CALL_AGENT_SETTINGS, resolveCallAgentSettings } from '../calls/call-agent-settings';
 import { DEFAULT_QUEUE_SETTINGS } from '../queue/queue-settings';
+import { DEFAULT_RECEPTION_SETTINGS } from '../reception/reception-settings';
 import { UserRole } from '../users/schemas/user.schema';
 
 // Used only until settings are first saved (the seed stores the demo hospital's).
@@ -70,6 +71,7 @@ const DEFAULT_SETTINGS = {
   },
   callAgent: DEFAULT_CALL_AGENT_SETTINGS,
   queue: DEFAULT_QUEUE_SETTINGS,
+  reception: DEFAULT_RECEPTION_SETTINGS,
   coordinator: { rules: {} as Record<string, boolean> },
   er: { targets: {} as Record<string, number> },
   lab: {} as Record<string, unknown>,
@@ -104,7 +106,7 @@ export class SettingsService {
    * coordination rules, pathway targets, changes by phone and the call agent's public address: a save
    * from anyone else that carries the stored value (or leaves it out) goes through.
    */
-  async updateSettings(updates: Partial<HospitalSettings>, by: { role: string }): Promise<HospitalSettings> {
+  async updateSettings(updates: Partial<HospitalSettings>, by?: { role: string }): Promise<HospitalSettings> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
     const autoAllocate = (updates as any)?.ai?.bedAutoAllocate;
     const storedAutoAllocate = settings.get('ai')?.bedAutoAllocate ?? DEFAULT_SETTINGS.ai.bedAutoAllocate;

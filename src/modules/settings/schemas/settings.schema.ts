@@ -33,6 +33,10 @@ export class HospitalSettings {
   @Prop({ type: Object, default: {} })
   queue: any;
 
+  /** Reception kiosk: payment methods, default doctor, UPI payee, slip footer (see reception/reception-settings.ts). */
+  @Prop({ type: Object, default: {} })
+  reception: any;
+
   /** Coordinator: on/off switches for coordination rules, by rule key (see coordinator/rules.service.ts). */
   @Prop({ type: Object, default: {} })
   coordinator: { rules?: Record<string, boolean> };
