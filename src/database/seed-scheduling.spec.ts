@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, mock, test } from 'node:test';
 import * as bcrypt from 'bcryptjs';
-import { clockLabel, clockMinutes } from '../common/utils/clinic-time';
+import { clockLabel, clockMinutes, parseIsoDay } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
 import { AppointmentEvents } from '../modules/appointments/appointment-events';
 import { UserRole } from '../modules/users/schemas/user.schema';
@@ -347,15 +347,25 @@ describe('seedScheduling', () => {
   test('four leave appointments are on the waitlist once', async () => {
     const john = (await m.OpDoctor.findOne({ name: 'Dr. John Varghese' }).lean<any>().exec())!;
     const profile = (await m.DoctorProfile.findOne({ doctorId: String(john._id) }).lean<any>().exec())!;
-    assert.deepEqual(profile.leave.map((l: any) => [l.from, l.to]), [[PLUS1, PLUS1]]);
-    const apts = await m.Appointment.find({ doctorId: String(john._id), date: PLUS1, status: 'Scheduled' }).lean<any[]>().exec();
+    assert.deepEqual(profile.leave.map((l: any) => [l.from, l.to]), [[PLUS2, PLUS2]]);
+    const apts = await m.Appointment.find({ doctorId: String(john._id), date: PLUS2, status: 'Scheduled' }).lean<any[]>().exec();
     assert.equal(apts.length, 4);
-    for (const a of apts) assert.equal(a.slotKey, `${john._id}|${PLUS1}|${a.time}`);
+    for (const a of apts) assert.equal(a.slotKey, `${john._id}|${PLUS2}|${a.time}`);
     const leaveItems = async () => m.WaitItem.find({ kind: 'appointment', reason: 'doctor-leave', status: 'open' }).lean<any[]>().exec();
     const items = await leaveItems();
     assert.equal(items.length, 4);
     assert.deepEqual(items.map((i) => String(i.refId)).sort(), apts.map((a) => String(a._id)).sort());
     for (const i of items) assert.equal(i.doctorId, String(john._id));
+    // The leave day is a Monday, inside his sessions; every offer is a real free slot, not on the leave day.
+    assert.equal(parseIsoDay(PLUS2).getDay(), 1);
+    const doctorsSvc = world().doctors;
+    for (const i of [...items, ...(await m.WaitItem.find({ status: 'open', reason: 'earlier-wanted' }).lean<any[]>().exec())]) {
+      assert.ok(i.offered.length > 0, 'has offers');
+      for (const o of i.offered) {
+        assert.notEqual(i.reason === 'doctor-leave' ? o.date : '', PLUS2);
+        assert.ok(await doctorsSvc.isSlot(i.doctorId, o.date, o.time), `${o.date} ${o.time} is one of the doctor's slots`);
+      }
+    }
     // Plus one patient who wants an earlier time: five open items in all.
     const open = await m.WaitItem.find({ status: 'open' }).lean<any[]>().exec();
     assert.equal(open.length, 5);
@@ -365,7 +375,7 @@ describe('seedScheduling', () => {
 
     // Saving the same leave again keeps each appointment on the list once.
     const w = world();
-    await w.doctors.setProfile({ id: ids.admin, name: 'Hospital Admin', role: UserRole.ADMIN }, String(john._id), { leave: [{ from: PLUS1, to: PLUS1, reason: profile.leave[0].reason }] });
+    await w.doctors.setProfile({ id: ids.admin, name: 'Hospital Admin', role: UserRole.ADMIN }, String(john._id), { leave: [{ from: PLUS2, to: PLUS2, reason: profile.leave[0].reason }] });
     assert.equal((await leaveItems()).length, 4);
     assert.equal(await m.WaitItem.countDocuments({ status: 'open' }).exec(), 5);
   });
@@ -384,7 +394,7 @@ describe('seedScheduling', () => {
     assert.equal(others.length, 25);
     assert.ok(new Set(others.map((a) => a.doctorId)).size >= 6, 'spread across the doctors');
     for (const a of others) {
-      assert.ok([DAY, PLUS1].includes(a.date), a.date);
+      assert.ok([DAY, PLUS2].includes(a.date), a.date);
       assert.ok(a.slotKey && a.doctorName && a.departmentCode, 'doctor fields and slot key');
       assert.ok(await m.Patient.exists({ uhid: a.uhid }).exec(), `${a.uhid} is a patient`);
     }

@@ -505,7 +505,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   }
 
   // ---- The roster: clinic day −3 to +3, every shift covered; title holders as the other seeds set them ---------------
-  const leaveDay = plus1;
+  const leaveDay = plus2;
   const days = Array.from({ length: 7 }, (_, i) => addDays(clinicDay, i - 3));
   let rostered = 0;
   const put = async (date: string, shift: Shift, name: string, titleKeys: string[] = []) => {
@@ -552,27 +552,37 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   );
   const outpatient = (i: number): any => madePatients[i];
   const clinicNowMin = new Date(clinicMs).getHours() * 60 + new Date(clinicMs).getMinutes();
-  const aptDocs = APPOINTMENTS.map((a) => {
+  // The clinic-day fixtures are inserted directly (some are already past); `backfill` gives them their doctor and slot key.
+  const todays = APPOINTMENTS.filter((a) => a.day === 0).map((a) => {
     const doctor = opOf.get(a.doctor);
     if (!doctor) throw new Error(`Scheduling seed: no OP doctor ${a.doctor}.`);
     const p = outpatient(a.who);
-    const past = a.day === 0 && minutesOf(a.time) < clinicNowMin;
+    const past = minutesOf(a.time) < clinicNowMin;
     return {
-      uhid: p.uhid, patientName: p.name, age: p.age, gender: p.gender, phone: p.phone, date: a.day === 0 ? clinicDay : plus1, time: clockLabel(minutesOf(a.time)),
+      uhid: p.uhid, patientName: p.name, age: p.age, gender: p.gender, phone: p.phone, date: clinicDay, time: clockLabel(minutesOf(a.time)),
       type: a.type, condition: a.condition, status: past ? 'Completed' : 'Scheduled', checkedInTime: past ? clockLabel(minutesOf(a.time) - 10) : '', tags: p.conditions,
-      confirmation: a.day === 1 ? 'Confirmed' : 'Unconfirmed', ...(a.day === 1 ? { confirmedAt: new Date(nowMs) } : {}),
+      confirmation: 'Unconfirmed',
       doctorId: String(doctor._id), doctorName: doctor.name, departmentCode: doctor.departmentCode, createdAt: new Date(nowMs), updatedAt: new Date(nowMs),
     };
   });
   // The slot-key index first (the collection was replaced), then the backfill: the fixtures go to Dr. Shajin and every live appointment gets its key.
   await appointmentsModel.syncIndexes();
-  const insertedApts = await appointmentsModel.insertMany(aptDocs);
+  await appointmentsModel.insertMany(todays);
   await w.appointments.backfill();
+  // The next working day (Monday, inside every OP doctor's sessions) is booked through the real path, so the doctor fields and slot keys are genuine.
+  const booked = new Map<number, any>();
+  for (const a of APPOINTMENTS.filter((x) => x.day === 1)) {
+    const doctor = opOf.get(a.doctor)!;
+    booked.set(a.who, await w.appointments.book(desk, {
+      patientId: String(outpatient(a.who)._id), doctorId: String(doctor._id), date: plus2, time: clockLabel(minutesOf(a.time)),
+      type: a.type, condition: a.condition, confirmation: 'Confirmed',
+    }));
+  }
 
   // ---- Leave and the waitlist: through the services, so each appointment on leave is listed once ------------------
   const john = opOf.get(LEAVE.doctor)!;
   await w.doctors.setProfile(admin, String(john._id), { leave: [{ from: leaveDay, to: leaveDay, reason: LEAVE.reason }] });
-  const wantsEarlier = insertedApts[APPOINTMENTS.findIndex((a) => a.who === 24)];
+  const wantsEarlier = booked.get(24);
   await w.waitlist.markEarlierWanted(desk, String(wantsEarlier._id));
 
   // ---- Procedures -----------------------------------------------------------------------------------------------
@@ -626,7 +636,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   const total = await bookings.countDocuments();
   console.log(
     `✅ Scheduling: ${SCHEDULING_DOCTOR_ACCOUNTS.length} doctor logins (${SCHEDULING_DOCTOR_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}), ` +
-      `${staffId.size} staff, ${rostered} roster entries, ${insertedApts.length} appointments, ${total} procedures, ${await consultsModel.countDocuments()} consults, ` +
+      `${staffId.size} staff, ${rostered} roster entries, ${todays.length + booked.size} appointments, ${total} procedures, ${await consultsModel.countDocuments()} consults, ` +
       `${await waitItems.countDocuments({ status: 'open' })} on the waitlist, ${found.length} conflicts, ${points.length + 1} snapshots`,
   );
 }
