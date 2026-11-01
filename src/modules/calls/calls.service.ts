@@ -20,6 +20,7 @@ import { FollowUpItem, FollowUpDocument } from '../follow-ups/schemas/follow-up.
 import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
+import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
 import { CallAgentSettings, nextCallingTime, resolveCallAgentSettings, withinCallingHours } from './call-agent-settings';
 import { CallResult, ProviderCheck, ProviderError, VOICE_PROVIDER, VoiceProvider } from './providers/voice-provider';
 import { InboundService } from './inbound.service';
@@ -36,6 +37,7 @@ import {
   spokenDay,
 } from '../../common/utils/clinic-time';
 
+const isDuplicateKey = (e: any) => e?.code === 11000;
 const LIVE_STATUSES = ['scheduled', 'calling'];
 /** A placed call with no result after this long is given up on. */
 const RESULT_TIMEOUT_MS = 30 * 60_000;
@@ -104,6 +106,7 @@ export class CallsService implements OnModuleInit {
     private readonly inbound: InboundService,
     private readonly config: ConfigService,
     @Inject(VOICE_PROVIDER) private readonly provider: VoiceProvider,
+    private readonly scheduling?: SchedulingAppointmentsService,
   ) {}
 
   onModuleInit() {
@@ -194,7 +197,8 @@ export class CallsService implements OnModuleInit {
   /** Free slots the booking agent would offer, starting at `from` (YYYY-MM-DD). */
   async freeSlots(from?: string, count = 2) {
     const { cfg } = await this.context();
-    return this.slots.findFree(cfg, this.searchStart(from), Math.min(Math.max(count, 1), 6));
+    const doctor = await this.slots.doctorFor();
+    return this.slots.findFree(cfg, this.searchStart(from), Math.min(Math.max(count, 1), 6), undefined, doctor ? String(doctor._id) : undefined);
   }
 
   // ---------------------------------------------------------------- requesting calls
@@ -209,7 +213,8 @@ export class CallsService implements OnModuleInit {
 
     const { cfg, common } = await this.context();
     // Two alternatives, in case the patient cannot come. The appointment holds its own slot, so it is never offered.
-    const alternatives = await this.slots.findFree(cfg, clinicNow(), 2);
+    const doctor = await this.slots.doctorFor({ doctorId: apt.doctorId, uhid: apt.uhid });
+    const alternatives = await this.slots.findFree(cfg, clinicNow(), 2, undefined, doctor ? String(doctor._id) : undefined);
     return this.schedule(
       {
         purpose: 'confirmation',
@@ -250,7 +255,8 @@ export class CallsService implements OnModuleInit {
     }
 
     const { cfg, common } = await this.context();
-    const offered = await this.slots.findFree(cfg, this.searchStart(request.fromDate), 2);
+    const doctor = await this.slots.doctorFor({ uhid: patient.uhid });
+    const offered = await this.slots.findFree(cfg, this.searchStart(request.fromDate), 2, undefined, doctor ? String(doctor._id) : undefined);
     if (!offered.length) throw new ConflictException('No free slots in the next 14 days to offer. Open more sessions in the call agent settings.');
 
     const visitReason = request.visitReason?.trim() || followUp?.followUpType || 'a follow-up visit';
@@ -465,12 +471,14 @@ export class CallsService implements OnModuleInit {
     if (patient?.doNotCall) return `Not called: ${patient.doNotCallReason || 'the patient is marked do-not-call'}.`;
 
     let changed = false;
+    let aptDoctorId: string | undefined;
     if (call.purpose === 'confirmation') {
       const apt = await this.appointmentById(call.appointmentId);
       if (!apt) return 'Not called: the appointment no longer exists.';
       if (apt.status !== 'Scheduled') return `Not called: the appointment is now ${apt.status}.`;
       if (call.trigger !== 'manual' && apt.confirmation === 'Confirmed') return 'Not called: the appointment was confirmed meanwhile.';
       if (appointmentStart(apt.date, apt.time) <= clinicNow()) return 'Not called: the appointment time has passed.';
+      aptDoctorId = apt.doctorId;
       // The appointment may have moved since the call was queued (an inbound call, the front desk).
       const day = spokenDay(parseIsoDay(apt.date));
       if (call.variables.appointment_day !== day || call.variables.appointment_time !== apt.time) {
@@ -480,10 +488,12 @@ export class CallsService implements OnModuleInit {
     }
 
     // Offered slots can be booked by someone else before the call goes out.
-    const free = await Promise.all(call.offeredSlots.map((s) => this.slots.isFree(cfg, s.date, s.time)));
+    const doctor = await this.slots.doctorFor({ doctorId: aptDoctorId, uhid: call.uhid });
+    const doctorId = doctor ? String(doctor._id) : undefined;
+    const free = await Promise.all(call.offeredSlots.map((s) => this.slots.isFree(cfg, s.date, s.time, undefined, doctorId)));
     if (!free.every(Boolean) || !call.offeredSlots.length) {
       const firstDay = call.offeredSlots[0]?.date;
-      const fresh = await this.slots.findFree(cfg, this.searchStart(firstDay), 2);
+      const fresh = await this.slots.findFree(cfg, this.searchStart(firstDay), 2, undefined, doctorId);
       if (call.purpose === 'booking' && !fresh.length) return 'Not called: no free slots left to offer.';
       const [a, b] = call.purpose === 'confirmation' ? ['alt_slot_1', 'alt_slot_2'] : ['slot_1', 'slot_2'];
       call.offeredSlots = fresh;
@@ -590,14 +600,25 @@ export class CallsService implements OnModuleInit {
       case 'rescheduled': {
         const slot = r.chosenSlot ? call.offeredSlots[r.chosenSlot - 1] : undefined;
         if (!slot) return this.rescheduleRequest(call, apt, r);
-        if (!(await this.slots.isFree(cfg, slot.date, slot.time, String(apt._id)))) return this.rescheduleRequest(call, apt, r, slot.label);
+        const doctor = await this.slots.doctorFor({ doctorId: apt.doctorId, uhid: apt.uhid });
+        if (!(await this.slots.isFree(cfg, slot.date, slot.time, String(apt._id), doctor ? String(doctor._id) : undefined))) return this.rescheduleRequest(call, apt, r, slot.label);
         const moved = slotWhen(slot.date, slot.time);
+        const old = { id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time };
         apt.date = slot.date;
         apt.time = slot.time;
+        Object.assign(apt, this.slots.fieldsFor(doctor, slot.date, slot.time));
         apt.confirmation = 'Confirmed';
         apt.confirmedAt = new Date();
         apt.notes = [apt.notes, `Moved by AI call from ${booked}.`].filter(Boolean).join('\n');
-        await apt.save();
+        try {
+          await apt.save();
+        } catch (e) {
+          if (!isDuplicateKey(e)) throw e;
+          // Someone took the slot between the check and the save: ask the front desk, with the appointment as it was.
+          const current = await this.appointmentById(call.appointmentId);
+          return current ? this.rescheduleRequest(call, current, r, slot.label) : { outcome: 'slot_taken', action: `${slot.label} was booked meanwhile.` };
+        }
+        await this.freed(old);
         await this.patients.updateOne({ uhid: apt.uhid }, { nextAppointment: moved.replace(',', '') }).exec();
         return { outcome: 'rescheduled', action: `Moved from ${booked} to ${moved} and confirmed.` };
       }
@@ -608,7 +629,9 @@ export class CallsService implements OnModuleInit {
       case 'cancelled':
         apt.status = 'Canceled';
         apt.confirmation = 'Cancelled by Patient';
+        apt.set('slotKey', undefined); // releases the slot for the database guard
         await apt.save();
+        await this.freed({ id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time });
         await this.alert(call, {
           title: `Appointment cancelled by ${call.patientName}`,
           subtitle: [`The ${booked} slot is free again.`, r.notes].filter(Boolean).join(' '),
@@ -651,7 +674,8 @@ export class CallsService implements OnModuleInit {
       case 'booked': {
         const slot = r.chosenSlot ? call.offeredSlots[r.chosenSlot - 1] : undefined;
         if (!slot) return this.otherOutcome(call, { ...r, unrecognised: 'booked, without a chosen slot' });
-        if (!(await this.slots.isFree(cfg, slot.date, slot.time))) {
+        const doctor = await this.slots.doctorFor({ uhid: call.uhid });
+        const slotTaken = async (): Promise<Effect> => {
           await this.alert(call, {
             title: `Rebook ${call.patientName}`,
             subtitle: `Chose ${slot.label}, but it was booked meanwhile. Call to offer another time (${call.visitReason}).`,
@@ -659,28 +683,36 @@ export class CallsService implements OnModuleInit {
             category: 'Follow-up',
           });
           return { outcome: 'slot_taken', action: `${slot.label} was booked meanwhile; front desk asked to call.` };
-        }
+        };
+        if (!(await this.slots.isFree(cfg, slot.date, slot.time, undefined, doctor ? String(doctor._id) : undefined))) return slotTaken();
         const patient = await this.patients.findOne({ uhid: call.uhid }).exec();
         if (!patient) return { outcome: 'booked', action: 'The patient record no longer exists; nothing was booked.' };
 
-        const apt = await this.appointments.create({
-          uhid: patient.uhid,
-          patientName: patient.name,
-          age: patient.age,
-          gender: patient.gender,
-          avatar: patient.avatar,
-          phone: patient.phone,
-          date: slot.date,
-          time: slot.time,
-          type: call.appointmentType || 'Follow-up',
-          condition: call.visitReason,
-          status: 'Scheduled',
-          confirmation: 'Confirmed',
-          confirmedAt: new Date(),
-          bookedVia: 'AI call',
-          notes: r.notes ? `AI call: ${r.notes}` : '',
-          tags: patient.conditions ?? [],
-        });
+        let apt: AppointmentDocument;
+        try {
+          apt = await this.appointments.create({
+            uhid: patient.uhid,
+            patientName: patient.name,
+            age: patient.age,
+            gender: patient.gender,
+            avatar: patient.avatar,
+            phone: patient.phone,
+            date: slot.date,
+            time: slot.time,
+            type: call.appointmentType || 'Follow-up',
+            condition: call.visitReason,
+            status: 'Scheduled',
+            confirmation: 'Confirmed',
+            confirmedAt: new Date(),
+            bookedVia: 'AI call',
+            notes: r.notes ? `AI call: ${r.notes}` : '',
+            tags: patient.conditions ?? [],
+            ...this.slots.fieldsFor(doctor, slot.date, slot.time),
+          });
+        } catch (e) {
+          if (isDuplicateKey(e)) return slotTaken(); // the database guard: someone took it between the check and the save
+          throw e;
+        }
         const booked = slotWhen(slot.date, slot.time);
         await this.patients.updateOne({ uhid: patient.uhid }, { nextAppointment: booked.replace(',', '') }).exec();
         if (call.followUpId) {
@@ -817,6 +849,12 @@ export class CallsService implements OnModuleInit {
   private onSafetyList(phone: string): boolean {
     const allowed = (this.config.get<string[]>('callAgent.allowedNumbers') ?? []).map((n) => toE164India(n)).filter(Boolean);
     return !allowed.length || allowed.includes(toE164India(phone));
+  }
+
+  /** A slot the call agent's cancel or reschedule gave up goes to the same listeners as a front-desk cancel (the waitlist). */
+  private async freed(slot: { id: string; doctorId?: string; date: string; time: string }) {
+    if (!slot.doctorId || !this.scheduling) return;
+    await this.scheduling.slotFreed({ id: slot.id, doctorId: slot.doctorId, date: slot.date, time: slot.time });
   }
 
   /** Slot search start: `from` (YYYY-MM-DD) when it is later than now. */

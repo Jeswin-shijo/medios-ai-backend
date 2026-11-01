@@ -17,6 +17,8 @@ import { PatientsModule } from '../patients/patients.module';
 import { FollowUpsModule } from '../follow-ups/follow-ups.module';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { SettingsModule } from '../settings/settings.module';
+import { OpdModule } from '../opd/opd.module';
+import { SchedulingModule } from '../scheduling/scheduling.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { SettingsModule } from '../settings/settings.module';
     FollowUpsModule,
     TasksAlertsModule,
     SettingsModule,
+    OpdModule,
+    SchedulingModule,
   ],
   controllers: [CallsController],
   providers: [

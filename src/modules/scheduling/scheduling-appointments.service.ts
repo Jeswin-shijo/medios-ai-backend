@@ -37,7 +37,7 @@ export interface FreedSlot {
 
 export type FreedListener = (slot: FreedSlot) => void | Promise<void>;
 
-const slotKeyOf = (doctorId: string, date: string, time: string) => `${doctorId}|${date}|${time}`;
+export const slotKeyOf = (doctorId: string, date: string, time: string) => `${doctorId}|${date}|${time}`;
 const isDuplicate = (e: any) => e?.code === 11000;
 
 /** Books, moves and cancels appointments with a named doctor. A unique slotKey makes a double booking impossible. */
@@ -129,7 +129,7 @@ export class SchedulingAppointmentsService implements OnModuleInit {
       throw e;
     }
     if (!moved) throw new ConflictException('That appointment just changed. Please look again.');
-    if (old.doctorId) await this.freed(old as FreedSlot);
+    if (old.doctorId) await this.slotFreed(old as FreedSlot);
     return moved;
   }
 
@@ -150,7 +150,7 @@ export class SchedulingAppointmentsService implements OnModuleInit {
       .exec();
     if (!changed) throw new ConflictException('That appointment just changed. Please look again.');
     this.events.statusChanged({ id: String(changed._id), status: 'Canceled' });
-    if (apt.doctorId) await this.freed({ id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time });
+    if (apt.doctorId) await this.slotFreed({ id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time });
     return changed;
   }
 
@@ -254,7 +254,8 @@ export class SchedulingAppointmentsService implements OnModuleInit {
     await this.appointments.updateOne({ slotKey: key, status: 'Canceled' }, { $unset: { slotKey: 1 } }).exec();
   }
 
-  private async freed(slot: FreedSlot) {
+  /** Hands a freed slot to the listeners (the waitlist). Cancel, move and the call agent's cancels and reschedules all use it. */
+  async slotFreed(slot: FreedSlot) {
     for (const listener of this.onFreed) {
       try {
         await listener(slot);

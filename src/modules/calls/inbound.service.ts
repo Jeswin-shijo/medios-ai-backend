@@ -11,6 +11,7 @@ import { AppointmentEvents } from '../appointments/appointment-events';
 import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
+import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
 import { CallAgentSettings, resolveCallAgentSettings } from './call-agent-settings';
 import { CallResult } from './providers/voice-provider';
 import { toE164India } from './phone';
@@ -147,6 +148,7 @@ export function nameMatches(onRecord: string, spoken: string): boolean {
   return extra.length <= MAX_EXTRA_WORDS;
 }
 
+const TAKEN = 'That slot was just taken. Call find_free_slots again and offer new times.';
 const firstName = (name: string) => name.trim().split(/\s+/)[0] ?? name;
 
 @Injectable()
@@ -163,6 +165,7 @@ export class InboundService {
     private readonly tasks: TasksAlertsService,
     private readonly settings: SettingsService,
     private readonly slots: SlotsService,
+    private readonly scheduling?: SchedulingAppointmentsService,
   ) {}
 
   async run(tool: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolReply> {
@@ -392,7 +395,8 @@ export class InboundService {
       throw new Refusal(`Appointments can be booked up to ${MAX_DAYS_AHEAD} days ahead. Ask for an earlier day, or offer a call back from the front desk (request_callback).`);
     }
     const from = preferred && preferred > now ? preferred : now;
-    const offered = await this.slots.findFree(cfg, from, SLOT_OFFERS);
+    const doctor = await this.slots.doctorFor({ uhid: session.uhid });
+    const offered = await this.slots.findFree(cfg, from, SLOT_OFFERS, undefined, doctor ? String(doctor._id) : undefined);
     session.slots = offered.map((s, i) => ({ code: `S${i + 1}`, date: s.date, time: s.time, label: s.label }));
     await session.save();
     if (!offered.length) throw new Refusal('No free slots in the next two weeks. Offer a call back from the front desk (request_callback).');
@@ -420,29 +424,37 @@ export class InboundService {
     const { cfg } = await this.context();
     await this.assertChangesAllowed(session, 'book an appointment', cfg);
     const slot = this.slotFor(session, args);
-    if (!(await this.slots.isFree(cfg, slot.date, slot.time))) throw new Refusal('That slot was just taken. Call find_free_slots again and offer new times.');
+    const doctor = await this.slots.doctorFor({ uhid: session.uhid });
+    if (!(await this.slots.isFree(cfg, slot.date, slot.time, undefined, doctor ? String(doctor._id) : undefined))) throw new Refusal(TAKEN);
     const patient = await this.patients.findOne({ uhid: session.uhid }).exec();
     if (!patient) throw new Refusal('The patient record is not available. Offer a call back from the front desk.');
 
     const reason = str(args.reason, 120);
-    const apt = await this.appointments.create({
-      uhid: patient.uhid,
-      patientName: patient.name,
-      age: patient.age,
-      gender: patient.gender,
-      avatar: patient.avatar,
-      phone: patient.phone,
-      date: slot.date,
-      time: slot.time,
-      type: 'Consultation',
-      condition: reason,
-      status: 'Scheduled',
-      confirmation: 'Confirmed',
-      confirmedAt: new Date(),
-      bookedVia: 'AI call (inbound)',
-      notes: reason ? `Booked by phone (AI): ${reason}` : 'Booked by phone (AI).',
-      tags: patient.conditions ?? [],
-    });
+    let apt: AppointmentDocument;
+    try {
+      apt = await this.appointments.create({
+        uhid: patient.uhid,
+        patientName: patient.name,
+        age: patient.age,
+        gender: patient.gender,
+        avatar: patient.avatar,
+        phone: patient.phone,
+        date: slot.date,
+        time: slot.time,
+        type: 'Consultation',
+        condition: reason,
+        status: 'Scheduled',
+        confirmation: 'Confirmed',
+        confirmedAt: new Date(),
+        bookedVia: 'AI call (inbound)',
+        notes: reason ? `Booked by phone (AI): ${reason}` : 'Booked by phone (AI).',
+        tags: patient.conditions ?? [],
+        ...this.slots.fieldsFor(doctor, slot.date, slot.time),
+      });
+    } catch (e) {
+      if ((e as any)?.code === 11000) throw new Refusal(TAKEN); // the database guard: taken between the check and the save
+      throw e;
+    }
     await this.refreshNextAppointment(patient.uhid);
     await this.note(session, `Booked ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, { outcome: 'booked', appointmentId: String(apt._id) });
     return { ok: true, message: `Booked for ${slot.label}. Read it back to the caller and ask them to arrive 10 minutes early.` };
@@ -453,14 +465,23 @@ export class InboundService {
     await this.assertChangesAllowed(session, 'move an appointment', cfg);
     const apt = await this.appointmentFor(session, args);
     const slot = this.slotFor(session, args);
-    if (!(await this.slots.isFree(cfg, slot.date, slot.time, String(apt._id)))) throw new Refusal('That slot was just taken. Call find_free_slots again and offer new times.');
+    const doctor = await this.slots.doctorFor({ doctorId: apt.doctorId, uhid: apt.uhid });
+    if (!(await this.slots.isFree(cfg, slot.date, slot.time, String(apt._id), doctor ? String(doctor._id) : undefined))) throw new Refusal(TAKEN);
     const before = `${displayDate(parseIsoDay(apt.date))}, ${apt.time}`;
+    const old = { id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time };
     apt.date = slot.date;
     apt.time = slot.time;
+    Object.assign(apt, this.slots.fieldsFor(doctor, slot.date, slot.time));
     apt.confirmation = 'Confirmed';
     apt.confirmedAt = new Date();
     apt.notes = [apt.notes, `Moved by phone (AI) from ${before}.`].filter(Boolean).join(' ');
-    await apt.save();
+    try {
+      await apt.save();
+    } catch (e) {
+      if ((e as any)?.code === 11000) throw new Refusal(TAKEN);
+      throw e;
+    }
+    await this.freed(old);
     await this.refreshNextAppointment(apt.uhid);
     await this.note(session, `Moved from ${before} to ${displayDate(parseIsoDay(slot.date))}, ${slot.time}.`, { outcome: 'rescheduled', appointmentId: String(apt._id) });
     return { ok: true, message: `Moved to ${slot.label}. Read the new time back to the caller.` };
@@ -474,13 +495,21 @@ export class InboundService {
     apt.status = 'Canceled';
     apt.confirmation = 'Cancelled by Patient';
     apt.notes = [apt.notes, `Cancelled by phone (AI)${reason ? `: ${reason}` : ''}.`].filter(Boolean).join(' ');
+    apt.set('slotKey', undefined); // releases the slot for the database guard
     await apt.save();
+    await this.freed({ id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time });
     this.appointmentEvents.statusChanged({ id: String(apt._id), status: 'Canceled' });
     const when = `${displayDate(parseIsoDay(apt.date))}, ${apt.time}`;
     // The same front-desk alert as a cancellation on an outbound call.
     await this.task(`Appointment cancelled by ${session.patientName}`, [`The ${when} slot is free again.`, reason && `Reason: ${reason}.`].filter(Boolean).join(' '), 'Low', session.uhid, session.patientName);
     await this.note(session, `Cancelled ${when}${reason ? ` (${reason})` : ''}.`, { outcome: 'cancelled', appointmentId: String(apt._id) });
     return { ok: true, message: 'Cancelled. Tell the caller, and that they can call again to book.' };
+  }
+
+  /** A slot the agent gave up goes to the same listeners as a front-desk cancel (the waitlist). */
+  private async freed(slot: { id: string; doctorId?: string; date: string; time: string }) {
+    if (!slot.doctorId || !this.scheduling) return;
+    await this.scheduling.slotFreed({ id: slot.id, doctorId: slot.doctorId, date: slot.date, time: slot.time });
   }
 
   private async confirm(session: InboundSessionDocument, args: Record<string, unknown>): Promise<ToolReply> {
