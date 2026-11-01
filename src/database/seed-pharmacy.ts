@@ -135,6 +135,9 @@ const ER_ORDERS: OS[] = [
       L('atorvastatin', 80, 'OD', 'approved', { days: 1, a: 1.6 }),
       L('isosorbide-dinitrate', 5, 'STAT', 'issued', { route: 'sublingual', a: 1.4, i: 4 }),
       L('enoxaparin', 60, 'BD', 'check', { route: 'sc', days: 5 }),
+      // His regular diabetes tablet, issued in the last minutes (the active window), from the Main pharmacy: the ER keeps none.
+      // Scheduling's contrast angiography puts the contrast flag on it.
+      L('metformin', 500, 'BD', 'issued', { days: 30, a: 2, i: 5, store: 'main' }),
     ],
   },
   // An approved ticagrelor line: the ER store has none, the Main pharmacy has some.

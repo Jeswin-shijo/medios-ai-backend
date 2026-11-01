@@ -5,6 +5,7 @@ import { after, before, describe, test } from 'node:test';
 import { hourOf } from '../common/utils/series';
 import { validatePayload } from '../modules/coordinator/coordinator-types';
 import { PatientsService } from '../modules/patients/patients.service';
+import { ACTIVE_ISSUED_MS } from '../modules/pharmacy/pharmacy-orders.service';
 import { PharmacyPatientsService } from '../modules/pharmacy/pharmacy-patients.service';
 import { DEFAULT_TARGETS } from '../modules/pharmacy/pharmacy-settings.service';
 import { PHARMACY_MESSAGE_TYPES } from '../modules/pharmacy/pharmacy-coordinator.registration';
@@ -181,12 +182,16 @@ describe('seedPharmacy', () => {
     assert.match(log.join('\n'), new RegExp(`✅ ${orders.length} pharmacy orders, ${lines.length} lines, ${await m.PharmacyBatch.countDocuments().exec()} batches, 4 low, 168 snapshots`));
   });
 
-  test('the ER chest-pain man of 62 with 64 kg has the five medicines in their states, enoxaparin carries "Kidney function not known", and his rft line is received and awaiting entry in Lab', async () => {
+  test('the ER chest-pain man of 62 with 64 kg has the six medicines in their states, enoxaparin carries "Kidney function not known", and his rft line is received and awaiting entry in Lab', async () => {
     const c = await chest();
     assert.deepEqual([c.patient.age, c.patient.gender, c.patient.vitals.weightKg], [62, 'Male', 64]);
     assert.equal(c.order.priority, 'stat');
     assert.equal(c.order.setting, 'ER');
-    assert.equal(c.lines.length, 5);
+    assert.equal(c.lines.length, 6);
+    // His regular metformin, issued minutes ago from the Main pharmacy (the ER keeps none), so it counts as active for the contrast check.
+    const metformin = c.line('metformin');
+    assert.deepEqual([metformin.status, metformin.dose, metformin.frequency, metformin.durationDays, metformin.product, metformin.issued.store], ['issued', 500, 'BD', 30, 'metformin-tab-500', 'main']);
+    assert.ok(metformin.issued.realAt.getTime() <= seededAt && seededAt - metformin.issued.realAt.getTime() < ACTIVE_ISSUED_MS, 'issued within the active window');
 
     const aspirin = c.line('aspirin');
     assert.deepEqual([aspirin.status, aspirin.dose, aspirin.frequency, aspirin.product, aspirin.issued.store, aspirin.issued.quantity], ['issued', 300, 'STAT', 'aspirin-tab-300', 'er', 1]);
@@ -533,8 +538,11 @@ describe('seedPharmacy', () => {
     assert.deepEqual(line.flags.filter((f: any) => f.kind === 'kidney').map((f: any) => [f.key, f.severity, f.text]), [['kidney.0-30', 'red', 'eGFR 28: enoxaparin, reduce to once daily']]);
     assert.deepEqual([line.status, line.query.kind, line.query.by.name, line.query.question], ['query', 'kidney', 'Pharmacy Agent', 'Dose may need lowering for kidney function (eGFR 28). Please review.']);
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `pharmacy-line:${enox._id}`, status: 'Pending' }).exec(), 1);
-    // The other four medicines are untouched.
-    for (const l of c.lines.filter((x) => String(x._id) !== String(enox._id))) assert.equal((await m.PharmacyLine.findById(l._id).lean<any>().exec())!.querySeq, 0);
+    // His issued metformin is asked about too (avoid at eGFR 28); the other four medicines are untouched.
+    const met = (await m.PharmacyLine.findById(c.line('metformin')._id).lean<any>().exec())!;
+    assert.deepEqual(met.flags.filter((f: any) => f.kind === 'kidney').map((f: any) => [f.key, f.severity, f.text]), [['kidney.0-30', 'red', 'eGFR 28: metformin, avoid']]);
+    assert.deepEqual([met.status, met.query.kind, met.querySeq], ['issued', 'kidney', 1]);
+    for (const l of c.lines.filter((x) => ![String(enox._id), String(met._id)].includes(String(x._id)))) assert.equal((await m.PharmacyLine.findById(l._id).lean<any>().exec())!.querySeq, 0);
     // Put the demo back as the seed leaves it.
     await m.LabTestReport.deleteMany({ labLine: 'k1' });
     await quiet(() => seedPharmacy(DAY, PINNED));

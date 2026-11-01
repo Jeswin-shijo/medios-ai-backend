@@ -26,12 +26,16 @@ import { CallerLookup, CallerLookupSchema } from '../modules/calls/schemas/calle
 import { QueueToken, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
+import { Department, DepartmentSchema } from '../modules/opd/schemas/department.schema';
+import { OpDoctor, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
 import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
 import { seedPharmacy } from './seed-pharmacy';
+import { seedScheduling } from './seed-scheduling';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
+import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -75,6 +79,34 @@ async function replace(label: string, target: Model<any>, records: any[]) {
   });
   await target.insertMany(stamped);
   console.log(`✅ ${records.length} ${label}`);
+}
+
+/**
+ * Drops a collection (a missing one is fine) and rebuilds the model's indexes, so a
+ * reseed never depends on the API's start-up index migration and old unique indexes
+ * (date_1_number_1, date_1, phone10_1) cannot survive.
+ */
+async function recreate(target: Model<any>) {
+  try {
+    await target.collection.drop();
+  } catch (err: any) {
+    if (err?.codeName !== 'NamespaceNotFound' && err?.code !== 26 && !/ns not found/i.test(String(err?.message))) throw err;
+  }
+  await target.syncIndexes();
+}
+
+/** Departments and OP doctors for the reception kiosk; returns the doctors with their ids. */
+async function seedOpd(doctorUserId: string) {
+  const departments = buildDepartments();
+  const doctors = buildDoctors(departments);
+  await recreate(model(Department, DepartmentSchema));
+  await recreate(model(OpDoctor, OpDoctorSchema));
+  await model(Department, DepartmentSchema).insertMany(departments);
+  const saved = await model(OpDoctor, OpDoctorSchema).insertMany(
+    doctors.map((d) => ({ ...d, ...(d.name === 'Dr. Shajin' && { userId: doctorUserId }) })),
+  );
+  console.log(`✅ ${departments.length} departments, ${saved.length} OP doctors (rooms ${doctors.map((d) => d.room).join(', ')})`);
+  return { doctors: saved.map((d: any) => d.toObject()), counters: buildCounters(doctors) };
 }
 
 const MINUTE = 60_000;
@@ -172,6 +204,9 @@ async function seed() {
   ]);
   // Users were recreated, so every stored session is void.
   await model(RefreshToken, RefreshTokenSchema).deleteMany({});
+  const doctorUser = await model(User, UserSchema).findOne({ email: DEMO_EMAIL }).lean<any>();
+  const opd = await seedOpd(String(doctorUser._id));
+  const shajin = opd.doctors.find((d: any) => d.name === 'Dr. Shajin');
 
   await replace('patients', model(Patient, PatientSchema), fixture('patients'));
   await replace('appointments', model(Appointment, AppointmentSchema), fixture('appointments'));
@@ -187,7 +222,10 @@ async function seed() {
   await replace('vitals records', model(VitalsRecord, VitalsRecordSchema), fixture('vitals'));
   await replace('tasks and alerts', model(TaskAlertItem, TaskAlertItemSchema), fixture('tasks-alerts'));
   await replace('message threads', model(MessageThread, MessageThreadSchema), fixture('messages'));
-  await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [fixture('settings')]);
+  const settings = fixture('settings');
+  settings.queue = { ...settings.queue, counters: opd.counters };
+  settings.reception = { ...settings.reception, defaultDoctorId: String(shajin._id) };
+  await replace('settings', model(HospitalSettings, HospitalSettingsSchema), [settings]);
   // The call log and inbound callers' sessions refer to the appointments just replaced.
   await model(AgentCall, AgentCallSchema).deleteMany({});
   await model(InboundSession, InboundSessionSchema).deleteMany({});
@@ -204,6 +242,9 @@ async function seed() {
   await seedLab(process.env.CLINIC_DATE ?? DEMO_DAY);
   // The pharmacy day: stock and about 25 medicine orders on the ER, ward and outpatient cases above, with their checks, queries, issues, clocks and messages.
   await seedPharmacy(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // The scheduling day: doctor logins, staff and a week's roster, appointments by doctor (one doctor on leave), procedures with Mohan Raj's
+  // cath-lab story, consults, conflicts and snapshots, on the cases above.
+  await seedScheduling(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,
