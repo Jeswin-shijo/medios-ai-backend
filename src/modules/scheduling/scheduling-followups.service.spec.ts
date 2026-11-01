@@ -26,6 +26,7 @@ describe('SchedulingFollowupsService', () => {
   const m = models();
   let savedClinic: string | undefined;
   let followups: SchedulingFollowupsService;
+  let waitlist: SchedulingWaitlistService;
   let shajin: any;
   let patient: any;
   let n = 0;
@@ -57,7 +58,7 @@ describe('SchedulingFollowupsService', () => {
     await m.HospitalSettings.updateOne({}, { $set: { reception: { defaultDoctorId: String(shajin._id) } } });
     const doctors = new SchedulingDoctorsService(m.DoctorProfile, m.Appointment, opd);
     const appts = new SchedulingAppointmentsService(m.Appointment, m.Patient, doctors, opd, new AppointmentEvents());
-    const waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, undefined as any);
+    waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, undefined as any);
     const registry = new AgentRegistry();
     new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
     const messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
@@ -78,7 +79,7 @@ describe('SchedulingFollowupsService', () => {
     const apt = (await m.Appointment.findById(a.appointmentId).lean()) as any;
     assert.deepEqual([apt.type, apt.condition, apt.doctorId, apt.status, apt.uhid], ['Follow-up', 'Review BP', String(shajin._id), 'Scheduled', 'MHK202600001']);
     const fu = (await m.FollowUpItem.findById(a.followUpId).lean()) as any;
-    assert.deepEqual([fu.status, fu.followUpDate, fu.followUpTime, String(fu.appointmentId), fu.assignedTo, fu.uhid], ['Scheduled', '27 Oct 2026', '09:00 AM', a.appointmentId, 'Dr. Shajin', 'MHK202600001']);
+    assert.deepEqual([fu.status, fu.followUpDate, fu.followUpTime, String(fu.appointmentId), fu.assignedTo, fu.uhid, fu.note], ['Scheduled', '27 Oct 2026', '09:00 AM', a.appointmentId, 'Dr. Shajin', 'MHK202600001', 'Review BP']);
 
     // Fill day 7 (the first booking holds 09:00 already) and the next order moves to day 8.
     await fill('2026-10-27');
@@ -95,6 +96,25 @@ describe('SchedulingFollowupsService', () => {
     const wait = (await m.WaitItem.findById(c.waitItemId).lean()) as any;
     assert.deepEqual([wait.kind, wait.reason, wait.status, String(wait.refId), wait.original], ['appointment', 'no-slot', 'open', c.followUpId, { date: '2026-10-27', time: '' }]);
     assert.ok(wait.offered.every((o: any) => o.date > '2026-11-04'), 'offered times are after the full week');
+    assert.equal(fu2.note, 'Review BP', 'the note is kept when the week is full');
+  });
+
+  test('Book offered on a no-slot follow-up books a new appointment with the doctor\'s note and schedules the follow-up', async () => {
+    for (const d of ['2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04']) await fill(d);
+    const c = await order({ note: 'Check BP and sugar' });
+    assert.equal(c.status, 'waitlisted');
+    assert.equal(((await m.FollowUpItem.findById(c.followUpId).lean()) as any).note, 'Check BP and sugar');
+    const wait = (await m.WaitItem.findById(c.waitItemId).lean()) as any;
+    const pick = wait.offered[0];
+    const done = await waitlist.bookOffered(FRONT, c.waitItemId!, 0);
+    assert.equal(done.status, 'resolved');
+    const apt = (await m.Appointment.findOne({ uhid: 'MHK202600001', type: 'Follow-up' }).lean()) as any;
+    assert.deepEqual([apt.date, apt.time, apt.condition, apt.doctorId, apt.status], [pick.date, pick.time, 'Check BP and sugar', String(shajin._id), 'Scheduled']);
+    const fu = (await m.FollowUpItem.findById(c.followUpId).lean()) as any;
+    assert.equal(fu.status, 'Scheduled');
+    assert.equal(String(fu.appointmentId), String(apt._id));
+    assert.equal(fu.followUpTime, pick.time);
+    assert.match(fu.followUpDate, /^\d{1,2} \w{3} 2026$/);
   });
 
   test('the department picks the first active doctor by name; inDays and role are checked', async () => {

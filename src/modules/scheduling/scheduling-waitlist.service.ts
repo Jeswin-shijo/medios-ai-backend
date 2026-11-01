@@ -112,7 +112,11 @@ export class SchedulingWaitlistService implements OnModuleInit {
     const apt = isValidObjectId(appointmentId) ? await this.appointments.findById(appointmentId).lean().exec() : null;
     if (!apt) throw new NotFoundException('Appointment not found');
     if (apt.status !== 'Scheduled') throw new BadRequestException(`A ${apt.status.toLowerCase()} appointment can't be moved.`);
-    return this.add({ kind: 'appointment', refId: appointmentId, reason: 'earlier-wanted', priority: 'routine', wantsEarlier: true });
+    const view = await this.add({ kind: 'appointment', refId: appointmentId, reason: 'earlier-wanted', priority: 'routine', wantsEarlier: true });
+    if (view.wantsEarlier) return view;
+    // An item for another reason is already open (leave, patient request): keep it, and let it take freed earlier slots.
+    await this.items.updateOne({ _id: view.id, status: 'open' }, { $set: { wantsEarlier: true } }).exec();
+    return { ...view, wantsEarlier: true };
   }
 
   // ---------- actions ----------
@@ -310,7 +314,7 @@ export class SchedulingWaitlistService implements OnModuleInit {
     if (!f) throw new NotFoundException('Follow-up not found');
     let apt: AppointmentDocument;
     try {
-      apt = await this.bookings.book(actor, { patientId: String(item.patient), doctorId: item.doctorId!, date: pick.date, time: pick.time, type: 'Follow-up' });
+      apt = await this.bookings.book(actor, { patientId: String(item.patient), doctorId: item.doctorId!, date: pick.date, time: pick.time, type: 'Follow-up', condition: f.note ?? '' });
     } catch (e) {
       if (e instanceof ConflictException) throw new ConflictException(OFFER_CHANGED);
       throw e;

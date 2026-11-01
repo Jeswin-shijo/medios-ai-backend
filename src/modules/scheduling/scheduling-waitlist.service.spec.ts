@@ -203,17 +203,51 @@ describe('SchedulingWaitlistService', () => {
     assert.equal(((await m.Appointment.findById(a1._id).lean()) as any).date, D2);
   });
 
-  test('a freed slot that is taken again, or not later than the booked time, is not offered (P6-a)', async () => {
-    const a1 = await book('First', shajin, D1, '09:00 AM');
+  test('a freed slot is offered only when it is still free, past the 15-minute floor, and earlier than the booked time (P6-a)', async () => {
+    await m.OpDoctor.updateOne({ _id: shajin._id }, { $set: { sessions: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '07:00', end: '13:00' }] } });
+    const a1 = await book('First', shajin, D2, '12:00 PM');
     const item = await waitlist.markEarlierWanted(FRONT, String(a1._id));
-    const before = (await m.WaitItem.findById(item.id).lean()) as any;
-    // A repeated cancel result: the slot is held by someone else now.
-    const holder = await book('Holder', shajin, D1, '10:00 AM');
-    await waitlist.onFreed({ id: 'x', doctorId: String(shajin._id), date: D1, time: '10:00 AM' });
-    // A slot after the booked time is no use to a patient who wants earlier.
-    await waitlist.onFreed({ id: 'y', doctorId: String(shajin._id), date: D2, time: '09:00 AM' });
-    assert.deepEqual(((await m.WaitItem.findById(item.id).lean()) as any).offered, before.offered);
-    assert.ok(holder);
+    const offeredOf = async () => ((await m.WaitItem.findById(item.id).lean()) as any).offered;
+    const before = await offeredOf();
+    const doc = String(shajin._id);
+    // Freed, but another live appointment holds it now (a repeated cancel result): not offered.
+    await book('Holder', shajin, D1, '09:00 AM');
+    await waitlist.onFreed({ id: 'x', doctorId: doc, date: D1, time: '09:00 AM' });
+    assert.deepEqual(await offeredOf(), before, 'a held slot is not offered');
+    // Free and in a session, but inside the 15-minute floor (clock 07:00): not offered.
+    await waitlist.onFreed({ id: 'y', doctorId: doc, date: D, time: '07:00 AM' });
+    assert.deepEqual(await offeredOf(), before, 'a slot inside the floor is not offered');
+    // Later than the booked time: no use to a patient who wants earlier.
+    await waitlist.onFreed({ id: 'z', doctorId: doc, date: D2, time: '12:15 PM' });
+    assert.deepEqual(await offeredOf(), before, 'a later slot is not offered');
+    // A genuinely free earlier slot is offered first.
+    await waitlist.onFreed({ id: 'w', doctorId: doc, date: D1, time: '09:15 AM' });
+    const after = await offeredOf();
+    assert.deepEqual([after[0].date, after[0].time], [D1, '09:15 AM']);
+    assert.equal(after.length, 2);
+  });
+
+  test('earlier wanted on an appointment that already has an open item sets wantsEarlier and keeps its reason and offers', async () => {
+    const a = await book('Asha', shajin, D2, '09:00 AM');
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: D2, to: D2, reason: '' }] });
+    const [leaveItem] = await openItems();
+    assert.equal(leaveItem.wantsEarlier, false);
+    const view = await waitlist.markEarlierWanted(FRONT, String(a._id));
+    assert.equal(view.id, String(leaveItem._id));
+    assert.equal(view.reason, 'doctor-leave');
+    assert.equal(view.wantsEarlier, true);
+    assert.deepEqual(view.offered, leaveItem.offered);
+    assert.equal(await m.WaitItem.countDocuments({}), 1);
+    assert.equal(((await m.WaitItem.findById(leaveItem._id).lean()) as any).wantsEarlier, true);
+  });
+
+  test('book offered on a Reschedule Requested appointment leaves it Unconfirmed at the new time', async () => {
+    const a = await book('Asha', shajin, D2, '09:00 AM');
+    await m.Appointment.updateOne({ _id: a._id }, { $set: { confirmation: 'Reschedule Requested' } });
+    const item = await waitlist.add({ kind: 'appointment', refId: String(a._id), reason: 'patient-request', priority: 'routine' });
+    await waitlist.bookOffered(FRONT, item.id, 0);
+    const now = (await m.Appointment.findById(a._id).lean()) as any;
+    assert.deepEqual([now.date, now.time, now.confirmation], [item.offered[0].date, item.offered[0].time, 'Unconfirmed']);
   });
 
   test('earlier wanted with nothing earlier free is an item with no offers', async () => {

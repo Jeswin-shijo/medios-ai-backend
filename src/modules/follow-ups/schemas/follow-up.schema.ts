@@ -44,6 +44,10 @@ export class FollowUpItem {
   @Prop({ default: '' })
   reminders: string;
 
+  /** The doctor's note when the follow-up was ordered. */
+  @Prop({ default: '' })
+  note: string;
+
   /** The appointment the Scheduling Agent booked for this follow-up. */
   @Prop({ type: MongooseSchema.Types.ObjectId, index: true })
   appointmentId?: Types.ObjectId;

@@ -98,6 +98,7 @@ export class SchedulingFollowupsService {
         followUpType: 'Follow-up',
         status: 'Scheduled',
         assignedTo: doctor.name,
+        note,
         appointmentId: apt._id,
       });
       await this.announce(patient, String(apt._id), slot.date, slot.time, doctor.name);
@@ -115,6 +116,7 @@ export class SchedulingFollowupsService {
       followUpType: 'Follow-up',
       status: 'Pending',
       assignedTo: doctor.name,
+      note,
     });
     const wait = await this.waitlist.add({ kind: 'appointment', refId: String(item._id), reason: 'no-slot', priority: 'routine', doctorId, dueDay: dayN });
     return { followUpId: String(item._id), status: 'waitlisted', waitItemId: wait.id };
