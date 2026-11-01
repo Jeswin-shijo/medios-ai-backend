@@ -19,6 +19,10 @@ export class ConsultRequest {
   @Prop({ default: '' }) reason: string;
   @Prop({ required: true, type: String, enum: CONSULT_STATUSES, default: 'paged', index: true }) status: ConsultStatus;
   @Prop({ type: { id: String, name: String }, _id: false }) pagedTo?: { id: string; name: string };
+  /** Every user paged (the on-call doctor, or all the Duty doctor holders); they may accept and complete it. */
+  @Prop({ type: [String], default: [] }) pagedIds: string[];
+  /** When it must be seen by: real time, the request plus the priority's target (Z1). */
+  @Prop({ required: true, type: Date }) dueAt: Date;
   @Prop({ required: true, type: { id: String, name: String }, _id: false }) requestedBy: { id: string; name: string };
   @Prop({ required: true, type: Date }) requestedAt: Date;
   @Prop({ type: Date }) acceptedAt?: Date;

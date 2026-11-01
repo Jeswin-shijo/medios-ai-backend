@@ -27,7 +27,7 @@ describe('SchedulingCoordinatorRegistration', () => {
   const consult = (status: string, extra: Record<string, unknown> = {}) =>
     m.ConsultRequest.create({
       number: `CO-${Math.random().toString().slice(2, 8)}`, patient, patientUhid: 'MHK1', patientName: 'Ravi', case: caseId,
-      departmentCode: 'CARD', priority: 'urgent', status, requestedBy: { id: 'u', name: 'Dr' }, requestedAt: new Date(), ...extra,
+      departmentCode: 'CARD', priority: 'urgent', status, requestedBy: { id: 'u', name: 'Dr' }, requestedAt: new Date(), dueAt: new Date(), ...extra,
     });
   const booking = (status: string, extra: Record<string, unknown> = {}) =>
     m.ProcedureBooking.create({
@@ -51,7 +51,7 @@ describe('SchedulingCoordinatorRegistration', () => {
     await escalations.ensureDefaults();
     clocks = new ClocksService(m.Clock, registry, messages, escalations);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
+    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock, { onPatientLeft: async () => 0 } as any, messages).onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600902', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000002' });
     caseId = String(
       (await cases.openOrJoin({ patientId: String(p._id), patientUhid: p.uhid, patientName: 'Ravi Kumar', kind: 'er', priority: 'high', openedBy: 'er' })).case._id,

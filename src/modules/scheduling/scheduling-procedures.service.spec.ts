@@ -86,7 +86,7 @@ describe('SchedulingProceduresService', () => {
     await escalations.ensureDefaults();
     new ClocksService(m.Clock, registry, messages, escalations);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
-    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
+    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock, { onPatientLeft: async () => 0 } as any, messages).onModuleInit();
     const settingsService = new SettingsService(m.HospitalSettings);
     settings = new SchedulingSettingsService(settingsService);
     rules = new RulesService(registry, settingsService, events);

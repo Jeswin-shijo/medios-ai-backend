@@ -3,12 +3,14 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
 import { FollowUpsModule } from '../follow-ups/follow-ups.module';
+import { Department, DepartmentSchema } from '../opd/schemas/department.schema';
 import { OpdModule } from '../opd/opd.module';
 import { PatientsModule } from '../patients/patients.module';
 import { SettingsModule } from '../settings/settings.module';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
+import { SchedulingConsultsService } from './scheduling-consults.service';
 import { SchedulingFollowupsService } from './scheduling-followups.service';
 import { SchedulingWaitlistService } from './scheduling-waitlist.service';
 import { SchedulingDoctorsService } from './scheduling-doctors.service';
@@ -32,6 +34,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
 @Module({
   imports: [
     MongooseModule.forFeature([
+      { name: Department.name, schema: DepartmentSchema },
       { name: StaffMember.name, schema: StaffMemberSchema },
       { name: RosterEntry.name, schema: RosterEntrySchema },
       { name: DoctorProfile.name, schema: DoctorProfileSchema },
@@ -59,7 +62,8 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingProceduresService,
     SchedulingWaitlistService,
     SchedulingFollowupsService,
+    SchedulingConsultsService,
   ],
-  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService],
 })
 export class SchedulingModule {}

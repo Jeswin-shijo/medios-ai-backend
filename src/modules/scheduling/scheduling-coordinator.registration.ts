@@ -4,8 +4,10 @@ import { Model } from 'mongoose';
 import { clinicNow, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
+import { MessagesService } from '../coordinator/messages.service';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { ConsultRequest, ConsultRequestDocument } from './schemas/consult-request.schema';
+import { SchedulingConsultsService } from './scheduling-consults.service';
 import { ProcedureBooking, ProcedureBookingDocument } from './schemas/procedure-booking.schema';
 
 type Fields = MessageTypeDef['payload'];
@@ -33,6 +35,7 @@ const MESSAGE_TYPES: MessageTypeDef[] = [
 
 export const SCHEDULING_MESSAGE_TYPES = MESSAGE_TYPES;
 
+const LEAVING = ['home', 'transfer', 'left-against-advice', 'died'];
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 const dueAt = (payload: Record<string, unknown>): Date | null => {
   const v = payload.dueAt;
@@ -91,6 +94,8 @@ export class SchedulingCoordinatorRegistration implements OnModuleInit {
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
     @InjectModel(ProcedureBooking.name) private readonly bookings: Model<ProcedureBookingDocument>,
     @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
+    private readonly consultsService: SchedulingConsultsService,
+    private readonly messages: MessagesService,
   ) {}
 
   onModuleInit(): void {
@@ -102,6 +107,11 @@ export class SchedulingCoordinatorRegistration implements OnModuleInit {
       key: 'scheduling',
       messageTypes: MESSAGE_TYPES,
       clocks: SCHEDULING_CLOCKS,
+      handles: [
+        // Admit keeps the consult open: the patient is still in the hospital.
+        { type: 'er.disposition', handler: (id) => this.patientLeft(id, (p) => LEAVING.includes(String(p.kind))) },
+        { type: 'bed.discharged', handler: (id) => this.patientLeft(id, () => true) },
+      ],
       rules: [
         {
           key: 'emergency-bump',
@@ -125,6 +135,13 @@ export class SchedulingCoordinatorRegistration implements OnModuleInit {
         return { open: consults + booked + cantBook, capacity: 0, onTimePct: await consultOnTimePct(this.clocks, new Date(Date.now() - 24 * 3_600_000)) };
       },
     };
+  }
+
+  /** Cancels the open consults on the message's case when `leaving` says the patient has left; a message with no case is skipped. */
+  private async patientLeft(messageId: string, leaving: (payload: Record<string, unknown>) => boolean): Promise<void> {
+    const message = await this.messages.get(messageId);
+    if (!message?.case || !leaving(message.payload ?? {})) return;
+    await this.consultsService.onPatientLeft(String(message.case), 'Patient left');
   }
 
   /** 'fail' while a consult is paged or accepted, or a procedure is booked or in progress; 'pass' once some are finished; else 'n/a'. */

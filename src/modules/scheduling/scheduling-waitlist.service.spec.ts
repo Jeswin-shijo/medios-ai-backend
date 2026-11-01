@@ -84,7 +84,7 @@ describe('SchedulingWaitlistService', () => {
     const events = new CoordinatorEvents();
     const messages = new MessagesService(m.AgentMessage, registry, events);
     const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
-    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
+    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock, { onPatientLeft: async () => 0 } as any, messages).onModuleInit();
     const cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     procedures = new SchedulingProceduresService(
       m.ProcedureBooking, m.RoomBlock, m.StaffMember, m.RosterEntry, m.Appointment, m.OpDoctor, m.SchedulingLock,

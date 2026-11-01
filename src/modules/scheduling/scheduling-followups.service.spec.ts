@@ -60,8 +60,8 @@ describe('SchedulingFollowupsService', () => {
     const appts = new SchedulingAppointmentsService(m.Appointment, m.Patient, doctors, opd, new AppointmentEvents());
     waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, undefined as any);
     const registry = new AgentRegistry();
-    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
     const messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
+    new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock, { onPatientLeft: async () => 0 } as any, messages).onModuleInit();
     followups = new SchedulingFollowupsService(m.Patient, m.FollowUpItem, m.Case, opd, doctors, appts, waitlist, messages);
     patient = await m.Patient.create({ uhid: 'MHK202600001', name: 'Asha Menon', age: 40, gender: 'Female', phone: '9000000001' });
   });
