@@ -47,6 +47,14 @@ import { InboundSession, InboundSessionDocument, InboundSessionSchema } from '..
 import { CallerLookup, CallerLookupDocument, CallerLookupSchema } from '../modules/calls/schemas/caller-lookup.schema';
 import { Department, DepartmentDocument, DepartmentSchema } from '../modules/opd/schemas/department.schema';
 import { OpDoctor, OpDoctorDocument, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
+import { StaffMember, StaffMemberDocument, StaffMemberSchema } from '../modules/scheduling/schemas/staff-member.schema';
+import { RosterEntry, RosterEntryDocument, RosterEntrySchema } from '../modules/scheduling/schemas/roster-entry.schema';
+import { DoctorProfile, DoctorProfileDocument, DoctorProfileSchema } from '../modules/scheduling/schemas/doctor-profile.schema';
+import { RoomBlock, RoomBlockDocument, RoomBlockSchema } from '../modules/scheduling/schemas/room-block.schema';
+import { ProcedureBooking, ProcedureBookingDocument, ProcedureBookingSchema } from '../modules/scheduling/schemas/procedure-booking.schema';
+import { ConsultRequest, ConsultRequestDocument, ConsultRequestSchema } from '../modules/scheduling/schemas/consult-request.schema';
+import { WaitItem, WaitItemDocument, WaitItemSchema } from '../modules/scheduling/schemas/wait-item.schema';
+import { SchedulingSnapshot, SchedulingSnapshotDocument, SchedulingSnapshotSchema } from '../modules/scheduling/schemas/scheduling-snapshot.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -119,6 +127,14 @@ export function models() {
     CallerLookup: model(CallerLookup, CallerLookupSchema) as Model<CallerLookupDocument>,
     Department: model(Department, DepartmentSchema) as Model<DepartmentDocument>,
     OpDoctor: model(OpDoctor, OpDoctorSchema) as Model<OpDoctorDocument>,
+    StaffMember: model(StaffMember, StaffMemberSchema) as Model<StaffMemberDocument>,
+    RosterEntry: model(RosterEntry, RosterEntrySchema) as Model<RosterEntryDocument>,
+    DoctorProfile: model(DoctorProfile, DoctorProfileSchema) as Model<DoctorProfileDocument>,
+    RoomBlock: model(RoomBlock, RoomBlockSchema) as Model<RoomBlockDocument>,
+    ProcedureBooking: model(ProcedureBooking, ProcedureBookingSchema) as Model<ProcedureBookingDocument>,
+    ConsultRequest: model(ConsultRequest, ConsultRequestSchema) as Model<ConsultRequestDocument>,
+    WaitItem: model(WaitItem, WaitItemSchema) as Model<WaitItemDocument>,
+    SchedulingSnapshot: model(SchedulingSnapshot, SchedulingSnapshotSchema) as Model<SchedulingSnapshotDocument>,
   };
 }
 

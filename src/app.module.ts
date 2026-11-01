@@ -40,6 +40,7 @@ import { CoordinatorModule } from './modules/coordinator/coordinator.module';
 import { ErModule } from './modules/er/er.module';
 import { LabModule } from './modules/lab/lab.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
+import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { OpdModule } from './modules/opd/opd.module';
 import { HealthController } from './health.controller';
 
@@ -91,6 +92,7 @@ import { HealthController } from './health.controller';
     ErModule,
     LabModule,
     PharmacyModule,
+    SchedulingModule,
     OpdModule,
   ],
   controllers: [HealthController],
