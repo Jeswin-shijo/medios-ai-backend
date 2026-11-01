@@ -1,8 +1,13 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { AppointmentsModule } from '../appointments/appointments.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
+import { OpdModule } from '../opd/opd.module';
+import { PatientsModule } from '../patients/patients.module';
 import { SettingsModule } from '../settings/settings.module';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
+import { SchedulingAppointmentsService } from './scheduling-appointments.service';
+import { SchedulingDoctorsService } from './scheduling-doctors.service';
 import { SchedulingRosterService } from './scheduling-roster.service';
 import { SchedulingSettingsService } from './scheduling-settings.service';
 import { ConsultRequest, ConsultRequestSchema } from './schemas/consult-request.schema';
@@ -32,8 +37,11 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     ]),
     CoordinatorModule, // registry, messages, cases, escalations, and the Clock model
     SettingsModule,
+    OpdModule,
+    AppointmentsModule,
+    PatientsModule,
   ],
-  providers: [SchedulingSettingsService, SchedulingRosterService, SchedulingCoordinatorRegistration],
-  exports: [SchedulingSettingsService, SchedulingRosterService],
+  providers: [SchedulingSettingsService, SchedulingRosterService, SchedulingCoordinatorRegistration, SchedulingDoctorsService, SchedulingAppointmentsService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService],
 })
 export class SchedulingModule {}

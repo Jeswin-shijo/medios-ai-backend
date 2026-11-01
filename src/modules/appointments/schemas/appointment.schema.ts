@@ -65,6 +65,21 @@ export class Appointment {
   /** How the slot was booked: '' (front desk) or 'AI call'. */
   @Prop({ default: '' })
   bookedVia: string;
+
+  /** The OP doctor (OpDoctor _id) this appointment is with. Older rows get the default doctor by a one-time backfill. */
+  @Prop({ index: true })
+  doctorId?: string;
+
+  @Prop({ default: '' })
+  doctorName: string;
+
+  @Prop({ default: '' })
+  departmentCode: string;
+
+  /** `doctorId|date|time` while the appointment holds its slot; unset when canceled. The unique index stops a double booking. */
+  @Prop()
+  slotKey?: string;
 }
 
 export const AppointmentSchema = SchemaFactory.createForClass(Appointment);
+AppointmentSchema.index({ slotKey: 1 }, { unique: true, partialFilterExpression: { slotKey: { $type: 'string' } } });
