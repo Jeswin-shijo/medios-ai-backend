@@ -4,19 +4,25 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { parseIsoDay } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
+import { AppointmentEvents } from '../appointments/appointment-events';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { CasesService } from '../coordinator/cases.service';
 import { ClocksService } from '../coordinator/clocks.service';
 import { CoordinatorEvents } from '../coordinator/coordinator-events';
 import { EscalationsService } from '../coordinator/escalations.service';
 import { MessagesService } from '../coordinator/messages.service';
+import { RulesService } from '../coordinator/rules.service';
+import { OpdService } from '../opd/opd.service';
 import { PatientsService } from '../patients/patients.service';
 import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
+import { SchedulingAppointmentsService } from './scheduling-appointments.service';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
+import { SchedulingDoctorsService } from './scheduling-doctors.service';
 import { SchedulingProceduresService } from './scheduling-procedures.service';
 import { SchedulingSettingsService } from './scheduling-settings.service';
+import { SchedulingWaitlistService } from './scheduling-waitlist.service';
 
 const DOC = { id: 'user-doc', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 const NURSE = { id: 'user-nurse', name: 'Nurse Priya', role: UserRole.NURSE };
@@ -40,6 +46,7 @@ describe('SchedulingProceduresService', () => {
   let cases: CasesService;
   let procedures: SchedulingProceduresService;
   let settings: SchedulingSettingsService;
+  let rules: RulesService;
   let patientId: string;
   let patientUhid: string;
   let arun: any;
@@ -80,11 +87,18 @@ describe('SchedulingProceduresService', () => {
     new ClocksService(m.Clock, registry, messages, escalations);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     new SchedulingCoordinatorRegistration(registry, m.ConsultRequest, m.ProcedureBooking, m.Clock).onModuleInit();
-    settings = new SchedulingSettingsService(new SettingsService(m.HospitalSettings));
+    const settingsService = new SettingsService(m.HospitalSettings);
+    settings = new SchedulingSettingsService(settingsService);
+    rules = new RulesService(registry, settingsService, events);
     procedures = new SchedulingProceduresService(
       m.ProcedureBooking, m.RoomBlock, m.StaffMember, m.RosterEntry, m.Appointment, m.OpDoctor, m.SchedulingLock,
-      m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, settings,
+      m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, settings, rules,
     );
+    // The real waitlist, so a bumped case is seen landing on it.
+    const opd = new OpdService(m.Department, m.OpDoctor, settingsService);
+    const doctors = new SchedulingDoctorsService(m.DoctorProfile, m.Appointment, opd);
+    const appts = new SchedulingAppointmentsService(m.Appointment, m.Patient, doctors, opd, new AppointmentEvents());
+    new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, procedures).onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600950', name: 'Mohan Raj', age: 58, gender: 'Male', phone: '9100000050' });
     patientId = String(p._id);
     patientUhid = p.uhid;
@@ -206,14 +220,15 @@ describe('SchedulingProceduresService', () => {
     assert.equal((await alert(`scheduling-wait:${v.id}`)).status, 'Completed');
     assert.equal((await sent('scheduling.procedure-booked')).length, 1);
 
-    // STAT waits on its own 15-minute target; routine waits without a clock.
+    // A STAT never waits: it books at once with the roles nobody can fill (Task 9). Routine waits without a clock.
     const stat = await ask('stat', 'upper-gi-endoscopy');
     const routine = await ask('routine', 'ct-head');
-    assert.deepEqual([stat.status, routine.status], ['cant-book', 'cant-book']);
+    assert.deepEqual([stat.status, routine.status], ['booked', 'cant-book']);
+    assert.deepEqual(stat.team.map((t) => [t.role, t.unfilled]), [['physician', true], ['procedure-nurse', true]]);
     const dues = new Map((await sent('scheduling.procedure-cant-book')).map((msg) => [msg.payload.bookingId, ms(msg.payload.dueAt)]));
-    assert.equal(dues.get(stat.id), NOW().getTime() + 15 * MIN);
+    assert.equal(dues.has(stat.id), false);
     assert.equal(dues.get(routine.id), NOW().getTime() + 20160 * MIN, 'routine: the end of its 14-day window');
-    assert.equal(await m.Clock.countDocuments({ def: 'scheduling-booking', ref: stat.id, state: 'running' }), 1);
+    assert.equal(await m.Clock.countDocuments({ def: 'scheduling-booking', ref: stat.id }), 0);
     assert.equal(await m.Clock.countDocuments({ def: 'scheduling-booking', ref: routine.id }), 0);
   });
 
@@ -365,5 +380,238 @@ describe('SchedulingProceduresService', () => {
     await assert.rejects(ask('routine', 'coronary-angiography', { note: 'x'.repeat(301) }), BadRequestException);
     await assert.rejects(procedures.request(DOC, { patientId: String(new Types.ObjectId()), procedure: 'chest-xray', priority: 'routine' }), NotFoundException);
     assert.equal(await m.ProcedureBooking.countDocuments(), 2, 'nothing saved for a refused request');
+  });
+
+  test("cancelling a can't-book urgent request completes its wait alert and stops its clock", async () => {
+    await cathTeam({ rostered: false });
+    const v = await ask('urgent');
+    assert.equal(v.status, 'cant-book');
+    assert.equal((await alert(`scheduling-wait:${v.id}`)).status, 'Pending');
+    assert.equal(await m.Clock.countDocuments({ def: 'scheduling-booking', ref: v.id, state: 'running' }), 1);
+    await procedures.cancel(DOC, v.id, 'Transferred to another hospital');
+    assert.equal((await alert(`scheduling-wait:${v.id}`)).status, 'Completed');
+    const clocks = await m.Clock.find({ def: 'scheduling-booking', ref: v.id }).lean();
+    assert.deepEqual(clocks.map((c) => c.state), ['met']);
+  });
+
+  test('the lock is let go when booking throws', async () => {
+    await cathTeam();
+    await m.SchedulingLock.create({ key: 'procedures', until: new Date(Date.now() + 30_000) });
+    const v = await ask();
+    assert.equal(v.status, 'requested');
+    await m.SchedulingLock.deleteMany({});
+    const broken = mock.method(settings, 'get', async () => {
+      throw new Error('settings unavailable');
+    });
+    try {
+      await assert.rejects(procedures.tryBook(v.id), /settings unavailable/);
+    } finally {
+      broken.mock.restore();
+    }
+    assert.equal(await m.SchedulingLock.countDocuments(), 0, 'released in finally');
+    assert.equal(await procedures.tryBook(v.id), 'booked', 'the next try is not locked out');
+  });
+
+  // ---------- emergencies come first (spec 4.4, Ruling Z22) ----------
+
+  const otherPatient = async () => String((await m.Patient.create({ uhid: 'MHK202600951', name: 'Kumar', age: 61, gender: 'Male', phone: '9100000051' }))._id);
+  /** The cath team plus an OT team whose only OT nurse, Anitha, is also the only cath nurse. All on the morning of D. */
+  const cathAndOt = async () => {
+    arun = await staff('Dr. Arun', ['cardiologist']);
+    anitha = await staff('Anitha', ['cath-nurse', 'ot-nurse']);
+    ravi = await staff('Ravi', ['cath-technician']);
+    const sam = await staff('Dr. Sam', ['surgeon']);
+    const ann = await staff('Dr. Ann', ['anaesthetist']);
+    for (const s of [arun, anitha, ravi, sam, ann]) await roster(s);
+    return { sam, ann };
+  };
+  const roles = (v: any) => v.team.map((t: any) => [t.role, t.name, t.unfilled]);
+
+  test('Activate cath lab while a routine angiography is planned now: the routine case is bumped to the waitlist and the STAT case takes the room', async () => {
+    await cathTeam();
+    const routine = await ask();
+    assert.equal(ms(routine.start), at(D, '08:00').getTime());
+    mock.timers.tick(60 * MIN); // 08:00: the routine case is due and not started
+    const stat = await procedures.activateCathLab(DOC, await otherPatient(), 'STEMI');
+
+    assert.deepEqual([stat.status, stat.priority, stat.procedure, stat.room, stat.note], ['booked', 'stat', 'coronary-angiography', 'cath-lab', 'STEMI']);
+    assert.deepEqual([ms(stat.start), ms(stat.end)], [at(D, '08:00').getTime(), at(D, '08:45').getTime()]);
+    assert.deepEqual(roles(stat), [['cardiologist', 'Dr. Arun', false], ['cath-nurse', 'Anitha', false], ['cath-technician', 'Ravi', false]], 'the bumped case frees its team');
+    assert.ok(stat.history.some((h) => h.what === 'Took the place of PR-0001, which went to the waitlist'), JSON.stringify(stat.history));
+
+    const bumped = await procedures.get(routine.id);
+    assert.deepEqual([bumped.status, bumped.room, bumped.start, bumped.team.length], ['requested', null, null, 0]);
+    assert.equal(bumped.history.at(-1)!.what, 'Bumped for an emergency (PR-0002): moved to the waitlist');
+    const raw = (await m.ProcedureBooking.findById(routine.id).lean()) as any;
+    assert.deepEqual([raw.bumpedFrom.room, raw.bumpedFrom.start.getTime()], ['cath-lab', at(D, '08:00').getTime()]);
+
+    // On the waitlist, offered times after the STAT case.
+    const items = (await m.WaitItem.find({}).lean()) as any[];
+    assert.equal(items.length, 1);
+    assert.deepEqual([items[0].kind, String(items[0].refId), items[0].reason, items[0].priority, items[0].status], ['procedure', routine.id, 'bumped', 'routine', 'open']);
+    assert.equal(new Date(items[0].offered[0].start).getTime(), at(D, '09:00').getTime(), 'after 08:45 and the 15-minute turnover');
+
+    // -bumped for the routine case, -booked for the STAT one; never a patient name.
+    const bumpedMsgs = await sent('scheduling.procedure-bumped');
+    assert.equal(bumpedMsgs.length, 1);
+    const b = bumpedMsgs[0];
+    assert.deepEqual(b.payload, { bookingId: routine.id, number: 'PR-0001', procedure: 'coronary-angiography', priority: 'routine', status: 'requested' });
+    assert.equal(b.summary, 'PR-0001: Coronary angiography bumped for an emergency (ROUTINE)');
+    assert.deepEqual([b.to, b.priority, String(b.case)], [['coordinator', 'lab', 'pharmacy'], 'low', routine.caseId]);
+    const booked = (await sent('scheduling.procedure-booked')).filter((x) => x.payload.bookingId === stat.id);
+    assert.equal(booked.length, 1);
+    assert.equal(booked[0].priority, 'high');
+    for (const msg of [b, booked[0]]) assert.ok(!/Mohan|Kumar/.test(JSON.stringify(msg)), 'no patient name');
+
+    // The old notices say what happened; the STAT team is paged (Critical, High: it reaches the bell).
+    for (const s of [arun, anitha, ravi]) {
+      const old = await alert(`scheduling-team:${routine.id}:${s._id}`);
+      assert.deepEqual([old.title, old.status], ['Bumped: Coronary angiography PR-0001 moved to the waitlist', 'Pending']);
+      const page = await alert(`scheduling-page:${stat.id}:${s._id}`);
+      assert.deepEqual([page.type, page.category, page.priority, page.status], ['System', 'Critical', 'High', 'Pending']);
+      assert.equal(page.title, 'STAT: Coronary angiography PR-0002 at 08:00 AM, Cath lab');
+    }
+    assert.equal(await alert(`scheduling-wait:${stat.id}`), null, 'a STAT never waits');
+
+    // The minute pass leaves the bumped case for a person to re-book from the waitlist.
+    mock.timers.tick(31_000);
+    assert.equal(await procedures.retryWaiting(), 0);
+    assert.equal((await procedures.get(routine.id)).status, 'requested');
+  });
+
+  test('the only cardiologist is in clinic with patients: they are taken, and their appointments are not moved', async () => {
+    await cathTeam();
+    const doctor = await m.OpDoctor.create({
+      name: 'Dr. Arun', departmentCode: 'CARD', fee: 500, room: 'Room 201', tokenPrefix: 'C',
+      sessions: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '08:00', end: '12:00' }], active: true, userId: arun.userId,
+    });
+    const visit = (uhid: string, name: string, time: string) =>
+      m.Appointment.create({ uhid, patientName: name, age: 50, gender: 'Female', date: D, time, status: 'Scheduled', doctorId: String(doctor._id) });
+    const apts = [await visit('MHK1', 'Lakshmi', '09:00 AM'), await visit('MHK2', 'Selvi', '09:15 AM')];
+    const planned = await ask();
+    assert.equal(ms(planned.start), at(D, '12:00').getTime(), 'a planned case keeps away from his clinic');
+
+    mock.timers.tick(120 * MIN); // 09:00, in clinic
+    const stat = await procedures.activateCathLab(DOC, await otherPatient());
+    assert.equal(ms(stat.start), at(D, '09:00').getTime());
+    assert.deepEqual(roles(stat)[0], ['cardiologist', 'Dr. Arun', false]);
+    assert.equal((await alert(`scheduling-page:${stat.id}:${arun._id}`)).priority, 'High');
+    const after = await m.Appointment.find({ _id: { $in: apts.map((a) => a._id) } }).sort({ time: 1 }).lean();
+    assert.deepEqual(after.map((a) => [a.date, a.time, a.status, a.doctorId]), [[D, '09:00 AM', 'Scheduled', String(doctor._id)], [D, '09:15 AM', 'Scheduled', String(doctor._id)]]);
+    assert.equal(await m.WaitItem.countDocuments(), 0, 'no outpatient goes on the waitlist');
+    assert.equal((await procedures.get(planned.id)).status, 'booked', 'the 12:00 case is clear of the STAT');
+  });
+
+  test('a cath nurse on a planned OT case is taken and that case is bumped', async () => {
+    const { sam } = await cathAndOt();
+    const hernia = await ask('routine', 'hernia-repair');
+    assert.deepEqual([hernia.room, ms(hernia.start), hernia.team.find((t) => t.role === 'ot-nurse')!.name], ['ot-1', at(D, '08:00').getTime(), 'Anitha']);
+    mock.timers.tick(60 * MIN); // 08:00
+    const stat = await procedures.activateCathLab(DOC, await otherPatient());
+    assert.deepEqual([stat.room, ms(stat.start)], ['cath-lab', at(D, '08:00').getTime()]);
+    assert.deepEqual(roles(stat), [['cardiologist', 'Dr. Arun', false], ['cath-nurse', 'Anitha', false], ['cath-technician', 'Ravi', false]]);
+    assert.ok(stat.history.some((h) => h.what === 'Took the place of PR-0001, which went to the waitlist'));
+
+    const h = await procedures.get(hernia.id);
+    assert.deepEqual([h.status, h.room], ['requested', null]);
+    assert.equal(((await m.ProcedureBooking.findById(hernia.id).lean()) as any).bumpedFrom.room, 'ot-1');
+    const item = (await m.WaitItem.findOne({ refId: hernia.id }).lean()) as any;
+    assert.deepEqual([item.kind, item.reason, item.status], ['procedure', 'bumped', 'open']);
+    assert.equal((await alert(`scheduling-team:${hernia.id}:${sam._id}`)).title, 'Bumped: Hernia repair PR-0001 moved to the waitlist');
+    assert.deepEqual((await sent('scheduling.procedure-bumped')).map((x) => x.payload.bookingId), [hernia.id]);
+  });
+
+  test('nobody is taken from a case in progress', async () => {
+    await cathAndOt();
+    const hernia = await ask('routine', 'hernia-repair');
+    mock.timers.tick(60 * MIN); // 08:00
+    await procedures.start(NURSE, hernia.id);
+    mock.timers.tick(10 * MIN); // 08:10
+    const stat = await procedures.activateCathLab(DOC, await otherPatient());
+    assert.equal(stat.status, 'booked');
+    assert.equal(ms(stat.start), at(D, '08:10').getTime(), 'the cath lab is free; an unfilled role never delays a STAT');
+    assert.deepEqual(roles(stat), [['cardiologist', 'Dr. Arun', false], ['cath-nurse', null, true], ['cath-technician', 'Ravi', false]]);
+    assert.equal((await procedures.get(hernia.id)).status, 'in-progress');
+    assert.equal(await m.WaitItem.countDocuments(), 0);
+    assert.equal((await sent('scheduling.procedure-bumped')).length, 0);
+    assert.equal(await alert(`scheduling-page:${stat.id}:${anitha._id}`), null);
+    const call = await alert(`scheduling-call:${stat.id}:unfilled-cath-nurse`);
+    assert.equal(call.title, 'No cath nurse available: Coronary angiography PR-0002 at 08:10 AM, Cath lab');
+  });
+
+  test('no cath technician at all: booked anyway with the role unfilled and an OT-in-charge page', async () => {
+    arun = await staff('Dr. Arun', ['cardiologist']);
+    anitha = await staff('Anitha', ['cath-nurse'], false); // no login: the in-charge calls her
+    for (const s of [arun, anitha]) await roster(s);
+    mock.timers.tick(90 * MIN); // 08:30
+    const stat = await procedures.activateCathLab(DOC, patientId);
+    assert.deepEqual([stat.status, ms(stat.start)], ['booked', at(D, '08:30').getTime()]);
+    assert.deepEqual(roles(stat), [['cardiologist', 'Dr. Arun', false], ['cath-nurse', 'Anitha', false], ['cath-technician', null, true]]);
+    assert.ok(stat.history.some((h) => h.what === 'No cath technician available'), JSON.stringify(stat.history));
+
+    const unfilled = await alert(`scheduling-call:${stat.id}:unfilled-cath-technician`);
+    assert.equal(unfilled.title, 'No cath technician available: Coronary angiography PR-0001 at 08:30 AM, Cath lab');
+    assert.ok(unfilled.subtitle.startsWith('For OT and cath lab in charge'), unfilled.subtitle);
+    assert.deepEqual([unfilled.type, unfilled.category, unfilled.priority, unfilled.status, unfilled.uhid], ['System', 'System', 'High', 'Pending', patientUhid]);
+    const call = await alert(`scheduling-call:${stat.id}:${anitha._id}`);
+    assert.deepEqual([call.title, call.priority], ['Call Anitha (cath nurse): Coronary angiography PR-0001 at 08:30 AM, Cath lab', 'High']);
+    assert.equal((await alert(`scheduling-page:${stat.id}:${arun._id}`)).priority, 'High');
+
+    // Never "Can't book yet": no wait alert, no -cant-book message, no booking clock.
+    assert.equal(await alert(`scheduling-wait:${stat.id}`), null);
+    assert.equal((await sent('scheduling.procedure-cant-book')).length, 0);
+    assert.equal(await m.Clock.countDocuments({ def: 'scheduling-booking' }), 0);
+
+    // Finishing the case closes the calls too.
+    await procedures.start(NURSE, stat.id);
+    await procedures.done(DOC, stat.id);
+    assert.equal((await alert(`scheduling-call:${stat.id}:unfilled-cath-technician`)).status, 'Completed');
+  });
+
+  test('with emergency-bump off, nothing planned is bumped', async () => {
+    await rules.set(ADMIN, 'emergency-bump', false);
+    await cathAndOt();
+    const routine = await ask(); // 08:00-08:45, with Anitha
+    const hernia = await ask('routine', 'hernia-repair'); // Anitha is free from 08:45
+    assert.deepEqual([ms(routine.start), ms(hernia.start)], [at(D, '08:00').getTime(), at(D, '08:45').getTime()]);
+    mock.timers.tick(60 * MIN); // 08:00
+    const stat = await procedures.activateCathLab(DOC, await otherPatient());
+    assert.equal(stat.status, 'booked');
+    assert.equal(ms(stat.start), at(D, '09:00').getTime(), 'the first gap: after 08:45 and its 15-minute turnover');
+    assert.deepEqual(roles(stat), [['cardiologist', 'Dr. Arun', false], ['cath-nurse', null, true], ['cath-technician', 'Ravi', false]], 'Anitha stays on her planned case');
+    const [r, h] = [await procedures.get(routine.id), await procedures.get(hernia.id)];
+    assert.deepEqual([r.status, ms(r.start), h.status, ms(h.start)], ['booked', at(D, '08:00').getTime(), 'booked', at(D, '08:45').getTime()]);
+    assert.equal((await sent('scheduling.procedure-bumped')).length, 0);
+    assert.equal(await m.WaitItem.countDocuments(), 0);
+  });
+
+  test('a STAT waits up to 10 s for the lock, never goes to cant-book, and is retried before older requests', async () => {
+    await cathTeam();
+    mock.timers.tick(60 * MIN); // 08:00
+    await m.SchedulingLock.create({ key: 'procedures', until: new Date(Date.now() + 30_000) });
+    setTimeout(() => void m.SchedulingLock.deleteMany({}).exec(), 300);
+    const t0 = performance.now();
+    const first = await procedures.activateCathLab(DOC, patientId);
+    assert.equal(first.status, 'booked', 'booked once the lock was let go');
+    assert.ok(performance.now() - t0 >= 250, 'it waited for the lock');
+    await procedures.cancel(DOC, first.id, 'Test');
+
+    // Held throughout (a shorter wait here): it stays requested for the next pass.
+    (procedures as any).statLock = { tries: 3, stepMs: 20 };
+    await m.SchedulingLock.create({ key: 'procedures', until: new Date(Date.now() + 30_000) });
+    const urgent = await ask('urgent');
+    mock.timers.tick(1_000);
+    const stat = await procedures.activateCathLab(DOC, patientId);
+    assert.deepEqual([urgent.status, stat.status], ['requested', 'requested']);
+    assert.equal(await alert(`scheduling-wait:${stat.id}`), null);
+
+    // The pass takes the STAT first, though the urgent request is older: nothing needs bumping.
+    await m.SchedulingLock.deleteMany({});
+    mock.timers.tick(31_000);
+    assert.equal(await procedures.retryWaiting(), 2);
+    const [s, u] = [await procedures.get(stat.id), await procedures.get(urgent.id)];
+    assert.deepEqual([s.status, u.status], ['booked', 'booked']);
+    assert.ok(ms(s.start) < ms(u.start));
+    assert.equal((await sent('scheduling.procedure-bumped')).length, 0);
   });
 });

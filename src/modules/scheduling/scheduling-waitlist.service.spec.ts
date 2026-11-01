@@ -10,6 +10,7 @@ import { CasesService } from '../coordinator/cases.service';
 import { CoordinatorEvents } from '../coordinator/coordinator-events';
 import { EscalationsService } from '../coordinator/escalations.service';
 import { MessagesService } from '../coordinator/messages.service';
+import { RulesService } from '../coordinator/rules.service';
 import { OpdService } from '../opd/opd.service';
 import { PatientsService } from '../patients/patients.service';
 import { SettingsService } from '../settings/settings.service';
@@ -88,6 +89,7 @@ describe('SchedulingWaitlistService', () => {
     procedures = new SchedulingProceduresService(
       m.ProcedureBooking, m.RoomBlock, m.StaffMember, m.RosterEntry, m.Appointment, m.OpDoctor, m.SchedulingLock,
       m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, new SchedulingSettingsService(settingsService),
+      new RulesService(registry, settingsService, events),
     );
     waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, procedures);
     waitlist.onModuleInit();

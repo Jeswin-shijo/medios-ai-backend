@@ -10,7 +10,7 @@ import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-a
 import { UserRole } from '../users/schemas/user.schema';
 import { FreedSlot, SchedulingAppointmentsService } from './scheduling-appointments.service';
 import { FRONT_DESK_LEAD_MINUTES, FreeSlot, SchedulingDoctorsService } from './scheduling-doctors.service';
-import { SchedulingProceduresService } from './scheduling-procedures.service';
+import { BumpedProcedure, SchedulingProceduresService } from './scheduling-procedures.service';
 import { WaitItem, WaitItemDocument, WaitReason } from './schemas/wait-item.schema';
 
 const BOOK_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.STAFF];
@@ -70,6 +70,7 @@ export class SchedulingWaitlistService implements OnModuleInit {
   onModuleInit() {
     this.bookings.onFreed.push((slot) => this.onFreed(slot));
     this.bookings.onLeave.push((info) => this.onLeave(info));
+    this.procedures.onBumped.push((bumped) => this.onBumped(bumped));
   }
 
   // ---------- adding ----------
@@ -184,6 +185,11 @@ export class SchedulingWaitlistService implements OnModuleInit {
       await this.items.updateOne({ _id: c._id, status: 'open' }, { $set: { offered } }).exec();
       return;
     }
+  }
+
+  /** An emergency bumped a planned procedure (now back to requested): it goes on the list, once, with new times offered. */
+  async onBumped(bumped: BumpedProcedure): Promise<void> {
+    await this.add({ kind: 'procedure', refId: bumped.bookingId, reason: 'bumped', priority: bumped.priority });
   }
 
   /** Doctor leave was saved: every booked appointment on leave goes on the list, once. */
