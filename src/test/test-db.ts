@@ -55,6 +55,7 @@ import { ProcedureBooking, ProcedureBookingDocument, ProcedureBookingSchema } fr
 import { ConsultRequest, ConsultRequestDocument, ConsultRequestSchema } from '../modules/scheduling/schemas/consult-request.schema';
 import { WaitItem, WaitItemDocument, WaitItemSchema } from '../modules/scheduling/schemas/wait-item.schema';
 import { SchedulingSnapshot, SchedulingSnapshotDocument, SchedulingSnapshotSchema } from '../modules/scheduling/schemas/scheduling-snapshot.schema';
+import { SchedulingLock, SchedulingLockDocument, SchedulingLockSchema } from '../modules/scheduling/schemas/scheduling-lock.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -135,6 +136,7 @@ export function models() {
     ConsultRequest: model(ConsultRequest, ConsultRequestSchema) as Model<ConsultRequestDocument>,
     WaitItem: model(WaitItem, WaitItemSchema) as Model<WaitItemDocument>,
     SchedulingSnapshot: model(SchedulingSnapshot, SchedulingSnapshotSchema) as Model<SchedulingSnapshotDocument>,
+    SchedulingLock: model(SchedulingLock, SchedulingLockSchema) as Model<SchedulingLockDocument>,
   };
 }
 
