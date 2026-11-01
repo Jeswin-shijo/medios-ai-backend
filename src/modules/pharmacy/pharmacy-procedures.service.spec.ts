@@ -3,7 +3,12 @@ import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { DOC, World, aspirin300, buildWorld, clopidogrel300 } from '../../test/pharmacy-fixtures';
 import { clinicNow } from '../../common/utils/clinic-time';
+import { UserRole } from '../users/schemas/user.schema';
 import { LineInput } from './pharmacy-orders.service';
+import { PharmacyPatientsService } from './pharmacy-patients.service';
+
+const DOC2 = { id: 'user-doc2', name: 'Dr. Asha', role: UserRole.DOCTOR };
+const ticagrelor90: LineInput = { medicine: 'ticagrelor', product: 'ticagrelor-tab-90', dose: 90, route: 'oral', frequency: 'BD', durationDays: 30 };
 
 const metformin500: LineInput = { medicine: 'metformin', product: 'metformin-tab-500', dose: 500, route: 'oral', frequency: 'BD', durationDays: 30 };
 
@@ -128,5 +133,73 @@ describe('Pharmacy checks around procedures', () => {
       [found[0].title, found[0].subtitle, found[0].type, found[0].category, found[0].priority],
       ['No dual antiplatelet medicines after the stent (PR-0001). Please review.', 'PR-0001', 'Medication Alert', 'Critical', 'High'],
     );
+  });
+
+  test('a metformin line ordered after the booking tells its doctor: still one alert', async () => {
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'routine', lines: [metformin500] });
+    await booked();
+    assert.equal((await alerts('pharmacy-contrast:b1'))[0].subtitle, 'For Dr. Shajin · PR-0001');
+    const late = await w.orders.order(DOC2, { patientId: w.patientId, priority: 'routine', lines: [{ ...metformin500, product: 'metformin-tab-1000', dose: 1000 }] });
+    assert.equal((await flagsOf(late.lines[0].id)).length, 1);
+    const found = await alerts('pharmacy-contrast:b1');
+    assert.equal(found.length, 1);
+    assert.equal(found[0].subtitle, 'For Dr. Shajin, Dr. Asha · PR-0001');
+  });
+
+  test('a metformin order after a booking with no earlier metformin raises the alert', async () => {
+    await booked();
+    assert.equal((await alerts('pharmacy-contrast:b1')).length, 0);
+    await w.orders.order(DOC2, { patientId: w.patientId, priority: 'routine', lines: [metformin500] });
+    const found = await alerts('pharmacy-contrast:b1');
+    assert.equal(found.length, 1);
+    assert.deepEqual([found[0].subtitle, found[0].status], ['For Dr. Asha · PR-0001', 'Pending']);
+  });
+
+  test('the contrast window runs from 48 hours back to 14 days ahead', async () => {
+    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote);
+    const at = (ms: number) => new Date(clinicNow().getTime() + ms);
+    const H = 3_600_000;
+    const probe = async (id: string, ms: number, status: string) => {
+      await m.PharmacyProcedureNote.deleteMany({});
+      await m.PharmacyProcedureNote.create({ patient: w.patientId, bookingId: id, number: 'PR-0009', procedure: 'ct-abdomen', contrast: true, start: at(ms), status });
+      return !!(await facts.facts(w.patientId)).contrast;
+    };
+    assert.equal(await probe('e1', 13 * 24 * H, 'booked'), true);
+    assert.equal(await probe('e2', 15 * 24 * H, 'booked'), false);
+    assert.equal(await probe('e3', -47 * H, 'done'), true);
+    assert.equal(await probe('e4', -49 * H, 'done'), false);
+  });
+
+  test('re-delivering a booking or a done does not reopen a completed contrast alert', async () => {
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'routine', lines: [metformin500] });
+    await booked();
+    await m.TaskAlertItem.updateOne({ link: 'pharmacy-contrast:b1' }, { $set: { status: 'Completed' } });
+    await booked();
+    assert.equal((await alerts('pharmacy-contrast:b1'))[0].status, 'Completed');
+    await send('done', 'b1');
+    assert.equal((await alerts('pharmacy-contrast:b1'))[0].status, 'Completed');
+    // A genuine change (a new time) does reopen it.
+    await booked('b1', { start: new Date(start.getTime() + 86_400_000) });
+    assert.equal((await alerts('pharmacy-contrast:b1'))[0].status, 'Pending');
+  });
+
+  test('dual antiplatelet: only active lines count', async () => {
+    // aspirin + ticagrelor: no alert.
+    await w.orders.order(DOC, { patientId: w.patientId, priority: 'stat', lines: [aspirin300, ticagrelor90] });
+    await send('done', 'd1', { procedure: 'coronary-angioplasty' });
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: 'pharmacy-dapt:d1' }), 0);
+
+    // aspirin issued long ago, outside the active window: one alert.
+    await m.PharmacyLine.updateOne({ medicine: 'aspirin' }, { $set: { status: 'issued', 'issued.realAt': new Date(Date.now() - 3 * 86_400_000) } });
+    await send('done', 'd2', { procedure: 'coronary-angioplasty' });
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: 'pharmacy-dapt:d2' }), 1);
+
+    // aspirin issued an hour ago is active again; stopped aspirin is not.
+    await m.PharmacyLine.updateOne({ medicine: 'aspirin' }, { $set: { 'issued.realAt': new Date(Date.now() - 3_600_000) } });
+    await send('done', 'd3', { procedure: 'coronary-angioplasty' });
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: 'pharmacy-dapt:d3' }), 0);
+    await m.PharmacyLine.updateOne({ medicine: 'aspirin' }, { $set: { status: 'stopped' } });
+    await send('done', 'd4', { procedure: 'coronary-angioplasty' });
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: 'pharmacy-dapt:d4' }), 1);
   });
 });

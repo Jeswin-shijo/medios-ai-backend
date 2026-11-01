@@ -35,7 +35,7 @@ const MIN_MS = 60_000;
 const MAX_LINES = 10;
 const WORKLIST_LIMIT = 300;
 /** A line issued within this long (real time) still counts as active for the checks. */
-const ACTIVE_ISSUED_MS = DAY_MS;
+export const ACTIVE_ISSUED_MS = DAY_MS;
 const PRIORITY_RANK: Record<Priority, number> = { stat: 0, urgent: 1, routine: 2 };
 
 export interface LineInput {
@@ -112,6 +112,7 @@ const asCheckLine = (l: { medicine: string | null; dose: number | null; frequenc
 @Injectable()
 export class PharmacyOrdersService {
   private readonly logger = new Logger(PharmacyOrdersService.name);
+  private readonly added: ((order: PharmacyOrderDocument, lines: PharmacyLineDocument[]) => Promise<void>)[] = [];
   private readonly rechecked: ((results: RecheckResult[]) => Promise<void>)[] = [];
   private readonly rounds: PharmacyRounds;
 
@@ -338,10 +339,22 @@ export class PharmacyOrdersService {
         }),
       );
     }
+    for (const l of this.added) {
+      try {
+        await l(order, out);
+      } catch (e) {
+        this.logger.error(`An added-lines listener failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     return out;
   }
 
   // ---------- rechecking ----------
+
+  /** Listeners told of every batch of new lines (their own flags are already saved); a failure is logged. */
+  onAdded(listener: (order: PharmacyOrderDocument, lines: PharmacyLineDocument[]) => Promise<void>): void {
+    this.added.push(listener);
+  }
 
   onRechecked(listener: (results: RecheckResult[]) => Promise<void>): void {
     this.rechecked.push(listener);

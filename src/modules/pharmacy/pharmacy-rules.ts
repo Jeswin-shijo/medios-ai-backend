@@ -61,7 +61,7 @@ export interface PatientFacts {
   egfr: number | null;
   kidneyStatus: KidneyStatus;
   /** The earliest open contrast procedure near now (Scheduling's message), if any. `at` is a clinic-clock Date. */
-  contrast?: { at: Date; number: string };
+  contrast?: { at: Date; number: string; bookingId?: string };
 }
 
 const d = (key: string, kind: FlagKind, severity: Severity, text: string): FlagDraft => ({

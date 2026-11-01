@@ -44,7 +44,7 @@ export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose
     new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote),
   );
   const checks = new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, settings);
-  new PharmacyCoordinatorRegistration(registry, orders, messages, checks, m.PharmacyOrder, m.PharmacyLine, m.Clock, new PharmacyProceduresService(m.PharmacyProcedureNote, m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages)).onModuleInit();
+  new PharmacyCoordinatorRegistration(registry, orders, messages, checks, m.PharmacyOrder, m.PharmacyLine, m.Clock, new PharmacyProceduresService(m.PharmacyProcedureNote, m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote))).onModuleInit();
   registry.register({
     key: 'lab',
     messageTypes: [{ type: 'lab.resulted', agent: 'lab', description: 'x', payload: { test: 'string' } }],
