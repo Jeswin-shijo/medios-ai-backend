@@ -346,6 +346,16 @@ export class SchedulingConsultsService {
     return sent;
   }
 
+  /** Writes the page alert of an open consult when there is none (the reconcile pass). Never reopens one that exists. Returns whether it wrote. */
+  async ensureAlert(id: string): Promise<boolean> {
+    const c = await this.consults.findById(id).lean<Lean>().exec();
+    if (!c || !OPEN.includes(c.status)) return false;
+    if (await this.alerts.exists({ link: `scheduling-consult:${id}` })) return false;
+    const names = c.pagedTo?.name ? [c.pagedTo.name] : [];
+    await this.writeAlert(id, { ids: c.pagedIds ?? [], names, dutyDoctor: false });
+    return true;
+  }
+
   private async markAnnounced(id: string, status: ConsultStatus): Promise<void> {
     await this.consults.updateOne({ _id: id, status }, { $set: { announcedAt: new Date() } }).exec();
   }

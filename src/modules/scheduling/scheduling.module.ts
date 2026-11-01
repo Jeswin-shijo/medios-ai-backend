@@ -10,11 +10,13 @@ import { SettingsModule } from '../settings/settings.module';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
+import { SchedulingConflictsService } from './scheduling-conflicts.service';
 import { SchedulingConsultsService } from './scheduling-consults.service';
 import { SchedulingFollowupsService } from './scheduling-followups.service';
 import { SchedulingWaitlistService } from './scheduling-waitlist.service';
 import { SchedulingDoctorsService } from './scheduling-doctors.service';
 import { SchedulingProceduresService } from './scheduling-procedures.service';
+import { SchedulingReconcileService } from './scheduling-reconcile.service';
 import { SchedulingRosterService } from './scheduling-roster.service';
 import { SchedulingSettingsService } from './scheduling-settings.service';
 import { ConsultRequest, ConsultRequestSchema } from './schemas/consult-request.schema';
@@ -63,7 +65,9 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingWaitlistService,
     SchedulingFollowupsService,
     SchedulingConsultsService,
+    SchedulingConflictsService,
+    SchedulingReconcileService,
   ],
-  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService],
 })
 export class SchedulingModule {}

@@ -812,6 +812,13 @@ export class SchedulingProceduresService implements OnModuleInit {
 
   // ---------- messages ----------
 
+  /** Sends the message for the booking's current status again (the reconcile pass, for a booking with no announcedAt). Never throws. */
+  async reannounce(id: string): Promise<void> {
+    const b = await this.bookings.findById(id).select('status bumpedFrom').lean().exec();
+    // A bumped case is back to requested; it is told as -bumped, as when it happened.
+    if (b) await this.announce(id, b.status, b.status === 'requested' && !!b.bumpedFrom);
+  }
+
   /**
    * Sends the message for the booking's current status, when it still is `status`, then marks it sent (announcedAt).
    * A send that fails is logged: the missing announcedAt lets the reconcile pass send it again.
@@ -879,7 +886,9 @@ export class SchedulingProceduresService implements OnModuleInit {
    * Tells each team member: a notice (a page when STAT) to those with a login; for those without one, a call notice to
    * the fallback title ("Call Anitha (cath nurse): ..."). One alert per booking and member.
    */
-  private async raiseTeamAlerts(id: string): Promise<void> {
+  async raiseTeamAlerts(id: string, onlyMissing = false): Promise<void> {
+    // onlyMissing (the reconcile pass): write a notice that is not there, but never reopen one a person closed.
+    const op = onlyMissing ? '$setOnInsert' : '$set';
     const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
     if (!b || b.status !== 'booked' || !b.start || !b.room) return;
     const def = procedureByKey(b.procedure);
@@ -899,7 +908,7 @@ export class SchedulingProceduresService implements OnModuleInit {
           .updateOne(
             { link: `scheduling-call:${id}:unfilled-${t.role}` },
             {
-              $set: {
+              [op]: {
                 ...common,
                 title: `No ${skillText(t.role)} available: ${procedureName} ${b.number} at ${when}, ${roomName}`,
                 subtitle: `For ${fallback} · ${stat ? 'STAT · ' : ''}nobody with this skill is on duty and free; please find one`,
@@ -934,7 +943,7 @@ export class SchedulingProceduresService implements OnModuleInit {
           priority: stat ? 'High' : 'Medium',
         };
       }
-      await this.alerts.updateOne({ link }, { $set: { ...common, ...fields } }, { upsert: true }).exec();
+      await this.alerts.updateOne({ link }, { [op]: { ...common, ...fields } }, { upsert: true }).exec();
     }
     // Cancelled while the notices were written: leave none pending.
     const fresh = await this.bookings.findById(id).select('status').lean().exec();
@@ -946,7 +955,7 @@ export class SchedulingProceduresService implements OnModuleInit {
   }
 
   /** One "Can't book yet" alert per request, for the doctor who asked. */
-  private async raiseWaitAlert(id: string): Promise<void> {
+  async raiseWaitAlert(id: string, onlyMissing = false): Promise<void> {
     const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
     if (!b || b.status !== 'cant-book') return;
     const procedureName = procedureByKey(b.procedure)?.name ?? b.procedure;
@@ -955,7 +964,7 @@ export class SchedulingProceduresService implements OnModuleInit {
       .updateOne(
         { link: `scheduling-wait:${id}` },
         {
-          $set: {
+          [onlyMissing ? '$setOnInsert' : '$set']: {
             title: `Can't book yet: ${procedureName} (${b.priority.toUpperCase()})`,
             subtitle: `For ${b.requestedBy.name} · ${b.number} · no room and team are free in time; it is tried again as things change`,
             patientName: b.patientName,
