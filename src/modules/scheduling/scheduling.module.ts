@@ -9,6 +9,9 @@ import { OpdModule } from '../opd/opd.module';
 import { PatientsModule } from '../patients/patients.module';
 import { SettingsModule } from '../settings/settings.module';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
+import { SchedulingController } from './scheduling.controller';
+import { SchedulingScheduler } from './scheduling.scheduler';
+import { SchedulingRoomsService } from './scheduling-rooms.service';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
 import { SchedulingConflictsService } from './scheduling-conflicts.service';
@@ -59,6 +62,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     FollowUpsModule,
     TasksAlertsModule, // the alert model
   ],
+  controllers: [SchedulingController],
   providers: [
     SchedulingSettingsService,
     SchedulingRosterService,
@@ -73,7 +77,9 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingReconcileService,
     SchedulingAiService,
     SchedulingOverviewService,
+    SchedulingRoomsService,
+    SchedulingScheduler,
   ],
-  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService, SchedulingOverviewService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService, SchedulingOverviewService, SchedulingRoomsService],
 })
 export class SchedulingModule {}

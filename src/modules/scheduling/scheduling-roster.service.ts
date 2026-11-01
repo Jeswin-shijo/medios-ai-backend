@@ -135,6 +135,14 @@ export class SchedulingRosterService implements OnModuleInit {
     };
   }
 
+  /** A 400 for any key that is not a known duty title (the Coordinator's titles). */
+  async assertKnownTitles(titles: string[] | undefined): Promise<void> {
+    if (!titles?.length) return;
+    const known = new Set((await this.escalations.titles()).map((t) => t.key));
+    const unknown = [...new Set(titles)].filter((t) => !known.has(t));
+    if (unknown.length) throw new BadRequestException(`Unknown duty title: ${unknown.join(', ')}`);
+  }
+
   /** Admin only. Puts a person on a shift, or changes the entry they already have for it. */
   async setEntry(actor: Actor, input: { date: string; shift: Shift; staffId: string; departmentCode?: string; titles?: string[]; note?: string }) {
     requireAdmin(actor);

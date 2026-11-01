@@ -59,6 +59,26 @@ export class SchedulingDoctorsService {
     private readonly opd: OpdService,
   ) {}
 
+  /** OP doctors (active only on request) with their slot length and leave. */
+  async listWithProfiles(activeOnly = false) {
+    const doctors = await this.opd.listDoctors({ activeOnly });
+    const profiles = await this.profiles.find({ doctorId: { $in: doctors.map((d) => String(d.id)) } }).lean().exec();
+    const byId = new Map(profiles.map((p) => [String(p.doctorId), p]));
+    return doctors.map((d) => {
+      const p = byId.get(String(d.id));
+      return {
+        id: String(d.id),
+        name: d.name,
+        departmentCode: d.departmentCode,
+        room: d.room,
+        active: d.active,
+        userId: d.userId ?? null,
+        slotMinutes: p?.slotMinutes ?? DEFAULT_SLOT_MINUTES,
+        leave: (p?.leave ?? []).map((l) => ({ from: l.from, to: l.to, reason: l.reason ?? '' })),
+      };
+    });
+  }
+
   async profile(doctorId: string): Promise<{ slotMinutes: number; leave: LeaveRange[] }> {
     const doc = await this.profiles.findOne({ doctorId }).lean().exec();
     return {

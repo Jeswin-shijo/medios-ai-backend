@@ -224,6 +224,12 @@ export class SchedulingConsultsService {
 
   // ---------- reads ----------
 
+  /** Consults newest first, optionally of one status (at most 200). */
+  async list(status?: ConsultStatus): Promise<ConsultView[]> {
+    const rows = await this.consults.find(status ? { status } : {}).sort({ requestedAt: -1, _id: -1 }).limit(200).lean<Lean[]>().exec();
+    return Promise.all(rows.map((c) => this.view(c)));
+  }
+
   async get(id: string): Promise<ConsultView> {
     return this.view(await this.load(id));
   }

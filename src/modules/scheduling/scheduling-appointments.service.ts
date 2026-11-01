@@ -222,6 +222,15 @@ export class SchedulingAppointmentsService implements OnModuleInit {
     return { date, time: clockLabel(minutes) };
   }
 
+  /** The day's appointments, earliest first, optionally of one doctor. */
+  async list(date: string, doctorId?: string): Promise<AppointmentDocument[]> {
+    const day = this.normalise(date, '12:00 AM').date;
+    const filter: Record<string, unknown> = { date: day };
+    if (doctorId) filter.doctorId = doctorId;
+    const rows = await this.appointments.find(filter).exec();
+    return rows.sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time));
+  }
+
   /** The rules of a booking, in the order a front desk meets them. */
   private async check(doctorId: string, uhid: string, date: string, time: string, leadMinutes: number, excludeId?: string) {
     if (!(await this.doctors.isSlot(doctorId, date, time))) throw new BadRequestException("That time isn't one of this doctor's slots.");
