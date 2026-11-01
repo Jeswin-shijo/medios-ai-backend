@@ -22,6 +22,7 @@ import { RoomBlock, RoomBlockDocument } from './schemas/room-block.schema';
 import { RosterEntry, RosterEntryDocument } from './schemas/roster-entry.schema';
 import { SchedulingLock, SchedulingLockDocument } from './schemas/scheduling-lock.schema';
 import { StaffMember, StaffMemberDocument } from './schemas/staff-member.schema';
+import { WaitItem, WaitItemDocument } from './schemas/wait-item.schema';
 
 const MIN_MS = 60_000;
 const GRID_MS = 15 * MIN_MS;
@@ -90,6 +91,8 @@ export interface BumpedProcedure {
   priority: Priority;
 }
 export type BumpedListener = (bumped: BumpedProcedure) => Promise<unknown> | unknown;
+/** What tryBook keeps of each case it bumped, to tell its team, the case and the listeners afterwards. */
+type BumpedCase = BumpedProcedure & { number: string; procedure: string };
 
 type PlannedTeam = { role: Skill; staffId?: string; name?: string; unfilled?: true }[];
 type NamedPlan = Omit<Plan, 'team'> & { team: PlannedTeam };
@@ -198,6 +201,7 @@ export class SchedulingProceduresService implements OnModuleInit {
     private readonly messages: MessagesService,
     private readonly settings: SchedulingSettingsService,
     private readonly rules: RulesService,
+    @InjectModel(WaitItem.name) private readonly waitItems: Model<WaitItemDocument>,
   ) {}
 
   /** The lock relies on the unique key: make sure the index is there before the first claim. */
@@ -268,8 +272,9 @@ export class SchedulingProceduresService implements OnModuleInit {
 
   /**
    * Plans and saves one waiting request under the lock. 'busy' when another booking holds the lock (retryWaiting picks
-   * it up); 'unchanged' when the request is no longer waiting. A STAT tries the lock for up to 10 s first, bumps the
-   * planned cases in its way, and tells the waitlist about them once the lock is let go.
+   * it up); 'unchanged' when the request is no longer waiting. A STAT tries the lock for up to 10 s first and bumps the
+   * planned cases in its way. Every case actually bumped is told once the lock is let go, even when the booking then
+   * failed (Z25).
    */
   async tryBook(id: string): Promise<TryBookOutcome> {
     if (!isValidObjectId(id)) throw new NotFoundException('Procedure not found');
@@ -278,38 +283,41 @@ export class SchedulingProceduresService implements OnModuleInit {
     // A STAT waits a little for the lock; still busy, it stays requested for the next pass (never can't book).
     const until = await this.acquire(head.priority === 'stat' ? this.statLock.tries : 1);
     if (!until) return 'busy';
-    let result: { outcome: TryBookOutcome; bumped: BumpedProcedure[] };
+    const bumped: BumpedCase[] = [];
     try {
-      result = await this.bookLocked(id);
+      try {
+        return await this.bookLocked(id, bumped);
+      } finally {
+        await this.release(until);
+      }
     } finally {
-      await this.release(until);
+      // After the lock, so the waitlist's offers see the emergency in the room.
+      for (const one of bumped) await this.tellBumped(one);
     }
-    // After the lock, so the waitlist's offers see the emergency in the room.
-    for (const bumped of result.bumped) await this.tellBumped(bumped);
-    return result.outcome;
   }
 
-  /** tryBook's work, under the lock. A STAT always gets a plan, so it never reaches can't book. */
-  private async bookLocked(id: string): Promise<{ outcome: TryBookOutcome; bumped: BumpedProcedure[] }> {
+  /**
+   * tryBook's work, under the lock. A STAT always gets a plan, so it never reaches can't book. Each case it bumps is
+   * added to `bumped` the moment its bump is saved, so tryBook tells it whatever happens next.
+   */
+  private async bookLocked(id: string, bumped: BumpedCase[]): Promise<TryBookOutcome> {
     const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
     if (!b) throw new NotFoundException('Procedure not found');
-    if (!WAITING.includes(b.status)) return { outcome: 'unchanged', bumped: [] };
+    if (!WAITING.includes(b.status)) return 'unchanged';
     let plan = await this.plan(b);
     // A STAT first moves the planned cases it displaces back to waiting. One that has just been started (Start runs
     // outside the lock) holds its room and team after all: plan again around it. Each such round sees one more case
     // in progress for good, so this ends.
-    const bumped: Lean<ProcedureBooking>[] = [];
     while (plan?.bump.length) {
       let started = false;
       for (const other of plan.bump) {
         const r = await this.bump(other, b);
         if (r === 'started') started = true;
-        else if (r) bumped.push(r);
+        else if (r) bumped.push({ bookingId: String(r._id), priority: r.priority, number: r.number, procedure: r.procedure });
       }
       if (!started) break;
       plan = await this.plan(b);
     }
-    const moved = bumped.map((x) => ({ bookingId: String(x._id), priority: x.priority }));
     if (plan) {
       const room = roomByKey(plan.room);
       const at = clinicNow();
@@ -328,29 +336,29 @@ export class SchedulingProceduresService implements OnModuleInit {
           },
         )
         .exec();
-      if (!saved.modifiedCount) return { outcome: 'unchanged', bumped: moved };
+      if (!saved.modifiedCount) return 'unchanged';
       await this.completeWaitAlert(id);
       await this.announce(id, 'booked');
       await this.raiseTeamAlerts(id);
-      return { outcome: 'booked', bumped: moved };
+      return 'booked';
     }
-    if (b.status === 'cant-book') return { outcome: 'cant-book', bumped: moved };
+    if (b.status === 'cant-book') return 'cant-book';
     const waiting = await this.bookings
       .updateOne(
         { _id: b._id, status: 'requested' },
         { $set: { status: 'cant-book' }, $push: { history: { at: clinicNow(), what: "Can't book yet", by: 'Scheduling Agent' } }, $unset: { announcedAt: '' } },
       )
       .exec();
-    if (!waiting.modifiedCount) return { outcome: 'unchanged', bumped: moved };
+    if (!waiting.modifiedCount) return 'unchanged';
     await this.announce(id, 'cant-book');
     await this.raiseWaitAlert(id);
-    return { outcome: 'cant-book', bumped: moved };
+    return 'cant-book';
   }
 
   /**
    * Moves one planned case back to waiting for an emergency (under the lock): status requested, where it was in
-   * bumpedFrom, its room, time and team let go, its team told, and -bumped sent. 'started' when it began meanwhile
-   * (it then keeps its room and team); null when it is no longer booked for another reason.
+   * bumpedFrom, its room, time and team let go. tryBook tells it afterwards (tellBumped). 'started' when it began
+   * meanwhile (it then keeps its room and team); null when it is no longer booked for another reason.
    */
   private async bump(id: string, by: Lean<ProcedureBooking>): Promise<Lean<ProcedureBooking> | 'started' | null> {
     const old = isValidObjectId(id) ? await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec() : null;
@@ -370,19 +378,35 @@ export class SchedulingProceduresService implements OnModuleInit {
       const now = await this.bookings.findById(id).select('status').lean().exec();
       return now?.status === 'in-progress' ? 'started' : null;
     }
-    const procedureName = procedureByKey(old.procedure)?.name ?? old.procedure;
-    await this.alerts
-      .updateMany(
-        { link: { $regex: `^scheduling-(team|page|call):${id}:` } },
-        { $set: { title: `Bumped: ${procedureName} ${old.number} moved to the waitlist`, status: 'Pending' } },
-      )
-      .exec();
-    await this.announce(id, 'requested', true);
     return old;
   }
 
+  /**
+   * Tells everyone about one bumped case: its old team notices say so, -bumped goes to the case, Lab and Pharmacy,
+   * and the listeners (the waitlist) hear of it. Never throws: each step that fails is logged and the next still runs.
+   */
+  private async tellBumped(one: BumpedCase): Promise<void> {
+    const procedureName = procedureByKey(one.procedure)?.name ?? one.procedure;
+    try {
+      await this.alerts
+        .updateMany(
+          { link: { $regex: `^scheduling-(team|page|call):${one.bookingId}:` } },
+          { $set: { title: `Bumped: ${procedureName} ${one.number} moved to the waitlist`, status: 'Pending' } },
+        )
+        .exec();
+    } catch (e) {
+      this.logger.error(`Retitling the notices of bumped ${one.number} failed: ${(e as Error).message}`);
+    }
+    try {
+      await this.announce(one.bookingId, 'requested', true);
+    } catch (e) {
+      this.logger.error(`Announcing bumped ${one.number} failed: ${(e as Error).message}`);
+    }
+    await this.notifyBumped({ bookingId: one.bookingId, priority: one.priority });
+  }
+
   /** Hands a bumped case to the listeners (the waitlist). A failing listener is logged, never fatal. */
-  private async tellBumped(bumped: BumpedProcedure): Promise<void> {
+  private async notifyBumped(bumped: BumpedProcedure): Promise<void> {
     for (const listener of this.onBumped) {
       try {
         await listener(bumped);
@@ -390,6 +414,22 @@ export class SchedulingProceduresService implements OnModuleInit {
         this.logger.error(`A bumped-procedure listener failed for ${bumped.bookingId}: ${(e as Error).message}`);
       }
     }
+  }
+
+  /**
+   * A bumped case (requested, with bumpedFrom) that has no open wait item never reached the waitlist (a listener
+   * failed): the listeners are told again; their add is idempotent. It is never booked here (Z25, spec 4.6).
+   */
+  private async healBumped(): Promise<void> {
+    const stranded = await this.bookings.find({ status: 'requested', bumpedFrom: { $exists: true } }).select('_id priority').lean().exec();
+    if (!stranded.length) return;
+    const listed = await this.waitItems
+      .find({ kind: 'procedure', status: 'open', refId: { $in: stranded.map((x) => x._id) } })
+      .select('refId')
+      .lean()
+      .exec();
+    const open = new Set(listed.map((i) => String(i.refId)));
+    for (const x of stranded) if (!open.has(String(x._id))) await this.notifyBumped({ bookingId: String(x._id), priority: x.priority });
   }
 
   /**
@@ -429,9 +469,11 @@ export class SchedulingProceduresService implements OnModuleInit {
 
   /**
    * Tries every waiting request again, STATs first, then oldest first: every can't-book, and requests left waiting by a
-   * busy lock. A bumped case is left alone: a person re-books it from the waitlist (spec 4.6). Returns how many booked.
+   * busy lock. A bumped case is never booked here: a person re-books it from the waitlist (spec 4.6); one missing from
+   * the waitlist is put back on it first. Returns how many booked.
    */
   async retryWaiting(): Promise<number> {
+    await this.healBumped();
     const young = new Date(Date.now() - REQUESTED_GRACE_MS);
     const found = await this.bookings
       .find({ $or: [{ status: 'cant-book' }, { status: 'requested', createdAt: { $lte: young }, bumpedFrom: { $exists: false } }] })

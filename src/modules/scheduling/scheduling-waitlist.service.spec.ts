@@ -89,7 +89,7 @@ describe('SchedulingWaitlistService', () => {
     procedures = new SchedulingProceduresService(
       m.ProcedureBooking, m.RoomBlock, m.StaffMember, m.RosterEntry, m.Appointment, m.OpDoctor, m.SchedulingLock,
       m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, new SchedulingSettingsService(settingsService),
-      new RulesService(registry, settingsService, events),
+      new RulesService(registry, settingsService, events), m.WaitItem,
     );
     waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, procedures);
     waitlist.onModuleInit();

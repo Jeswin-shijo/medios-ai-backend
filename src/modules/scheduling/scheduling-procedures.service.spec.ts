@@ -92,7 +92,7 @@ describe('SchedulingProceduresService', () => {
     rules = new RulesService(registry, settingsService, events);
     procedures = new SchedulingProceduresService(
       m.ProcedureBooking, m.RoomBlock, m.StaffMember, m.RosterEntry, m.Appointment, m.OpDoctor, m.SchedulingLock,
-      m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, settings, rules,
+      m.CoordinatorCounter, m.TaskAlertItem, new PatientsService(m.Patient), cases, messages, settings, rules, m.WaitItem,
     );
     // The real waitlist, so a bumped case is seen landing on it.
     const opd = new OpdService(m.Department, m.OpDoctor, settingsService);
@@ -613,5 +613,99 @@ describe('SchedulingProceduresService', () => {
     assert.deepEqual([s.status, u.status], ['booked', 'booked']);
     assert.ok(ms(s.start) < ms(u.start));
     assert.equal((await sent('scheduling.procedure-bumped')).length, 0);
+  });
+
+  // ---------- a bumped case always reaches the waitlist (Ruling Z25) ----------
+
+  test('the STAT save fails after a bump: the bumped case is still told and lands on the waitlist', async () => {
+    await cathTeam();
+    const routine = await ask();
+    mock.timers.tick(60 * MIN); // 08:00
+    // The STAT's own save (the first "booked" write from here on) fails once.
+    const original = m.ProcedureBooking.updateOne.bind(m.ProcedureBooking);
+    let failed = false;
+    const save = mock.method(m.ProcedureBooking, 'updateOne', (filter: any, update: any, ...rest: any[]) => {
+      if (!failed && update?.$set?.status === 'booked') {
+        failed = true;
+        return { exec: async () => Promise.reject(new Error('write failed')) };
+      }
+      return (original as any)(filter, update, ...rest);
+    });
+    try {
+      await assert.rejects(procedures.activateCathLab(DOC, await otherPatient()), /write failed/);
+    } finally {
+      save.mock.restore();
+    }
+    assert.ok(failed, 'the save was reached');
+    assert.equal(await m.SchedulingLock.countDocuments(), 0, 'the lock is let go');
+
+    const bumped = await procedures.get(routine.id);
+    assert.equal(bumped.status, 'requested');
+    const items = (await m.WaitItem.find({ kind: 'procedure', refId: routine.id }).lean()) as any[];
+    assert.deepEqual(items.map((i) => [i.reason, i.priority, i.status]), [['bumped', 'routine', 'open']]);
+    assert.deepEqual((await sent('scheduling.procedure-bumped')).map((x) => x.payload.bookingId), [routine.id]);
+    assert.equal((await alert(`scheduling-team:${routine.id}:${arun._id}`)).title, 'Bumped: Coronary angiography PR-0001 moved to the waitlist');
+
+    // The STAT itself stays requested and is booked by the next pass; the bumped case is left for a person.
+    const stat = (await m.ProcedureBooking.findOne({ priority: 'stat' }).lean())!;
+    assert.equal(stat.status, 'requested');
+    mock.timers.tick(31_000);
+    assert.equal(await procedures.retryWaiting(), 1);
+    assert.equal((await procedures.get(String(stat._id))).status, 'booked');
+    assert.equal((await procedures.get(routine.id)).status, 'requested');
+  });
+
+  test('retryWaiting puts a bumped case with no open wait item on the waitlist, and never books it', async () => {
+    await cathTeam();
+    const routine = await ask();
+    mock.timers.tick(60 * MIN); // 08:00
+    // The waitlist fails to add the item once (its listener error is only logged).
+    const create = m.WaitItem.create.bind(m.WaitItem);
+    let refused = false;
+    const add = mock.method(m.WaitItem, 'create', (...args: any[]) => {
+      if (!refused) {
+        refused = true;
+        return Promise.reject(new Error('waitlist unavailable'));
+      }
+      return (create as any)(...args);
+    });
+    try {
+      const stat = await procedures.activateCathLab(DOC, await otherPatient());
+      assert.equal(stat.status, 'booked');
+    } finally {
+      add.mock.restore();
+    }
+    assert.ok(refused);
+    assert.equal(await m.WaitItem.countDocuments(), 0, 'stranded: requested, bumped, with no wait item');
+    assert.equal((await procedures.get(routine.id)).status, 'requested');
+
+    const told: string[] = [];
+    procedures.onBumped.push((b) => void told.push(b.bookingId));
+    mock.timers.tick(31_000);
+    assert.equal(await procedures.retryWaiting(), 0, 'nothing is booked');
+    assert.deepEqual(told, [routine.id], 'the listeners are told again');
+    const items = (await m.WaitItem.find({}).lean()) as any[];
+    assert.deepEqual(items.map((i) => [String(i.refId), i.kind, i.reason, i.priority, i.status]), [[routine.id, 'procedure', 'bumped', 'routine', 'open']]);
+    assert.equal(items[0].offered.length, 2);
+    const after = await procedures.get(routine.id);
+    assert.deepEqual([after.status, after.start], ['requested', null], 'a person re-books it from the waitlist');
+  });
+
+  test('retryWaiting leaves alone a bumped case that has an open wait item', async () => {
+    await cathTeam();
+    const routine = await ask();
+    mock.timers.tick(60 * MIN); // 08:00
+    await procedures.activateCathLab(DOC, await otherPatient());
+    const before = (await m.WaitItem.find({}).lean()) as any[];
+    assert.equal(before.length, 1);
+
+    const told: string[] = [];
+    procedures.onBumped.push((b) => void told.push(b.bookingId));
+    mock.timers.tick(31_000);
+    assert.equal(await procedures.retryWaiting(), 0);
+    assert.deepEqual(told, [], 'not told again');
+    const after = (await m.WaitItem.find({}).lean()) as any[];
+    assert.deepEqual(after.map((i) => [String(i._id), JSON.stringify(i.offered), i.status]), before.map((i) => [String(i._id), JSON.stringify(i.offered), i.status]));
+    assert.equal((await procedures.get(routine.id)).status, 'requested');
   });
 });
