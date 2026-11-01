@@ -277,4 +277,78 @@ describe('SchedulingConsultsService', () => {
     assert.equal((await m.ConsultRequest.findById(v.id).lean())!.status, 'cancelled');
     assert.equal((await m.ConsultRequest.findById(seen.id).lean())!.status, 'seen');
   });
+
+  test('a failed consult-requested send never strands the consult: it is paged, the alert exists, announcedAt is unset', async () => {
+    await entry(arun._id, 'on-call');
+    const real = messages.send.bind(messages);
+    const send = mock.method(messages, 'send', (input: any) => {
+      if (input.type === 'scheduling.consult-requested') throw new Error('boom');
+      return real(input);
+    });
+    const v = await ask('stat');
+    assert.equal(v.status, 'paged');
+    assert.equal(v.number, 'CO-0001');
+    assert.ok(await alert(`scheduling-consult:${v.id}`), 'the page alert exists');
+    assert.equal(await clockOf(v.id), null, 'no clock yet');
+    assert.equal((await m.ConsultRequest.findById(v.id).lean())!.announcedAt, undefined);
+    assert.equal(await m.ConsultRequest.countDocuments({}), 1, 'no duplicate');
+    send.mock.restore();
+
+    // The reconcile pass re-announces: the clock starts and announcedAt is set.
+    assert.equal(await consults.announce(v.id), true);
+    assert.equal((await clockOf(v.id)).state, 'running');
+    assert.ok((await m.ConsultRequest.findById(v.id).lean())!.announcedAt);
+    assert.equal((await sent('scheduling.consult-requested')).length, 1);
+    assert.equal((await sent('scheduling.consult-paged')).length, 1);
+  });
+
+  test('a status change unsets announcedAt until its message is sent', async () => {
+    await entry(arun._id, 'on-call');
+    const v = await ask('urgent');
+    assert.ok((await m.ConsultRequest.findById(v.id).lean())!.announcedAt);
+    const real = messages.send.bind(messages);
+    const send = mock.method(messages, 'send', () => {
+      throw new Error('boom');
+    });
+    await consults.accept(ADMIN, v.id);
+    assert.equal((await m.ConsultRequest.findById(v.id).lean())!.announcedAt, undefined);
+    send.mock.restore();
+    assert.equal(await consults.announce(v.id), true);
+    assert.ok((await m.ConsultRequest.findById(v.id).lean())!.announcedAt);
+  });
+
+  test('escalate, then Seen: the escalation is resolved with "Consult seen" and the alert is completed', async () => {
+    await entry(arun._id, 'on-call');
+    const v = await ask('stat');
+    mock.timers.tick(31 * MIN);
+    assert.equal(await clocks.checkDue(new Date()), 1);
+    const link = `scheduling-consult:${v.id}`;
+    assert.equal(await m.TaskAlertItem.countDocuments({ link }), 1, 'the escalation took over the one alert');
+    assert.ok((await alert(link)).escalation, 'the alert carries the escalation');
+    await consults.seen({ id: arunUser, name: 'Dr. Arun', role: UserRole.DOCTOR }, v.id);
+    const e = (await m.Escalation.findOne({ alertLink: link }).lean()) as any;
+    assert.equal(e.state, 'acknowledged');
+    assert.equal(e.ackByName, 'Consult seen');
+    assert.equal((await alert(link)).status, 'Completed');
+  });
+
+  test('a re-page after an escalation changes only the subtitle and who is paged', async () => {
+    await entry(arun._id, 'on-call');
+    const v = await ask('stat');
+    mock.timers.tick(31 * MIN);
+    await clocks.checkDue(new Date());
+    const before = await alert(`scheduling-consult:${v.id}`);
+    const cardUser = await login('Dr. Cardio2');
+    await staff('Dr. Cardio2', ['cardiologist'], 'CARD', cardUser);
+    const r = await consults.repage(ER_DOC, v.id, cardUser);
+    const after = await alert(`scheduling-consult:${v.id}`);
+    assert.equal(after.title, before.title);
+    assert.match(after.title, /^Escalated to/);
+    assert.deepEqual([after.status, after.priority, after.category], [before.status, before.priority, before.category]);
+    assert.deepEqual(after.escalation, before.escalation);
+    assert.match(after.subtitle, /^For Dr\. Cardio2 · CO-0001 · see within /);
+    assert.equal(r.status, 'paged');
+    assert.deepEqual(r.pagedTo, { id: cardUser, name: 'Dr. Cardio2' });
+    assert.equal(await m.Escalation.countDocuments({}), 1);
+  });
 });

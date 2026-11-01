@@ -25,6 +25,8 @@ export class ConsultRequest {
   @Prop({ required: true, type: Date }) dueAt: Date;
   @Prop({ required: true, type: { id: String, name: String }, _id: false }) requestedBy: { id: string; name: string };
   @Prop({ required: true, type: Date }) requestedAt: Date;
+  /** When the message for the current status was sent; unset while it is not (the reconcile pass re-sends). */
+  @Prop({ type: Date }) announcedAt?: Date;
   @Prop({ type: Date }) acceptedAt?: Date;
   @Prop({ type: Date }) seenAt?: Date;
   @Prop({ type: { at: Date, by: String, reason: String }, _id: false }) cancelled?: { at: Date; by: string; reason: string };

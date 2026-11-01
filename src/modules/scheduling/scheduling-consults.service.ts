@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow, displayDateTime } from '../../common/utils/clinic-time';
@@ -27,7 +27,6 @@ const CASE_PRIORITY: Record<Priority, CasePriority> = { stat: 'high', urgent: 'm
 const OPEN: ConsultStatus[] = ['paged', 'accepted'];
 const AGENT = 'Scheduling Agent';
 const CHANGED = 'This consult has just changed; please reload.';
-const LEAVING = ['home', 'transfer', 'left-against-advice', 'died'];
 
 export interface ConsultRequestInput {
   patientId: string;
@@ -71,6 +70,8 @@ const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
  */
 @Injectable()
 export class SchedulingConsultsService {
+  private readonly logger = new Logger(SchedulingConsultsService.name);
+
   constructor(
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
     @InjectModel(StaffMember.name) private readonly staff: Model<StaffMemberDocument>,
@@ -122,20 +123,21 @@ export class SchedulingConsultsService {
       dueAt: new Date(Date.now() + target * MIN_MS),
     });
     const id = String(created._id);
-    await this.announce(id, 'scheduling.consult-requested', 'requested');
-    await this.page(id);
+    // A failed send never strands the consult: it is still paged, and the reconcile pass re-sends (announce).
+    const sent = await this.trySend(id, 'scheduling.consult-requested', 'requested');
+    await this.page(id, sent);
     return this.get(id);
   }
 
   /** Pages the department's on-call doctor, else the Duty doctor holders; writes the alert and sends consult-paged. */
-  async page(id: string): Promise<ConsultView> {
+  async page(id: string, startSent = true): Promise<ConsultView> {
     const c = await this.load(id);
     if (!OPEN.includes(c.status)) return this.get(id);
     const onCall = await this.roster.onCall(c.departmentCode, clinicNow());
     let target: Target;
     if (onCall?.userId) target = { ids: [onCall.userId], names: [onCall.name], dutyDoctor: false };
     else target = { ...(await this.escalations.holders('duty-doctor')), dutyDoctor: true };
-    await this.setPaged(c, target);
+    await this.setPaged(c, target, false, startSent);
     return this.get(id);
   }
 
@@ -150,17 +152,18 @@ export class SchedulingConsultsService {
     return this.get(id);
   }
 
-  private async setPaged(c: Lean, target: Target, again = false): Promise<void> {
+  private async setPaged(c: Lean, target: Target, again = false, startSent = true): Promise<void> {
     const id = String(c._id);
     const res = await this.consults
       .updateOne(
         { _id: c._id, status: { $in: OPEN } },
-        { $set: { status: 'paged', pagedTo: { id: target.ids[0] ?? '', name: target.names[0] ?? '' }, pagedIds: target.ids }, $unset: { acceptedAt: '' } },
+        { $set: { status: 'paged', pagedTo: { id: target.ids[0] ?? '', name: target.names[0] ?? '' }, pagedIds: target.ids }, $unset: { acceptedAt: '', announcedAt: '' } },
       )
       .exec();
     if (!res.matchedCount) throw new ConflictException(CHANGED);
-    await this.writeAlert(id, target);
-    await this.announce(id, 'scheduling.consult-paged', 'paged', again ? `:${Date.now()}` : ':first');
+    await this.writeAlert(id, target, again);
+    const sent = await this.trySend(id, 'scheduling.consult-paged', 'paged', again ? `:${Date.now()}` : ':first');
+    if (sent && startSent) await this.markAnnounced(id, 'paged');
   }
 
   // ---------- the doctor's side ----------
@@ -170,9 +173,9 @@ export class SchedulingConsultsService {
     const c = await this.load(id);
     await this.requireDoctorSide(actor, c);
     if (c.status !== 'paged') throw new ConflictException(CHANGED);
-    const res = await this.consults.updateOne({ _id: c._id, status: 'paged' }, { $set: { status: 'accepted', acceptedAt: new Date() } }).exec();
+    const res = await this.consults.updateOne({ _id: c._id, status: 'paged' }, { $set: { status: 'accepted', acceptedAt: new Date() }, $unset: { announcedAt: '' } }).exec();
     if (!res.modifiedCount) throw new ConflictException(CHANGED);
-    await this.announce(id, 'scheduling.consult-accepted', 'accepted');
+    if (await this.trySend(id, 'scheduling.consult-accepted', 'accepted')) await this.markAnnounced(id, 'accepted');
     return this.get(id);
   }
 
@@ -181,10 +184,10 @@ export class SchedulingConsultsService {
     const c = await this.load(id);
     await this.requireDoctorSide(actor, c);
     if (!OPEN.includes(c.status)) throw new ConflictException(CHANGED);
-    const res = await this.consults.updateOne({ _id: c._id, status: { $in: OPEN } }, { $set: { status: 'seen', seenAt: new Date() } }).exec();
+    const res = await this.consults.updateOne({ _id: c._id, status: { $in: OPEN } }, { $set: { status: 'seen', seenAt: new Date() }, $unset: { announcedAt: '' } }).exec();
     if (!res.modifiedCount) throw new ConflictException(CHANGED);
     await this.completeAlert(id);
-    await this.announce(id, 'scheduling.consult-seen', 'seen');
+    if (await this.trySend(id, 'scheduling.consult-seen', 'seen')) await this.markAnnounced(id, 'seen');
     return this.get(id);
   }
 
@@ -211,11 +214,11 @@ export class SchedulingConsultsService {
   private async cancelOne(c: Lean, by: string, reason: string): Promise<boolean> {
     const id = String(c._id);
     const res = await this.consults
-      .updateOne({ _id: c._id, status: { $in: OPEN } }, { $set: { status: 'cancelled', cancelled: { at: new Date(), by, reason } } })
+      .updateOne({ _id: c._id, status: { $in: OPEN } }, { $set: { status: 'cancelled', cancelled: { at: new Date(), by, reason } }, $unset: { announcedAt: '' } })
       .exec();
     if (!res.modifiedCount) return false;
     await this.completeAlert(id);
-    await this.announce(id, 'scheduling.consult-cancelled', 'cancelled');
+    if (await this.trySend(id, 'scheduling.consult-cancelled', 'cancelled')) await this.markAnnounced(id, 'cancelled');
     return true;
   }
 
@@ -291,18 +294,24 @@ export class SchedulingConsultsService {
   }
 
   /** One alert per consult, shared with the clock (the escalation takes it over). Left closed if the consult closed meanwhile. */
-  private async writeAlert(id: string, target: Target): Promise<void> {
+  private async writeAlert(id: string, target: Target, again = false): Promise<void> {
     const c = await this.load(id);
     const department = await this.departmentName(c.departmentCode);
     const minutes = Math.max(0, Math.round((new Date(c.dueAt).getTime() - Date.now()) / MIN_MS));
     const names = target.names.join(', ') + (target.dutyDoctor ? ' (Duty doctor)' : '');
+    const subtitle = `For ${names} · ${c.number} · see within ${minutes} min`;
+    // A re-page after an escalation changes only the subtitle: the escalation keeps the title, status and its fields (Z27).
+    if (again) {
+      const kept = await this.alerts.updateOne({ link: `scheduling-consult:${id}`, escalation: { $exists: true, $ne: null } }, { $set: { subtitle } }).exec();
+      if (kept.matchedCount) return;
+    }
     await this.alerts
       .updateOne(
         { link: `scheduling-consult:${id}` },
         {
           $set: {
             title: `Consult: ${department} (${c.priority.toUpperCase()})`,
-            subtitle: `For ${names} · ${c.number} · see within ${minutes} min`,
+            subtitle,
             patientName: c.patientName,
             uhid: c.patientUhid,
             type: 'System',
@@ -323,8 +332,37 @@ export class SchedulingConsultsService {
     await this.alerts.updateOne({ link: `scheduling-consult:${id}` }, { $set: { status: 'Completed' } }).exec();
   }
 
+  /**
+   * Sends the message for the consult's current status, after consult-requested (which starts the clock) when that is
+   * not already sent; both are deduped, so a repeat is safe. Marks announcedAt only when everything went. The reconcile
+   * pass calls this for a consult with no announcedAt. Never throws.
+   */
+  async announce(id: string): Promise<boolean> {
+    const c = await this.consults.findById(id).lean<Lean>().exec();
+    if (!c) return false;
+    const type = c.status === 'accepted' ? 'accepted' : c.status;
+    const sent = (await this.trySend(id, 'scheduling.consult-requested', 'requested')) && (await this.trySend(id, `scheduling.consult-${type}`, type, type === 'paged' ? ':first' : ''));
+    if (sent) await this.markAnnounced(id, c.status);
+    return sent;
+  }
+
+  private async markAnnounced(id: string, status: ConsultStatus): Promise<void> {
+    await this.consults.updateOne({ _id: id, status }, { $set: { announcedAt: new Date() } }).exec();
+  }
+
+  /** One consult message. A failure is logged (its class only) and reported as false; it never reaches the caller. */
+  private async trySend(id: string, type: string, what: string, keySuffix = ''): Promise<boolean> {
+    try {
+      await this.send(id, type, what, keySuffix);
+      return true;
+    } catch (e) {
+      this.logger.error(`Sending ${type} for consult ${id} failed; the reconcile pass will send it: ${(e as Error).name}`);
+      return false;
+    }
+  }
+
   /** Every consult message carries dueAt; the summary never holds a name. */
-  private async announce(id: string, type: string, what: string, keySuffix = ''): Promise<void> {
+  private async send(id: string, type: string, what: string, keySuffix: string): Promise<void> {
     const c = await this.load(id);
     const department = await this.departmentName(c.departmentCode);
     await this.messages.send({
