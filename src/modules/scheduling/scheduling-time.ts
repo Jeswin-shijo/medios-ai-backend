@@ -51,7 +51,7 @@ export function doctorSlots(input: DoctorSlotsInput): number[] {
   if (notBefore) {
     const nb = parseIsoDay(`${notBefore.getFullYear()}-${String(notBefore.getMonth() + 1).padStart(2, '0')}-${String(notBefore.getDate()).padStart(2, '0')}`);
     if (nb.getTime() > day.getTime()) return [];
-    if (nb.getTime() === day.getTime()) floor = notBefore.getHours() * 60 + notBefore.getMinutes();
+    if (nb.getTime() === day.getTime()) floor = notBefore.getHours() * 60 + notBefore.getMinutes() + (notBefore.getSeconds() > 0 || notBefore.getMilliseconds() > 0 ? 1 : 0);
   }
   const taken = new Set(takenMinutes);
   const out = new Set<number>();

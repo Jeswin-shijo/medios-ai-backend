@@ -21,6 +21,10 @@ describe('shift windows', () => {
     assert.ok(covers(w, at('2026-09-27', 7, 59), at('2026-09-27', 7, 59)));
     assert.ok(!covers(w, at('2026-09-27', 8), at('2026-09-27', 8)));
   });
+  test('covers is true at the exact shift start instant', () => {
+    const w = shiftWindow('2026-09-26', 'evening');
+    assert.ok(covers(w, at('2026-09-26', 14), at('2026-09-26', 14)));
+  });
   test('morning is half-open and a range must fit inside', () => {
     const w = shiftWindow('2026-09-26', 'morning');
     assert.ok(covers(w, at('2026-09-26', 8), at('2026-09-26', 14)));
@@ -50,6 +54,19 @@ describe('doctorSlots', () => {
     assert.equal(doctorSlots({ ...base, date: '2026-09-26', notBefore: at('2026-09-26', 10, 5) })[0], 615);
     assert.deepEqual(doctorSlots({ ...base, date: '2026-09-26', notBefore: at('2026-09-27', 8) }), []);
     assert.equal(doctorSlots({ ...base, date: '2026-09-26', notBefore: at('2026-09-25', 23) }).length, 16);
+  });
+  test('notBefore 10:00:30 starts at 10:15; exactly 10:00:00 keeps 10:00', () => {
+    const nb = at('2026-09-26', 10, 0); nb.setSeconds(30);
+    assert.equal(doctorSlots({ ...base, date: '2026-09-26', notBefore: nb })[0], 615);
+    assert.equal(doctorSlots({ ...base, date: '2026-09-26', notBefore: at('2026-09-26', 10, 0) })[0], 600);
+    const ms = at('2026-09-26', 10, 0); ms.setMilliseconds(1);
+    assert.equal(doctorSlots({ ...base, date: '2026-09-26', notBefore: ms })[0], 615);
+  });
+  test('leave boundaries: from is out, day after to has slots', () => {
+    const leave = [{ from: '2026-09-26', to: '2026-09-28' }];
+    assert.deepEqual(doctorSlots({ ...base, date: '2026-09-26', leave }), []);
+    assert.deepEqual(doctorSlots({ ...base, date: '2026-09-28', leave }), []);
+    assert.equal(doctorSlots({ ...base, date: '2026-09-29', leave }).length, 16);
   });
   test('slots must fit before the session end; overlapping sessions are de-duplicated', () => {
     const s = doctorSlots({ ...base, date: '2026-09-26', slotMinutes: 25, sessions: [{ days: [6], start: '09:00', end: '10:00' }, { days: [6], start: '09:25', end: '10:15' }] });
