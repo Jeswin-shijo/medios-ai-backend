@@ -12,6 +12,7 @@ import { DoctorProfile, DoctorProfileDocument } from './schemas/doctor-profile.s
 
 export const DEFAULT_SLOT_MINUTES = 15;
 const SEARCH_DAYS = 14;
+export const FRONT_DESK_LEAD_MINUTES = 15;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface LeaveRange {
@@ -122,13 +123,14 @@ export class SchedulingDoctorsService {
     return found.sort((a, b) => a.date.localeCompare(b.date) || clockMinutes(a.time) - clockMinutes(b.time));
   }
 
-  /** Free slots in the next 14 days from `from` (never before `from`, nor before the clinic's present moment), earliest first. */
+  /** Free slots in the next 14 days from `from` (never before `from`, nor before clinicNow + 15 minutes), earliest first. */
   async freeSlots(doctorId: string, from: Date, count: number, excludeId?: string): Promise<FreeSlot[]> {
     const doctor = await this.opd.getDoctor(doctorId);
     if (!doctor.active || count <= 0) return [];
     const { slotMinutes, leave } = await this.profile(doctorId);
-    const now = clinicNow();
-    const notBefore = from.getTime() < now.getTime() ? now : from;
+    // The front-desk lead is a floor, so no slot is offered that book would refuse. Callers with a longer lead (calls) pass a later `from`.
+    const floor = new Date(clinicNow().getTime() + FRONT_DESK_LEAD_MINUTES * 60_000);
+    const notBefore = from.getTime() < floor.getTime() ? floor : from;
     const firstDay = isoDate(notBefore);
     const out: FreeSlot[] = [];
     for (let i = 0; i < SEARCH_DAYS && out.length < count; i++) {

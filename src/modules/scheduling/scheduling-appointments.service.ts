@@ -8,12 +8,11 @@ import { Appointment, AppointmentDocument } from '../appointments/schemas/appoin
 import { OpdService } from '../opd/opd.service';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { UserRole } from '../users/schemas/user.schema';
-import { DEFAULT_SLOT_MINUTES, LeaveListener, SchedulingDoctorsService } from './scheduling-doctors.service';
+import { DEFAULT_SLOT_MINUTES, FRONT_DESK_LEAD_MINUTES, LeaveListener, SchedulingDoctorsService } from './scheduling-doctors.service';
 
 const BOOK_ROLES = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.STAFF];
 /** Statuses of an appointment a person may cancel or move. */
 const CHANGEABLE = ['Scheduled', 'Checked In', 'Waiting'];
-const FRONT_DESK_LEAD_MINUTES = 15;
 const JUST_TAKEN = 'That slot was just taken';
 
 export interface BookInput {

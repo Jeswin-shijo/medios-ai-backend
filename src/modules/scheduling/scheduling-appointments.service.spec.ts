@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, test } from 'node:test';
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { after, before, beforeEach, describe, mock, test } from 'node:test';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { appointmentStart, clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AppointmentEvents } from '../appointments/appointment-events';
@@ -20,6 +20,19 @@ const dayPlus = (n: number) => {
   d.setDate(d.getDate() + n);
   return isoDate(d);
 };
+/** Pins the clock to 2026-10-20 10:15:00.000 local, with no CLINIC_DATE, while `fn` runs. */
+const NOW = () => new Date(2026, 9, 20, 10, 15, 0, 0);
+async function withClockAsync<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.CLINIC_DATE;
+  delete process.env.CLINIC_DATE;
+  mock.timers.enable({ apis: ['Date'], now: NOW() });
+  try {
+    return await fn();
+  } finally {
+    mock.timers.reset();
+    if (saved !== undefined) process.env.CLINIC_DATE = saved;
+  }
+}
 const ALL_WEEK = [{ days: [0, 1, 2, 3, 4, 5, 6], start: '09:00', end: '13:00' }];
 
 describe('Scheduling appointments by doctor', () => {
@@ -70,6 +83,10 @@ describe('Scheduling appointments by doctor', () => {
       const minutes = appointmentStart(s.date, s.time).getMinutes();
       assert.ok(minutes === 0 || minutes === 30, 'slots follow the 30-minute length');
     }
+    // The front-desk lead is a floor: with the clock at exactly 10:15:00 and 15-minute slots the first slot is 10:30, whatever `from` says.
+    await doctors.setProfile(ADMIN, String(shajin._id), { slotMinutes: 15 });
+    const early = await withClockAsync(() => doctors.freeSlots(String(shajin._id), new Date(2026, 9, 20, 9, 0), 2));
+    assert.deepEqual(early.map((x) => [x.date, x.time]), [['2026-10-20', '10:30 AM'], ['2026-10-20', '10:45 AM']]);
     // A taken slot disappears, and freeing it (by excluding that appointment) brings it back.
     const target = slots[slots.length - 1];
     const p = await patient('U1', 'Asha');
@@ -196,5 +213,65 @@ describe('Scheduling appointments by doctor', () => {
     assert.equal(String((await doctors.doctorForPatient(p3)).id), String(shajin._id));
     await m.OpDoctor.updateOne({ _id: other._id }, { $set: { active: false } });
     assert.equal(String((await doctors.doctorForPatient(p1)).id), String(shajin._id)); // inactive is skipped
+  });
+  test('book enforces the 15-minute front-desk lead exactly (clock at 10:15:00)', async () => {
+    const p = await patient('U1', 'Asha');
+    const id = String(shajin._id);
+    const tryBook = (date: string, time: string) => withClockAsync(() => book(p, shajin, date, time));
+    const lead = (e: any) => e instanceof BadRequestException && /at least 15 minutes/.test(e.message);
+    await assert.rejects(tryBook('2026-10-19', '10:00 AM'), lead); // a past date
+    await assert.rejects(tryBook('2026-10-20', '10:00 AM'), lead); // earlier today
+    await assert.rejects(tryBook('2026-10-20', '10:15 AM'), lead); // now itself: inside the lead
+    // The first grid time at or after now + 15 is exactly 10:30: accepted (a `<=` would refuse it).
+    const ok = await tryBook('2026-10-20', '10:30 AM');
+    assert.equal(ok.slotKey, `${id}|2026-10-20|10:30 AM`);
+    // One minute inside the lead on a 5-minute grid is refused, the boundary itself is accepted.
+    await doctors.setProfile(ADMIN, id, { slotMinutes: 5 });
+    const q = await patient('U2', 'Bala');
+    await assert.rejects(withClockAsync(() => book(q, shajin, '2026-10-20', '10:25 AM')), lead);
+    const edge = await withClockAsync(() => book(q, shajin, '2026-10-20', '10:35 AM'));
+    assert.equal(edge.time, '10:35 AM');
+  });
+
+  test('the overlap window is exclusive: 10:00 then 10:15 on 15-minute slots is allowed', async () => {
+    const p = await patient('U1', 'Asha');
+    const date = dayPlus(4);
+    await book(p, shajin, date, '10:00 AM');
+    await book(p, shajin, date, '10:15 AM');
+    assert.equal(await m.Appointment.countDocuments({ uhid: 'U1', status: { $ne: 'Canceled' } }), 2);
+  });
+
+  test("a canceled appointment doesn't block an overlapping time", async () => {
+    const p = await patient('U1', 'Asha');
+    const date = dayPlus(4);
+    const first = await book(p, shajin, date, '10:00 AM');
+    await assert.rejects(book(p, other, date, '10:00 AM'), ConflictException);
+    await appts.cancel(ADMIN, String(first._id), 'changed mind');
+    const again = await book(p, other, date, '10:00 AM');
+    assert.equal(again.status, 'Scheduled');
+  });
+
+  test('a two-day leave range blocks both its first and last day, and nothing around it', async () => {
+    const p = await patient('U1', 'Asha');
+    const day = dayPlus(10);
+    const next = dayPlus(11);
+    const days = [dayPlus(9), day, next, dayPlus(12)];
+    for (const d of days) await book(p, shajin, d, '09:00 AM');
+    const res = await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: day, to: next, reason: 'Course' }] });
+    assert.deepEqual(res.onLeave.map((a) => a.date).sort(), [day, next]);
+    const slots = await doctors.freeSlots(String(shajin._id), clinicNow(), 600);
+    const dates = new Set(slots.map((s) => s.date));
+    assert.ok(!dates.has(day) && !dates.has(next));
+    assert.ok(dates.has(dayPlus(9)) || dates.has(dayPlus(12)));
+  });
+
+  test('leave must be real dates in order', async () => {
+    const id = String(shajin._id);
+    const day = dayPlus(10);
+    const bad = (leave: any) => assert.rejects(doctors.setProfile(ADMIN, id, { leave }), BadRequestException);
+    await bad([{ from: dayPlus(11), to: day, reason: '' }]);
+    await bad([{ from: '2026-02-30', to: '2026-03-01', reason: '' }]);
+    await bad([{ from: 'tomorrow', to: day, reason: '' }]);
+    await bad([{ from: day, to: day, reason: 'x'.repeat(121) }]);
   });
 });
