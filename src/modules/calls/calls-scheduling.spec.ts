@@ -8,6 +8,7 @@ import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
 import { SchedulingDoctorsService } from '../scheduling/scheduling-doctors.service';
+import { SchedulingWaitlistService } from '../scheduling/scheduling-waitlist.service';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { CallsService } from './calls.service';
 import { InboundService, ToolContext } from './inbound.service';
@@ -40,6 +41,7 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
   let provider: FakeProvider;
   let schedulingApts: SchedulingAppointmentsService;
   let freed: any[];
+  let waitlist: SchedulingWaitlistService;
   let morning: any;
   let afternoon: any;
   const WEEK = (start: string, end: string) => [{ days: [0, 1, 2, 3, 4, 5, 6], start, end }];
@@ -80,7 +82,24 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
     const slots = new SlotsService(m.Appointment, doctors, opd, m.Patient);
     inbound = new InboundService(m.AgentCall, m.InboundSession, m.CallerLookup, m.Appointment, m.Patient, new AppointmentEvents(), tasks, settings, slots, schedulingApts);
     const config = { get: () => undefined };
-    calls = new CallsService(m.AgentCall, m.Appointment, m.Patient, m.FollowUpItem, tasks, settings, slots, inbound, config as any, provider, schedulingApts);
+    waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, schedulingApts, undefined as any);
+    calls = new CallsService(m.AgentCall, m.Appointment, m.Patient, m.FollowUpItem, tasks, settings, slots, inbound, config as any, provider, schedulingApts, waitlist);
+  });
+
+  test('a reschedule request from the call agent becomes a waitlist item (once)', async () => {
+    await m.WaitItem.syncIndexes();
+    const p = await patient('U1', 'Rekha Suresh', { doctor: 'Dr. Priya' });
+    const apt = await schedulingApts.book(ADMIN, { patientId: String(p._id), doctorId: String(afternoon._id), date: dayOffset(4), time: '03:00 PM' });
+    await calls.requestConfirmation(String(apt._id), 'Staff');
+    await calls.recordResult({ providerCallId: 'fake_1', outcome: 'reschedule_requested', summary: '', transcript: [] });
+    assert.equal(((await m.Appointment.findById(apt._id).lean()) as any).confirmation, 'Reschedule Requested');
+    const items = (await m.WaitItem.find({}).lean()) as any[];
+    assert.equal(items.length, 1);
+    assert.deepEqual([items[0].kind, String(items[0].refId), items[0].reason, items[0].priority, items[0].status], ['appointment', String(apt._id), 'patient-request', 'routine', 'open']);
+    assert.equal(items[0].doctorId, String(afternoon._id));
+    assert.equal(items[0].offered.length, 2);
+    // The appointment stays where it is until a person books an offer.
+    assert.equal(((await m.Appointment.findById(apt._id).lean()) as any).time, '03:00 PM');
   });
 
   test("the booking call offers the patient's doctor's free slots", async () => {

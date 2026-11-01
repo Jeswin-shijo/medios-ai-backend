@@ -21,6 +21,7 @@ import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
 import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
+import { SchedulingWaitlistService } from '../scheduling/scheduling-waitlist.service';
 import { CallAgentSettings, nextCallingTime, resolveCallAgentSettings, withinCallingHours } from './call-agent-settings';
 import { CallResult, ProviderCheck, ProviderError, VOICE_PROVIDER, VoiceProvider } from './providers/voice-provider';
 import { InboundService } from './inbound.service';
@@ -107,6 +108,7 @@ export class CallsService implements OnModuleInit {
     private readonly config: ConfigService,
     @Inject(VOICE_PROVIDER) private readonly provider: VoiceProvider,
     private readonly scheduling?: SchedulingAppointmentsService,
+    private readonly waitlist?: SchedulingWaitlistService,
   ) {}
 
   onModuleInit() {
@@ -654,6 +656,7 @@ export class CallsService implements OnModuleInit {
   private async rescheduleRequest(call: AgentCallDocument, apt: AppointmentDocument, r: CallResult, takenSlot?: string): Promise<Effect> {
     apt.confirmation = 'Reschedule Requested';
     await apt.save();
+    await this.waitlisted(apt);
     const booked = slotWhen(apt.date, apt.time);
     await this.alert(call, {
       title: `Reschedule request: ${call.patientName}`,
@@ -849,6 +852,16 @@ export class CallsService implements OnModuleInit {
   private onSafetyList(phone: string): boolean {
     const allowed = (this.config.get<string[]>('callAgent.allowedNumbers') ?? []).map((n) => toE164India(n)).filter(Boolean);
     return !allowed.length || allowed.includes(toE164India(phone));
+  }
+
+  /** A reschedule request goes on the waitlist (once; a repeat finds the open item). A failure never stops the call result. */
+  private async waitlisted(apt: AppointmentDocument) {
+    if (!this.waitlist) return;
+    try {
+      await this.waitlist.add({ kind: 'appointment', refId: String(apt._id), reason: 'patient-request', priority: 'routine' });
+    } catch (e) {
+      this.logger.warn(`Could not put the reschedule request on the waitlist: ${(e as Error).message}`);
+    }
   }
 
   /** A slot the call agent's cancel or reschedule gave up goes to the same listeners as a front-desk cancel (the waitlist). */

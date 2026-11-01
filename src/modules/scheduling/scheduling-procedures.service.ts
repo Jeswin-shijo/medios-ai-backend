@@ -23,6 +23,7 @@ import { SchedulingLock, SchedulingLockDocument } from './schemas/scheduling-loc
 import { StaffMember, StaffMemberDocument } from './schemas/staff-member.schema';
 
 const MIN_MS = 60_000;
+const GRID_MS = 15 * MIN_MS;
 const DAY_MS = 86_400_000;
 const LOCK_KEY = 'procedures';
 const LOCK_MS = 30_000;
@@ -288,6 +289,41 @@ export class SchedulingProceduresService implements OnModuleInit {
     }
   }
 
+  /**
+   * The next `count` starts and rooms the planner would book this request into, without booking: plan, then plan again
+   * from the previous start + 15 minutes. `notBefore` moves the first search later. The waitlist offers these.
+   */
+  async offers(id: string, count: number, notBefore?: Date): Promise<{ start: Date; room: string }[]> {
+    const b = await this.load(id);
+    const out: { start: Date; room: string }[] = [];
+    let earliest = notBefore && notBefore.getTime() > new Date(b.earliest).getTime() ? notBefore : new Date(b.earliest);
+    while (out.length < count) {
+      const plan = await this.plan(b, earliest);
+      if (!plan) break;
+      out.push({ start: plan.start, room: plan.room });
+      earliest = new Date(plan.start.getTime() + GRID_MS);
+    }
+    return out;
+  }
+
+  /** What the waitlist needs of a booking: who, its state, and the time it had (its start, else where it was bumped from, else its earliest). */
+  async waitSource(id: string): Promise<{ patientId: string; patientUhid: string; patientName: string; status: ProcedureStatus; original: Date }> {
+    const b = await this.load(id);
+    return {
+      patientId: String(b.patient),
+      patientUhid: b.patientUhid,
+      patientName: b.patientName,
+      status: b.status,
+      original: new Date(b.start ?? b.bumpedFrom?.start ?? b.earliest),
+    };
+  }
+
+  /** Moves the earliest start of a waiting request (the waitlist's Book offered then calls tryBook). */
+  async setEarliest(id: string, earliest: Date): Promise<boolean> {
+    const res = await this.bookings.updateOne({ _id: id, status: { $in: WAITING } }, { $set: { earliest } }).exec();
+    return res.modifiedCount > 0 || res.matchedCount > 0;
+  }
+
   /** Tries every waiting request again, oldest first: every can't-book, and requests left waiting by a busy lock. Returns how many booked. */
   async retryWaiting(): Promise<number> {
     const young = new Date(Date.now() - REQUESTED_GRACE_MS);
@@ -329,13 +365,17 @@ export class SchedulingProceduresService implements OnModuleInit {
   }
 
   /** Gathers what the planner needs for this request (clinic clock) and asks it. The team comes back with names. */
-  private async plan(b: Lean<ProcedureBooking>): Promise<(Omit<Plan, 'team'> & { team: { role: Skill; staffId: string; name: string }[] }) | null> {
+  private async plan(
+    b: Lean<ProcedureBooking>,
+    earliestOverride?: Date,
+  ): Promise<(Omit<Plan, 'team'> & { team: { role: Skill; staffId: string; name: string }[] }) | null> {
+    const earliest = earliestOverride ?? new Date(b.earliest);
     const base = procedureByKey(b.procedure);
     if (!base) return null;
     const cfg = await this.settings.get();
     const procedure = { ...base, minutes: cfg.procedureMinutes[base.key] ?? base.minutes };
     const now = clinicNow();
-    const { first, until } = searchWindow(b.priority, now, new Date(b.earliest));
+    const { first, until } = searchWindow(b.priority, now, earliest);
     const firstDay = isoDate(first);
     const lastDay = isoDate(new Date(until.getTime() + procedure.minutes * MIN_MS));
     const rangeFrom = parseIsoDay(firstDay);
@@ -381,7 +421,7 @@ export class SchedulingProceduresService implements OnModuleInit {
     const plan = planBooking({
       procedure,
       priority: b.priority,
-      earliest: new Date(b.earliest),
+      earliest,
       now,
       roomHours: cfg.roomHours,
       rooms: ROOMS,

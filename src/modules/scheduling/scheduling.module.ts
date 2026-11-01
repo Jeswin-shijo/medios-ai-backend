@@ -2,12 +2,15 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
+import { FollowUpsModule } from '../follow-ups/follow-ups.module';
 import { OpdModule } from '../opd/opd.module';
 import { PatientsModule } from '../patients/patients.module';
 import { SettingsModule } from '../settings/settings.module';
 import { TasksAlertsModule } from '../tasks-alerts/tasks-alerts.module';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
+import { SchedulingFollowupsService } from './scheduling-followups.service';
+import { SchedulingWaitlistService } from './scheduling-waitlist.service';
 import { SchedulingDoctorsService } from './scheduling-doctors.service';
 import { SchedulingProceduresService } from './scheduling-procedures.service';
 import { SchedulingRosterService } from './scheduling-roster.service';
@@ -44,6 +47,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     OpdModule,
     AppointmentsModule,
     PatientsModule,
+    FollowUpsModule,
     TasksAlertsModule, // the alert model
   ],
   providers: [
@@ -53,7 +57,9 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingDoctorsService,
     SchedulingAppointmentsService,
     SchedulingProceduresService,
+    SchedulingWaitlistService,
+    SchedulingFollowupsService,
   ],
-  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService],
 })
 export class SchedulingModule {}

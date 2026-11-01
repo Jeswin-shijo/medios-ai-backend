@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type FollowUpDocument = FollowUpItem & Document;
 
@@ -43,6 +43,10 @@ export class FollowUpItem {
 
   @Prop({ default: '' })
   reminders: string;
+
+  /** The appointment the Scheduling Agent booked for this follow-up. */
+  @Prop({ type: MongooseSchema.Types.ObjectId, index: true })
+  appointmentId?: Types.ObjectId;
 }
 
 export const FollowUpItemSchema = SchemaFactory.createForClass(FollowUpItem);
