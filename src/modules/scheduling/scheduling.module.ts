@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { AiModule } from '../ai/ai.module';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
 import { FollowUpsModule } from '../follow-ups/follow-ups.module';
@@ -15,6 +16,8 @@ import { SchedulingConsultsService } from './scheduling-consults.service';
 import { SchedulingFollowupsService } from './scheduling-followups.service';
 import { SchedulingWaitlistService } from './scheduling-waitlist.service';
 import { SchedulingDoctorsService } from './scheduling-doctors.service';
+import { SchedulingAiService } from './scheduling-ai';
+import { SchedulingOverviewService } from './scheduling-overview.service';
 import { SchedulingProceduresService } from './scheduling-procedures.service';
 import { SchedulingReconcileService } from './scheduling-reconcile.service';
 import { SchedulingRosterService } from './scheduling-roster.service';
@@ -49,6 +52,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     ]),
     CoordinatorModule, // registry, messages, cases, escalations, and the Clock model
     SettingsModule,
+    AiModule,
     OpdModule,
     AppointmentsModule,
     PatientsModule,
@@ -67,7 +71,9 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingConsultsService,
     SchedulingConflictsService,
     SchedulingReconcileService,
+    SchedulingAiService,
+    SchedulingOverviewService,
   ],
-  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService],
+  exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService, SchedulingOverviewService],
 })
 export class SchedulingModule {}

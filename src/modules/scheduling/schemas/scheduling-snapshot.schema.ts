@@ -11,7 +11,7 @@ export class SchedulingSnapshot {
   @Prop({ required: true }) at: Date;
   @Prop({ required: true }) proceduresToday: number;
   @Prop({ required: true }) openConsults: number;
-  @Prop({ required: true }) cantBook: number;
+  @Prop({ required: true }) conflicts: number;
   @Prop({ required: true }) waitlist: number;
   @Prop({ required: true }) appointmentsToday: number;
 }
