@@ -9,6 +9,7 @@ import { UserRole } from '../users/schemas/user.schema';
 import { SchedulingRosterService } from './scheduling-roster.service';
 import { SchedulingDoctorsService } from './scheduling-doctors.service';
 import { SchedulingController } from './scheduling.controller';
+import { SchedulingScheduler } from './scheduling.scheduler';
 
 const R = UserRole;
 const READ = [R.ADMIN, R.DOCTOR, R.NURSE, R.STAFF];
@@ -157,5 +158,35 @@ describe('roster edits', () => {
     assert.deepEqual(await c.copyWeek(admin, { from: '2026-10-05', to: '2026-10-12' }), { copied: 1, skipped: 0 });
     await c.addBlock(admin, { key: 'ot-1' }, { from: '2026-10-05T08:00', to: '2026-10-05T10:00' });
     assert.equal(calls, 4);
+  });
+});
+
+describe('fix round 1', () => {
+  const none = null as never;
+  const admin = { _id: 'a1', name: 'Admin', role: R.ADMIN };
+
+  test('an impossible moment is a 400 in slots and in a room block, not an Invalid Date passed on', async () => {
+    let reached = 0;
+    const c = new SchedulingController(none, { freeSlots: async () => { reached++; return []; } } as never, none, none, none, none, { addBlock: async () => { reached++; return {}; } } as never, none, none, none, none);
+    await assert.rejects(() => c.slots({ id: 'x' }, { from: '2026-02-31T10:00' }), BadRequestException);
+    await assert.rejects(() => c.addBlock(admin, { key: 'ot-1' }, { from: '2026-02-31T10:00', to: '2026-03-01T10:00' }), BadRequestException);
+    await assert.rejects(() => c.addBlock(admin, { key: 'ot-1' }, { from: '2026-03-01T10:00', to: '2026-13-01T10:00' }), BadRequestException);
+    assert.equal(reached, 0);
+  });
+
+  test('GET doctors passes ?activeOnly=true on, and lists everyone without it', async () => {
+    const seen: boolean[] = [];
+    const c = new SchedulingController(none, { listWithProfiles: async (a: boolean) => { seen.push(a); return []; } } as never, none, none, none, none, none, none, none, none, none);
+    await c.listDoctors({});
+    await c.listDoctors({ activeOnly: 'true' });
+    await c.listDoctors({ activeOnly: 'false' });
+    assert.deepEqual(seen, [false, true, false]);
+  });
+
+  test('the scheduler starts after bootstrap and stops on destroy', () => {
+    const p = SchedulingScheduler.prototype as unknown as Record<string, unknown>;
+    assert.equal(typeof p.onApplicationBootstrap, 'function');
+    assert.equal(p.onModuleInit, undefined);
+    assert.equal(typeof p.onModuleDestroy, 'function');
   });
 });

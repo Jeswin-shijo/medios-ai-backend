@@ -8,8 +8,9 @@ import { OpdService } from '../opd/opd.service';
 import { UserRole } from '../users/schemas/user.schema';
 import {
   ActivateCathLabDto, AppointmentsQueryDto, BoardQueryDto, BookAppointmentDto, ConsultReasonDto, ConsultRequestDto, ConsultsQueryDto, CopyWeekDto,
-  DoctorProfileDto, FollowUpDto, IdParam, MoveAppointmentDto, NoteDto, OverviewQueryDto, ProcedureRequestDto, ProceduresQueryDto, ReasonDto,
-  RepageDto, RoomBlockDto, RoomKeyParam, RosterEntryDto, RosterQueryDto, SlotsQueryDto, SnapshotQueryDto, StaffDto, WaitBookDto, WaitlistQueryDto,
+  DoctorProfileDto, SchedulingDoctorsQueryDto, FollowUpDto, SchedulingIdParam, MoveAppointmentDto, NoteDto, OverviewQueryDto, ProcedureRequestDto, ProceduresQueryDto, SchedulingReasonDto,
+  RepageDto, RoomBlockDto, RoomKeyParam, RosterEntryDto, RosterQueryDto, SchedulingSlotsQueryDto, SchedulingSnapshotQueryDto, StaffDto, WaitBookDto, WaitlistQueryDto,
+  isRealDay,
 } from './dto/scheduling.dto';
 import { PROCEDURES, ROOMS, SKILLS, SKILL_LABEL } from './scheduling-catalogue';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
@@ -35,7 +36,18 @@ const SCHED_TEAM = [UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE];
 const SCHED_ADMIN = [UserRole.ADMIN];
 
 /** A day (clinic clock) or a moment. */
-const fromOf = (v?: string): Date => (!v ? clinicNow() : /^\d{4}-\d{2}-\d{2}$/.test(v) ? parseIsoDay(v) : new Date(v));
+const fromOf = (v?: string): Date => {
+  if (!v) return clinicNow();
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(v) && isRealDay(v) ? parseIsoDay(v) : momentOf(v, 'from');
+  return d;
+};
+
+/** A moment on the clinic clock (YYYY-MM-DDTHH:mm); a 400 when it is not a real one. */
+function momentOf(v: string, label: string): Date {
+  const d = new Date(v);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(v) || !isRealDay(v) || isNaN(d.getTime())) throw new BadRequestException(`${label} must be a real date, or a date and time`);
+  return d;
+}
 
 function plainObject(body: unknown): void {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('The body must be an object');
@@ -78,7 +90,7 @@ export class SchedulingController {
   @Get('snapshots')
   @Roles(...SCHED_READ)
   @ApiOperation({ summary: 'Hourly scheduling counts for the last 24 hours or 7 days' })
-  snapshots(@Query() q: SnapshotQueryDto) {
+  snapshots(@Query() q: SchedulingSnapshotQueryDto) {
     return this.overview.series(q.range ?? '24h');
   }
 
@@ -109,21 +121,21 @@ export class SchedulingController {
   @Get('doctors')
   @Roles(...SCHED_READ)
   @ApiOperation({ summary: 'OP doctors with their slot length and leave' })
-  async listDoctors() {
-    return { doctors: await this.doctors.listWithProfiles() };
+  async listDoctors(@Query() q: SchedulingDoctorsQueryDto) {
+    return { doctors: await this.doctors.listWithProfiles(q.activeOnly === 'true') };
   }
 
   @Put('doctors/:id/profile')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Slot length (admin) and leave (admin, or the doctor on their own profile)' })
-  setProfile(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: DoctorProfileDto) {
+  setProfile(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: DoctorProfileDto) {
     return this.doctors.setProfile(actorOf(user), p.id, { slotMinutes: dto.slotMinutes, leave: dto.leave });
   }
 
   @Get('doctors/:id/slots')
   @Roles(...SCHED_READ)
   @ApiOperation({ summary: 'The next free slots of a doctor' })
-  async slots(@Param() p: IdParam, @Query() q: SlotsQueryDto) {
+  async slots(@Param() p: SchedulingIdParam, @Query() q: SchedulingSlotsQueryDto) {
     return { slots: await this.doctors.freeSlots(p.id, fromOf(q.from), q.count ?? 10) };
   }
 
@@ -144,21 +156,21 @@ export class SchedulingController {
   @Patch('appointments/:id/move')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'Move an appointment to another slot' })
-  move(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: MoveAppointmentDto) {
+  move(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: MoveAppointmentDto) {
     return this.appointments.move(actorOf(user), p.id, dto);
   }
 
   @Patch('appointments/:id/cancel')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'Cancel an appointment' })
-  cancel(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: ReasonDto) {
+  cancel(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: SchedulingReasonDto) {
     return this.appointments.cancel(actorOf(user), p.id, dto.reason);
   }
 
   @Post('appointments/:id/wants-earlier')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'The patient would take an earlier time: put the appointment on the waitlist' })
-  wantsEarlier(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  wantsEarlier(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     return this.waitlist.markEarlierWanted(actorOf(user), p.id);
   }
 
@@ -195,21 +207,21 @@ export class SchedulingController {
   @Post('procedures/:id/start')
   @Roles(...SCHED_TEAM)
   @ApiOperation({ summary: 'Start a procedure' })
-  startProcedure(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  startProcedure(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     return this.procedures.start(actorOf(user), p.id);
   }
 
   @Post('procedures/:id/done')
   @Roles(...SCHED_TEAM)
   @ApiOperation({ summary: 'Finish a procedure' })
-  doneProcedure(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: NoteDto) {
+  doneProcedure(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: NoteDto) {
     return this.procedures.done(actorOf(user), p.id, dto.note);
   }
 
   @Post('procedures/:id/cancel')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Cancel a procedure' })
-  cancelProcedure(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: ReasonDto) {
+  cancelProcedure(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: SchedulingReasonDto) {
     return this.procedures.cancel(actorOf(user), p.id, dto.reason);
   }
 
@@ -232,28 +244,28 @@ export class SchedulingController {
   @Post('consults/:id/accept')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Accept a consult' })
-  acceptConsult(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  acceptConsult(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     return this.consults.accept(actorOf(user), p.id);
   }
 
   @Post('consults/:id/seen')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Mark a consult seen' })
-  seenConsult(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  seenConsult(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     return this.consults.seen(actorOf(user), p.id);
   }
 
   @Post('consults/:id/repage')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Page another doctor for a consult' })
-  repageConsult(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: RepageDto) {
+  repageConsult(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: RepageDto) {
     return this.consults.repage(actorOf(user), p.id, dto.userId);
   }
 
   @Post('consults/:id/cancel')
   @Roles(...SCHED_CLINICAL)
   @ApiOperation({ summary: 'Cancel a consult' })
-  cancelConsult(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: ConsultReasonDto) {
+  cancelConsult(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: ConsultReasonDto) {
     return this.consults.cancel(actorOf(user), p.id, dto.reason);
   }
 
@@ -279,7 +291,7 @@ export class SchedulingController {
   @Delete('roster/entries/:id')
   @Roles(...SCHED_ADMIN)
   @ApiOperation({ summary: 'Remove a roster entry' })
-  async removeEntry(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  async removeEntry(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     const out = await this.roster.removeEntry(actorOf(user), p.id);
     this.retry();
     return out;
@@ -328,7 +340,7 @@ export class SchedulingController {
   @Roles(...SCHED_ADMIN)
   @ApiOperation({ summary: 'Block a room for a period' })
   async addBlock(@CurrentUser() user: unknown, @Param() p: RoomKeyParam, @Body() dto: RoomBlockDto) {
-    const block = await this.rooms.addBlock(actorOf(user), p.key, { from: new Date(dto.from), to: new Date(dto.to), reason: dto.reason });
+    const block = await this.rooms.addBlock(actorOf(user), p.key, { from: momentOf(dto.from, 'from'), to: momentOf(dto.to, 'to'), reason: dto.reason });
     this.retry();
     return block;
   }
@@ -336,7 +348,7 @@ export class SchedulingController {
   @Delete('rooms/blocks/:id')
   @Roles(...SCHED_ADMIN)
   @ApiOperation({ summary: 'Remove a room block' })
-  async removeBlock(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  async removeBlock(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     const out = await this.rooms.removeBlock(actorOf(user), p.id);
     this.retry();
     return out;
@@ -354,21 +366,21 @@ export class SchedulingController {
   @Post('waitlist/:id/book')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'Book one of the offered times' })
-  bookOffered(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: WaitBookDto) {
+  bookOffered(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: WaitBookDto) {
     return this.waitlist.bookOffered(actorOf(user), p.id, dto.index);
   }
 
   @Post('waitlist/:id/find')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'Find other times' })
-  findAnother(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  findAnother(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam) {
     return this.waitlist.findAnother(actorOf(user), p.id);
   }
 
   @Post('waitlist/:id/cancel')
   @Roles(...SCHED_BOOK)
   @ApiOperation({ summary: 'Cancel the booking behind a waitlist item' })
-  cancelWaiting(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: ReasonDto) {
+  cancelWaiting(@CurrentUser() user: unknown, @Param() p: SchedulingIdParam, @Body() dto: SchedulingReasonDto) {
     return this.waitlist.cancelBooking(actorOf(user), p.id, dto.reason);
   }
 
