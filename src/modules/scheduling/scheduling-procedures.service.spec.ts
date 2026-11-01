@@ -442,6 +442,9 @@ describe('SchedulingProceduresService', () => {
     const bumped = await procedures.get(routine.id);
     assert.deepEqual([bumped.status, bumped.room, bumped.start, bumped.team.length], ['requested', null, null, 0]);
     assert.equal(bumped.history.at(-1)!.what, 'Bumped for an emergency (PR-0002): moved to the waitlist');
+    assert.deepEqual(bumped.bumpedFrom, { start: at(D, '08:00').toISOString(), room: 'cath-lab', roomName: 'Cath lab' }, 'the view says where the case was');
+    assert.equal((await procedures.list({ status: 'requested' })).find((v) => v.id === routine.id)!.bumpedFrom!.room, 'cath-lab');
+    assert.equal(stat.bumpedFrom, null, 'a normal booking has none');
     const raw = (await m.ProcedureBooking.findById(routine.id).lean()) as any;
     assert.deepEqual([raw.bumpedFrom.room, raw.bumpedFrom.start.getTime()], ['cath-lab', at(D, '08:00').getTime()]);
 

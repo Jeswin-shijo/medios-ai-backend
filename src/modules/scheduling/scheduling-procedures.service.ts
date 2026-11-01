@@ -136,6 +136,8 @@ export interface ProcedureView {
   startedAt: string | null;
   doneAt: string | null;
   cancelled: { at: string; by: string; reason: string } | null;
+  /** Where a bumped case was before it went back to the waitlist. */
+  bumpedFrom: { start: string; room: string; roomName: string } | null;
   history: { at: string; what: string; by: string }[];
   createdAt: string | null;
 }
@@ -805,6 +807,7 @@ export class SchedulingProceduresService implements OnModuleInit {
       startedAt: iso(b.startedAt),
       doneAt: iso(b.doneAt),
       cancelled: b.cancelled ? { at: iso(b.cancelled.at)!, by: b.cancelled.by, reason: b.cancelled.reason } : null,
+      bumpedFrom: b.bumpedFrom ? { start: iso(b.bumpedFrom.start)!, room: b.bumpedFrom.room, roomName: roomByKey(b.bumpedFrom.room)?.name ?? b.bumpedFrom.room } : null,
       history: (b.history ?? []).map((h) => ({ at: iso(h.at)!, what: h.what, by: h.by })),
       createdAt: iso(b.createdAt),
     };
