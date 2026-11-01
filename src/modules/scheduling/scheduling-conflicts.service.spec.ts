@@ -175,4 +175,75 @@ describe('SchedulingConflictsService', () => {
     assert.deepEqual(await conflicts.sweep(), [], 'rostered now: no gap');
     assert.equal((await pending()).length, 0);
   });
+
+  test('a live appointment on a leave day with no open wait item is one conflict, and it clears once it is on the waitlist', async () => {
+    const doc = await opDoctor('Dr. Shajin');
+    await m.DoctorProfile.create({ doctorId: String(doc._id), leave: [{ from: D, to: D, reason: 'Conference' }] });
+    const apt = await appointment(doc, '10:00 AM');
+    const found = await conflicts.sweep();
+    assert.equal(found.length, 1);
+    assert.equal(found[0].kind, 'leave');
+    assert.equal(found[0].ref, String(apt._id));
+    assert.ok(!found[0].text.includes('Mohan'));
+
+    await m.WaitItem.create({
+      kind: 'appointment', refId: apt._id, reason: 'doctor-leave', priority: 'routine', patient: patient._id,
+      patientUhid: patient.uhid, patientName: 'Mohan Raj', original: { date: D, time: '10:00 AM' },
+    });
+    assert.deepEqual(await conflicts.sweep(), []);
+    assert.equal((await pending()).length, 0);
+  });
+
+  test('an alert closed by hand is reopened by the next sweep while the cause persists, and a returning conflict reopens it', async () => {
+    const b = await booking([]);
+    mock.timers.tick(60 * MIN + 31 * MIN); // 08:31
+    assert.equal((await conflicts.sweep()).length, 1);
+    await m.TaskAlertItem.updateMany({ link: /^scheduling-conflict:/ }, { $set: { status: 'Completed' } });
+    assert.equal((await conflicts.sweep()).length, 1);
+    assert.equal((await pending()).length, 1, 'reopened');
+
+    await m.ProcedureBooking.updateOne({ _id: b._id }, { $set: { status: 'in-progress' } });
+    await conflicts.sweep();
+    assert.equal((await pending()).length, 0);
+    await m.ProcedureBooking.updateOne({ _id: b._id }, { $set: { status: 'booked' } });
+    await conflicts.sweep();
+    assert.equal((await pending()).length, 1, 'the returning cause reopens the same alert');
+    assert.equal((await conflictAlerts()).length, 1);
+  });
+
+  test('two overlapping appointments of one doctor are one conflict', async () => {
+    const doc = await opDoctor('Dr. Shajin');
+    await appointment(doc, '09:00 AM');
+    await appointment(doc, '09:10 AM'); // a 15-minute slot runs to 09:15
+    await appointment(doc, '09:30 AM');
+    const found = await conflicts.sweep();
+    assert.equal(found.length, 1);
+    assert.equal(found[0].kind, 'doctor-overlap');
+  });
+
+  test('a doctor on two overlapping procedures is one conflict', async () => {
+    const arun = await m.StaffMember.create({ name: 'Dr. Arun', skills: ['cardiologist'], departmentCode: 'CARD' });
+    await booking([arun], { start: at('08:00'), end: at('09:30') });
+    await booking([arun], { start: at('09:00'), end: at('10:00'), room: 'ot-1' });
+    await booking([arun], { start: at('10:30'), end: at('11:00'), room: 'ot-1' });
+    const found = await conflicts.sweep();
+    assert.equal(found.length, 1);
+    assert.equal(found[0].kind, 'doctor-overlap');
+    assert.match(found[0].text, /PR-0001.*PR-0002/);
+  });
+
+  test('running late starts at exactly 45 minutes and a late start at exactly 30', async () => {
+    const doc = await opDoctor('Dr. Shajin');
+    mock.timers.tick(2 * 60 * MIN); // 09:00
+    await appointment(doc, '09:00 AM', 'Checked In');
+    await booking([], { start: at('09:00'), end: at('09:45') });
+    mock.timers.tick(30 * MIN - 1000); // 09:29:59
+    assert.deepEqual(await conflicts.sweep(), []);
+    mock.timers.tick(1000); // 09:30:00
+    assert.deepEqual((await conflicts.sweep()).map((c) => c.kind), ['late-start']);
+    mock.timers.tick(15 * MIN - 1000); // 09:44:59
+    assert.deepEqual((await conflicts.sweep()).map((c) => c.kind), ['late-start']);
+    mock.timers.tick(1000); // 09:45:00
+    assert.deepEqual((await conflicts.sweep()).map((c) => c.kind).sort(), ['late-start', 'running-late']);
+  });
 });

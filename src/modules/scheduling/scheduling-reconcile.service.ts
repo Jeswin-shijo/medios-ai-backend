@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { clinicNow, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import { SchedulingConflictsService } from './scheduling-conflicts.service';
 import { SchedulingConsultsService } from './scheduling-consults.service';
 import { SchedulingProceduresService } from './scheduling-procedures.service';
@@ -11,6 +12,8 @@ import { WaitItem, WaitItemDocument } from './schemas/wait-item.schema';
 
 /** Records younger than this are left alone: the request that made them may still be finishing its own messages and alerts. */
 export const RECONCILE_GRACE_MS = 30_000;
+/** Messages are re-sent only for records changed within this long (Z29). */
+export const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 export interface ReconcileResult {
   announced: number;
@@ -40,9 +43,10 @@ export class SchedulingReconcileService {
 
   async reconcile(): Promise<ReconcileResult> {
     const old = new Date(Date.now() - RECONCILE_GRACE_MS);
+    const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
     const out: ReconcileResult = { announced: 0, alerts: 0, waitItems: 0, booked: 0, conflicts: 0 };
-    await this.step('procedure messages', async () => (out.announced += await this.reannounceBookings(old)));
-    await this.step('consult messages', async () => (out.announced += await this.reannounceConsults(old)));
+    await this.step('procedure messages', async () => (out.announced += await this.reannounceBookings(old, since)));
+    await this.step('consult messages', async () => (out.announced += await this.reannounceConsults(old, since)));
     await this.step('procedure alerts', async () => (out.alerts += await this.restoreBookingAlerts(old)));
     await this.step('consult alerts', async () => (out.alerts += await this.restoreConsultAlerts(old)));
     await this.step('wait items', async () => (out.waitItems += await this.settleWaitItems(old)));
@@ -61,15 +65,16 @@ export class SchedulingReconcileService {
   }
 
   /** Procedures whose message for the current status never went out. */
-  private async reannounceBookings(old: Date): Promise<number> {
-    const missing = await this.bookings.find({ announcedAt: { $exists: false }, updatedAt: { $lte: old } }).select('_id').sort({ createdAt: 1 }).lean().exec();
-    for (const b of missing) await this.procedures.reannounce(String(b._id));
-    return missing.length;
+  private async reannounceBookings(old: Date, since: Date): Promise<number> {
+    const missing = await this.bookings.find({ announcedAt: { $exists: false }, updatedAt: { $lte: old, $gte: since } }).select('_id').sort({ createdAt: 1 }).lean().exec();
+    let n = 0;
+    for (const b of missing) if (await this.procedures.reannounce(String(b._id))) n++;
+    return n;
   }
 
   /** Consults whose message for the current status never went out. */
-  private async reannounceConsults(old: Date): Promise<number> {
-    const missing = await this.consults.find({ announcedAt: { $exists: false }, updatedAt: { $lte: old } }).select('_id').sort({ createdAt: 1 }).lean().exec();
+  private async reannounceConsults(old: Date, since: Date): Promise<number> {
+    const missing = await this.consults.find({ announcedAt: { $exists: false }, updatedAt: { $lte: old, $gte: since } }).select('_id').sort({ createdAt: 1 }).lean().exec();
     let n = 0;
     for (const c of missing) if (await this.consultsService.announce(String(c._id))) n++;
     return n;
@@ -77,12 +82,16 @@ export class SchedulingReconcileService {
 
   /** Team notices of booked procedures and "Can't book yet" alerts: written when missing, never reopened. */
   private async restoreBookingAlerts(old: Date): Promise<number> {
-    const live = await this.bookings.find({ status: { $in: ['booked', 'cant-book'] }, updatedAt: { $lte: old } }).select('_id status').lean().exec();
-    for (const b of live) {
-      if (b.status === 'booked') await this.procedures.raiseTeamAlerts(String(b._id), true);
-      else await this.procedures.raiseWaitAlert(String(b._id), true);
-    }
-    return live.length;
+    // Booked ones from today on (the clinic day's midnight), and every case waiting for a room.
+    const midnight = parseIsoDay(isoDate(clinicNow()));
+    const live = await this.bookings
+      .find({ updatedAt: { $lte: old }, $or: [{ status: 'booked', start: { $gte: midnight } }, { status: 'cant-book' }] })
+      .select('_id status')
+      .lean()
+      .exec();
+    let n = 0;
+    for (const b of live) n += b.status === 'booked' ? await this.procedures.raiseTeamAlerts(String(b._id), true) : await this.procedures.raiseWaitAlert(String(b._id), true);
+    return n;
   }
 
   /** Page alerts of consults still open. Returns how many were written. */
@@ -106,8 +115,7 @@ export class SchedulingReconcileService {
       const status = state.get(String(w.refId));
       const to = status === 'cancelled' ? 'cancelled' : status === 'booked' || status === 'in-progress' || status === 'done' ? 'resolved' : null;
       if (!to) continue;
-      const res = await this.waitItems.updateOne({ _id: w._id, status: 'open' }, { $set: { status: to, resolvedAt: new Date() } }).exec();
-      n += res.modifiedCount;
+      if (await this.waitlist.settle(String(w._id), to)) n++;
     }
     return n;
   }

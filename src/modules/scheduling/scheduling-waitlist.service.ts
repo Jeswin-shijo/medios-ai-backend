@@ -341,6 +341,13 @@ export class SchedulingWaitlistService implements OnModuleInit {
     if (outcome !== 'booked') throw new ConflictException(OFFER_CHANGED);
   }
 
+  /** Closes an open item as resolved or cancelled, with its age alert (the reconcile pass, for a booking that moved on). True when it changed. */
+  async settle(id: string, status: 'resolved' | 'cancelled'): Promise<boolean> {
+    const res = await this.items.updateOne({ _id: id, status: 'open' }, { $set: { status, resolvedAt: new Date() } }).exec();
+    await this.completeAlert(id);
+    return res.modifiedCount > 0;
+  }
+
   private async finish(item: Lean<WaitItem>, status: 'resolved' | 'cancelled'): Promise<WaitView> {
     const saved = await this.items
       .findOneAndUpdate({ _id: item._id, status: 'open' }, { $set: { status, resolvedAt: new Date() } }, { new: true })

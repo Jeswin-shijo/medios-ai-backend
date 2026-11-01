@@ -158,4 +158,69 @@ describe('SchedulingReconcileService', () => {
     assert.equal((await m.WaitItem.findById(other._id).lean())!.status, 'cancelled');
     assert.equal((await m.WaitItem.findById(still._id).lean())!.status, 'open', 'still waiting for a slot');
   });
+
+  test('a team notice or wait alert a person closed is not reopened, and a missing one is written once', async () => {
+    const nurse = await m.StaffMember.create({ name: 'Anitha', skills: ['cath-nurse'], departmentCode: 'CARD', userId: String(new Types.ObjectId()) });
+    const b = await booking({ announcedAt: new Date(), team: [{ role: 'cath-nurse', staffId: String(nurse._id), name: 'Anitha' }] });
+    const waiting = await booking({ status: 'cant-book', announcedAt: new Date(), room: undefined, start: undefined, end: undefined });
+    const teamLink = `scheduling-team:${b._id}:${nurse._id}`;
+    const waitLink = `scheduling-wait:${waiting._id}`;
+    mock.timers.tick(40 * SEC);
+
+    const first = await reconcile.reconcile();
+    assert.equal(first.alerts, 2, 'one team notice and one wait alert written');
+    assert.equal((await m.TaskAlertItem.countDocuments({ link: { $in: [teamLink, waitLink] } })), 2);
+
+    await m.TaskAlertItem.updateMany({ link: { $in: [teamLink, waitLink] } }, { $set: { status: 'Completed' } });
+    mock.timers.tick(60 * SEC);
+    const second = await reconcile.reconcile();
+    assert.equal(second.alerts, 0, 'nothing was missing');
+    const rows = await m.TaskAlertItem.find({ link: { $in: [teamLink, waitLink] } }).lean();
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((r: any) => r.status === 'Completed'), 'still closed');
+  });
+
+  const consult = (over: Record<string, unknown> = {}) =>
+    m.ConsultRequest.create({
+      number: 'CO-0001', patient: patient._id, patientUhid: patient.uhid, patientName: 'Mohan Raj', case: caseId,
+      departmentCode: 'CARD', priority: 'urgent', reason: 'Chest pain', status: 'paged', pagedTo: { id: 'u1', name: 'Dr. Arun' }, pagedIds: ['u1'],
+      dueAt: new Date(Date.now() + 120 * 60_000), requestedBy: { id: 'u', name: 'Dr. X' }, requestedAt: new Date(), ...over,
+    });
+
+  test('a consult older than 30 s with no announcedAt is re-announced once', async () => {
+    await m.Department.create({ code: 'CARD', name: 'Cardiology', tokenPrefix: 'C' });
+    const c = await consult();
+    mock.timers.tick(10 * SEC);
+    await reconcile.reconcile();
+    assert.equal((await sent('scheduling.consult-paged')).length, 0, 'too young');
+
+    mock.timers.tick(30 * SEC);
+    await reconcile.reconcile();
+    assert.equal((await sent('scheduling.consult-requested')).length, 1);
+    assert.equal((await sent('scheduling.consult-paged')).length, 1);
+    assert.ok((await m.ConsultRequest.findById(c._id).lean())!.announcedAt);
+
+    mock.timers.tick(90 * SEC);
+    await reconcile.reconcile();
+    assert.equal((await sent('scheduling.consult-paged')).length, 1, 'not again');
+    assert.equal((await sent('scheduling.consult-requested')).length, 1);
+  });
+
+  test('a paged consult whose alert was deleted gets it back, and a closed one does not', async () => {
+    await m.Department.create({ code: 'CARD', name: 'Cardiology', tokenPrefix: 'C' });
+    const c = await consult({ announcedAt: new Date() });
+    const done = await consult({ number: 'CO-0002', status: 'seen', announcedAt: new Date() });
+    mock.timers.tick(40 * SEC);
+    const res = await reconcile.reconcile();
+    assert.equal(res.alerts, 1);
+    const a: any = await m.TaskAlertItem.findOne({ link: `scheduling-consult:${c._id}` }).lean();
+    assert.equal(a.title, 'Consult: Cardiology (URGENT)');
+    assert.equal(a.status, 'Pending');
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `scheduling-consult:${done._id}` }), 0);
+
+    await m.TaskAlertItem.deleteOne({ link: `scheduling-consult:${c._id}` });
+    mock.timers.tick(60 * SEC);
+    assert.equal((await reconcile.reconcile()).alerts, 1);
+    assert.ok(await m.TaskAlertItem.exists({ link: `scheduling-consult:${c._id}` }));
+  });
 });

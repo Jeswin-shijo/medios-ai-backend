@@ -813,10 +813,12 @@ export class SchedulingProceduresService implements OnModuleInit {
   // ---------- messages ----------
 
   /** Sends the message for the booking's current status again (the reconcile pass, for a booking with no announcedAt). Never throws. */
-  async reannounce(id: string): Promise<void> {
+  async reannounce(id: string): Promise<boolean> {
     const b = await this.bookings.findById(id).select('status bumpedFrom').lean().exec();
+    if (!b) return false;
     // A bumped case is back to requested; it is told as -bumped, as when it happened.
-    if (b) await this.announce(id, b.status, b.status === 'requested' && !!b.bumpedFrom);
+    await this.announce(id, b.status, b.status === 'requested' && !!b.bumpedFrom);
+    return !!(await this.bookings.exists({ _id: id, announcedAt: { $exists: true } }));
   }
 
   /**
@@ -886,11 +888,12 @@ export class SchedulingProceduresService implements OnModuleInit {
    * Tells each team member: a notice (a page when STAT) to those with a login; for those without one, a call notice to
    * the fallback title ("Call Anitha (cath nurse): ..."). One alert per booking and member.
    */
-  async raiseTeamAlerts(id: string, onlyMissing = false): Promise<void> {
+  async raiseTeamAlerts(id: string, onlyMissing = false): Promise<number> {
+    let written = 0;
     // onlyMissing (the reconcile pass): write a notice that is not there, but never reopen one a person closed.
     const op = onlyMissing ? '$setOnInsert' : '$set';
     const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
-    if (!b || b.status !== 'booked' || !b.start || !b.room) return;
+    if (!b || b.status !== 'booked' || !b.start || !b.room) return 0;
     const def = procedureByKey(b.procedure);
     const room = roomByKey(b.room);
     const procedureName = def?.name ?? b.procedure;
@@ -904,7 +907,7 @@ export class SchedulingProceduresService implements OnModuleInit {
     for (const t of b.team) {
       if (t.unfilled) {
         // Nobody to page: the fallback title is asked to find someone with the skill.
-        await this.alerts
+        const res = await this.alerts
           .updateOne(
             { link: `scheduling-call:${id}:unfilled-${t.role}` },
             {
@@ -919,6 +922,7 @@ export class SchedulingProceduresService implements OnModuleInit {
             { upsert: true },
           )
           .exec();
+        written += res.upsertedCount;
         continue;
       }
       if (!t.staffId) continue;
@@ -943,11 +947,12 @@ export class SchedulingProceduresService implements OnModuleInit {
           priority: stat ? 'High' : 'Medium',
         };
       }
-      await this.alerts.updateOne({ link }, { [op]: { ...common, ...fields } }, { upsert: true }).exec();
+      written += (await this.alerts.updateOne({ link }, { [op]: { ...common, ...fields } }, { upsert: true }).exec()).upsertedCount;
     }
     // Cancelled while the notices were written: leave none pending.
     const fresh = await this.bookings.findById(id).select('status').lean().exec();
     if (fresh?.status !== 'booked') await this.completeTeamAlerts(id);
+    return written;
   }
 
   private async completeTeamAlerts(id: string): Promise<void> {
@@ -955,12 +960,12 @@ export class SchedulingProceduresService implements OnModuleInit {
   }
 
   /** One "Can't book yet" alert per request, for the doctor who asked. */
-  async raiseWaitAlert(id: string, onlyMissing = false): Promise<void> {
+  async raiseWaitAlert(id: string, onlyMissing = false): Promise<number> {
     const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
-    if (!b || b.status !== 'cant-book') return;
+    if (!b || b.status !== 'cant-book') return 0;
     const procedureName = procedureByKey(b.procedure)?.name ?? b.procedure;
     const target = b.priority === 'routine' ? null : (await this.settings.get()).waitTargets[b.priority];
-    await this.alerts
+    const res = await this.alerts
       .updateOne(
         { link: `scheduling-wait:${id}` },
         {
@@ -982,6 +987,7 @@ export class SchedulingProceduresService implements OnModuleInit {
     // Booked or cancelled while the alert was written: leave it closed.
     const fresh = await this.bookings.findById(id).select('status').lean().exec();
     if (fresh?.status !== 'cant-book') await this.completeWaitAlert(id);
+    return res.upsertedCount;
   }
 
   private async completeWaitAlert(id: string): Promise<void> {
