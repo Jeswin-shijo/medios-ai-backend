@@ -19,7 +19,8 @@ export type FlagKind =
   | 'dose'
   | 'kidney'
   | 'age'
-  | 'list';
+  | 'list'
+  | 'procedure';
 export type Severity = 'red' | 'amber';
 
 export interface FlagDraft {
@@ -59,6 +60,8 @@ export interface PatientFacts {
   allergies: string[];
   egfr: number | null;
   kidneyStatus: KidneyStatus;
+  /** The earliest open contrast procedure near now (Scheduling's message), if any. `at` is a clinic-clock Date. */
+  contrast?: { at: Date; number: string };
 }
 
 const d = (key: string, kind: FlagKind, severity: Severity, text: string): FlagDraft => ({
@@ -333,6 +336,25 @@ export function kidneyFlags(line: CheckLine, patient: PatientFacts): FlagDraft[]
   ];
 }
 
+// ---------- contrast dye and metformin ----------
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "26 Sep, 2:05 PM" from a clinic-clock Date. */
+export const contrastWhen = (at: Date): string =>
+  `${at.getDate()} ${MONTHS[at.getMonth()]}, ${at.getHours() % 12 || 12}:${String(at.getMinutes()).padStart(2, '0')} ${at.getHours() < 12 ? 'AM' : 'PM'}`;
+
+/** Amber flag on a metformin line while a contrast procedure is booked (or was done in the last 48 hours). Exported so the demo seed reuses it. */
+export function contrastFlag(line: CheckLine, patient: PatientFacts): FlagDraft | null {
+  if (line.medicine !== 'metformin' || !patient.contrast) return null;
+  return d(
+    'procedure.contrast',
+    'procedure',
+    'amber',
+    `Contrast dye on ${contrastWhen(patient.contrast.at)}: hold metformin on the day and for 48 hours after; check kidney function first`,
+  );
+}
+
 // ---------- the seven rules ----------
 
 export function checkLine(
@@ -367,6 +389,8 @@ export function checkLine(
   if (patient.age !== null && patient.age !== undefined && patient.age < 18) {
     out.push(d('age.child', 'age', 'amber', 'Child: these dose rules are for adults; check the dose'));
   }
+  const contrast = contrastFlag(line, patient);
+  if (contrast) out.push(contrast);
   if (line.doseReadable === false) {
     out.push(d('list.dose-unreadable', 'list', 'amber', 'Dose not readable: check by hand'));
   }

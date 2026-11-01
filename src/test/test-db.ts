@@ -37,6 +37,7 @@ import { PharmacyBatch, PharmacyBatchDocument, PharmacyBatchSchema } from '../mo
 import { PharmacyMovement, PharmacyMovementDocument, PharmacyMovementSchema } from '../modules/pharmacy/schemas/pharmacy-movement.schema';
 import { PharmacySnapshot, PharmacySnapshotDocument, PharmacySnapshotSchema } from '../modules/pharmacy/schemas/pharmacy-snapshot.schema';
 import { PharmacyStockLevel, PharmacyStockLevelDocument, PharmacyStockLevelSchema } from '../modules/pharmacy/schemas/pharmacy-stock-level.schema';
+import { PharmacyProcedureNote, PharmacyProcedureNoteDocument, PharmacyProcedureNoteSchema } from '../modules/pharmacy/schemas/pharmacy-procedure-note.schema';
 import { LabTestReport, LabReportDocument, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { Prescription, PrescriptionDocument, PrescriptionSchema } from '../modules/prescriptions/schemas/prescription.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
@@ -118,6 +119,7 @@ export function models() {
     PharmacyMovement: model(PharmacyMovement, PharmacyMovementSchema) as Model<PharmacyMovementDocument>,
     PharmacySnapshot: model(PharmacySnapshot, PharmacySnapshotSchema) as Model<PharmacySnapshotDocument>,
     PharmacyStockLevel: model(PharmacyStockLevel, PharmacyStockLevelSchema) as Model<PharmacyStockLevelDocument>,
+    PharmacyProcedureNote: model(PharmacyProcedureNote, PharmacyProcedureNoteSchema) as Model<PharmacyProcedureNoteDocument>,
     Prescription: model(Prescription, PrescriptionSchema) as Model<PrescriptionDocument>,
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,

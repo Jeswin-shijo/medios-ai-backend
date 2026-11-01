@@ -11,6 +11,7 @@ import { Escalation, EscalationSchema } from '../modules/coordinator/schemas/esc
 import { Ladder, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
 import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabTestReport, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
+import { PharmacyProcedureNote, PharmacyProcedureNoteSchema } from '../modules/pharmacy/schemas/pharmacy-procedure-note.schema';
 import { flagValue, rangeText, testByKey } from '../modules/lab/lab-catalogue';
 import { templateSummary } from '../modules/lab/lab-ai';
 import { Patient, PatientSchema } from '../modules/patients/schemas/patient.schema';
@@ -838,7 +839,7 @@ export async function seedPharmacy(clinicDay: string, nowMs: number = Date.now()
   const users = model(User, UserSchema);
   const titles = model(DutyTitle, DutyTitleSchema);
   const ladders = model(Ladder, LadderSchema);
-  const facts = new PharmacyPatientsService(patients as never, reports as never);
+  const facts = new PharmacyPatientsService(patients as never, reports as never, model(PharmacyProcedureNote, PharmacyProcedureNoteSchema) as never);
 
   // ---- People ------------------------------------------------------------------------------
   const who = async (email: string, role: string, fallback: string): Promise<{ id: string; name: string }> => {

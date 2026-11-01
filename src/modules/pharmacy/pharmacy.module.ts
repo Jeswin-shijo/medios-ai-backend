@@ -14,6 +14,8 @@ import { PharmacyIssueService } from './pharmacy-issue.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 import { PharmacyOverviewService } from './pharmacy-overview.service';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
+import { PharmacyProceduresService } from './pharmacy-procedures.service';
+import { PharmacyProcedureNote, PharmacyProcedureNoteSchema } from './schemas/pharmacy-procedure-note.schema';
 import { PharmacyPrescriptionsService } from './pharmacy-prescriptions.service';
 import { PharmacyReconcileService } from './pharmacy-reconcile.service';
 import { PharmacySettingsService } from './pharmacy-settings.service';
@@ -40,6 +42,7 @@ import { PharmacyStockLevel, PharmacyStockLevelSchema } from './schemas/pharmacy
       { name: PharmacyOrder.name, schema: PharmacyOrderSchema },
       { name: PharmacyLine.name, schema: PharmacyLineSchema },
       { name: PharmacyLocation.name, schema: PharmacyLocationSchema },
+      { name: PharmacyProcedureNote.name, schema: PharmacyProcedureNoteSchema },
       { name: PharmacyBatch.name, schema: PharmacyBatchSchema },
       { name: PharmacyMovement.name, schema: PharmacyMovementSchema },
       { name: PharmacyStockLevel.name, schema: PharmacyStockLevelSchema },
@@ -59,6 +62,7 @@ import { PharmacyStockLevel, PharmacyStockLevelSchema } from './schemas/pharmacy
     PharmacyPatientsService,
     PharmacyOrdersService,
     PharmacyChecksService,
+    PharmacyProceduresService,
     PharmacyIssueService,
     PharmacyStockService,
     PharmacyPrescriptionsService,

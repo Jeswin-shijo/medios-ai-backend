@@ -14,6 +14,7 @@ import { UserRole } from '../modules/users/schemas/user.schema';
 import { PharmacyChecksService } from '../modules/pharmacy/pharmacy-checks.service';
 import { PharmacyCoordinatorRegistration } from '../modules/pharmacy/pharmacy-coordinator.registration';
 import { LineInput, PharmacyOrdersService } from '../modules/pharmacy/pharmacy-orders.service';
+import { PharmacyProceduresService } from '../modules/pharmacy/pharmacy-procedures.service';
 import { PharmacyPatientsService } from '../modules/pharmacy/pharmacy-patients.service';
 import { PharmacySettingsService } from '../modules/pharmacy/pharmacy-settings.service';
 
@@ -40,10 +41,10 @@ export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose
   const settings = new PharmacySettingsService(new SettingsService(m.HospitalSettings));
   const orders = new PharmacyOrdersService(
     m.PharmacyOrder, m.PharmacyLine, m.PharmacyLocation, m.CoordinatorCounter,
-    new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport),
+    new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote),
   );
   const checks = new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages, settings);
-  new PharmacyCoordinatorRegistration(registry, orders, messages, checks, m.PharmacyOrder, m.PharmacyLine, m.Clock).onModuleInit();
+  new PharmacyCoordinatorRegistration(registry, orders, messages, checks, m.PharmacyOrder, m.PharmacyLine, m.Clock, new PharmacyProceduresService(m.PharmacyProcedureNote, m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, orders, cases, messages)).onModuleInit();
   registry.register({
     key: 'lab',
     messageTypes: [{ type: 'lab.resulted', agent: 'lab', description: 'x', payload: { test: 'string' } }],

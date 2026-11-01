@@ -10,6 +10,7 @@ import { PharmacyOrder, PharmacyOrderDocument } from './schemas/pharmacy-order.s
 import { medicineLabel } from './pharmacy-rounds';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
+import { PharmacyProceduresService } from './pharmacy-procedures.service';
 
 type Fields = MessageTypeDef['payload'];
 
@@ -164,6 +165,7 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     @InjectModel(PharmacyOrder.name) private readonly orderDocs: Model<PharmacyOrderDocument>,
     @InjectModel(PharmacyLine.name) private readonly lines: Model<PharmacyLineDocument>,
     @InjectModel(Clock.name) private readonly clocks: Model<ClockDocument>,
+    private readonly procedures: PharmacyProceduresService,
   ) {}
 
   onModuleInit(): void {
@@ -184,6 +186,11 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
         // Leaving the ER for a bed is not a move home: bed.assigned places the patient.
         { type: 'er.left', handler: (id) => this.locate(id, (p) => (p.reason === 'admitted' ? null : { area: 'OPD' })) },
         { type: 'bed.discharged', handler: (id) => this.locate(id, () => ({ area: 'OPD' })) },
+        // Scheduling's procedures: contrast dye with metformin, and dual antiplatelet medicines after a stent.
+        { type: 'scheduling.procedure-booked', handler: (id) => this.procedures.onBooked(id) },
+        { type: 'scheduling.procedure-cancelled', handler: (id) => this.procedures.onCancelled(id) },
+        { type: 'scheduling.procedure-bumped', handler: (id) => this.procedures.onCancelled(id) },
+        { type: 'scheduling.procedure-done', handler: (id) => this.procedures.onDone(id) },
       ],
       rules: [
         {

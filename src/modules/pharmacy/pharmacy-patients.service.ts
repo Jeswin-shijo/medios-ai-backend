@@ -3,10 +3,16 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { LabReportDocument, LabTestReport } from '../lab-reports/schemas/lab-report.schema';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
+import { clinicNow } from '../../common/utils/clinic-time';
+import { PharmacyProcedureNote, PharmacyProcedureNoteDocument } from './schemas/pharmacy-procedure-note.schema';
 import { KidneyStatus, PatientFacts, Sex, egfr } from './pharmacy-rules';
 
 /** A kidney report older than this (real time) is not used. */
 export const KIDNEY_FRESH_MS = 72 * 3_600_000;
+
+/** A contrast procedure counts from 7 days before it until 48 hours after it (clinic clock). */
+export const CONTRAST_AHEAD_MS = 7 * 24 * 3_600_000;
+export const CONTRAST_AFTER_MS = 48 * 3_600_000;
 
 export type PatientFactsView = PatientFacts & { creatinine: number | null; egfrAt: string | null };
 
@@ -20,6 +26,7 @@ export class PharmacyPatientsService {
   constructor(
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
     @InjectModel(LabTestReport.name) private readonly reports: Model<LabReportDocument>,
+    @InjectModel(PharmacyProcedureNote.name) private readonly notes: Model<PharmacyProcedureNoteDocument>,
   ) {}
 
   /** A missing Patient record (a seeded sample inpatient) gives no facts at all. */
@@ -32,6 +39,14 @@ export class PharmacyPatientsService {
     const weightKg = typeof w === 'number' && w > 0 ? w : null;
     const allergies = (p.allergies ?? []).filter((a): a is string => typeof a === 'string' && !!a.trim());
     const facts: PatientFactsView = { age, sex, weightKg, allergies, egfr: null, kidneyStatus: 'not-calculated', creatinine: null, egfrAt: null };
+    // The earliest booked or done contrast procedure from 48 hours ago to 7 days ahead, on the clinic clock.
+    const now = clinicNow().getTime();
+    const note = await this.notes
+      .findOne({ patient: p._id, contrast: true, status: { $in: ['booked', 'done'] }, start: { $gte: new Date(now - CONTRAST_AFTER_MS), $lte: new Date(now + CONTRAST_AHEAD_MS) } })
+      .sort({ start: 1 })
+      .lean<{ start: Date; number: string }>()
+      .exec();
+    if (note) facts.contrast = { at: note.start, number: note.number };
     // A child, or unknown age or sex: no eGFR can be calculated (the child flag covers children).
     if (age === null || age < 18 || sex === null) return facts;
     facts.kidneyStatus = 'unknown';

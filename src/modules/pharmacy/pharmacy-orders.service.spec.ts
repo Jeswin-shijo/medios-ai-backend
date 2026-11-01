@@ -16,6 +16,7 @@ import { UserRole } from '../users/schemas/user.schema';
 import { PharmacyCoordinatorRegistration } from './pharmacy-coordinator.registration';
 import { PharmacyChecksService } from './pharmacy-checks.service';
 import { LineInput, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
+import { PharmacyProceduresService } from './pharmacy-procedures.service';
 import { PharmacyPatientsService } from './pharmacy-patients.service';
 import { startKey } from './pharmacy-rounds';
 import { PharmacySettingsService } from './pharmacy-settings.service';
@@ -70,9 +71,9 @@ describe('PharmacyOrdersService', () => {
     const settings = new PharmacySettingsService(new SettingsService(m.HospitalSettings));
     service = new PharmacyOrdersService(
       m.PharmacyOrder, m.PharmacyLine, m.PharmacyLocation, m.CoordinatorCounter,
-      new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport),
+      new PatientsService(m.Patient), cases, messages, settings, new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote),
     );
-    new PharmacyCoordinatorRegistration(registry, service, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, service, cases, messages, settings), m.PharmacyOrder, m.PharmacyLine, m.Clock).onModuleInit();
+    new PharmacyCoordinatorRegistration(registry, service, messages, new PharmacyChecksService(m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, service, cases, messages, settings), m.PharmacyOrder, m.PharmacyLine, m.Clock, new PharmacyProceduresService(m.PharmacyProcedureNote, m.PharmacyLine, m.PharmacyOrder, m.TaskAlertItem, service, cases, messages)).onModuleInit();
     const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });
     patientId = String(p._id);
     patientUhid = p.uhid;
@@ -204,7 +205,7 @@ describe('PharmacyOrdersService', () => {
   });
 
   test('facts take creatinine 2.5 for a man of 62 from the latest Lab Agent kidney report (eGFR 28) and ignore a report older than 72 h or one without labLine', async () => {
-    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport);
+    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote);
     await kidneyReport(2.5); // no labLine: entered by hand, not the Lab Agent
     assert.deepEqual([(await facts.facts(patientId)).egfr, (await facts.facts(patientId)).kidneyStatus], [null, 'unknown']);
 

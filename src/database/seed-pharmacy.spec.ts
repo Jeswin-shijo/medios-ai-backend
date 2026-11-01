@@ -356,7 +356,7 @@ describe('seedPharmacy', () => {
 
   test('the eGFR 26 and 27 patients have a released Kidney function report, and a live recheck keeps their kidney flags', async () => {
     const w = await getWorld();
-    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport);
+    const facts = new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote);
     const reports = await m.LabTestReport.find({ labLine: /^pharmacy-demo:/ }).lean<any[]>().exec();
     assert.equal(reports.length, 2);
     const seen: number[] = [];

@@ -72,7 +72,7 @@ export interface LineSpec {
 export interface RecheckResult {
   line: PharmacyLineDocument;
   newRed: Flag[];
-  reason: 'order' | 'prescription' | 'kidney';
+  reason: 'order' | 'prescription' | 'kidney' | 'procedure';
 }
 
 export interface CreateOrderInput {

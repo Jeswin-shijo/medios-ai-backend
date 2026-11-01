@@ -26,6 +26,7 @@ export const HINTS: Record<FlagKind, string> = {
   kidney: 'Check the latest kidney function and adjust the dose if needed.',
   age: "Check a child's dose with a paediatric reference.",
   list: 'Check this medicine by hand.',
+  procedure: 'Hold metformin around the contrast dye, and check the kidney function first.',
 };
 
 /** The fixed words of a list flag, sent as they are: nothing typed by a person is ever part of them. */

@@ -68,7 +68,7 @@ describe('PharmacyAiService', () => {
     });
     ids = { amox: String(a.lines[0].id), ibu: byMed('ibuprofen'), enox: byMed('enoxaparin'), free: String(free._id), order: a.id };
   });
-  const svc = (ai: AiService) => new PharmacyAiService(ai, m.PharmacyLine, new PharmacyPatientsService(m.Patient, m.LabTestReport));
+  const svc = (ai: AiService) => new PharmacyAiService(ai, m.PharmacyLine, new PharmacyPatientsService(m.Patient, m.LabTestReport, m.PharmacyProcedureNote));
   const flagKeys = async (id: string) => ((await m.PharmacyLine.findById(id).lean())!.flags as any[]).map((f) => f.key as string);
 
   test("explain falls back to the rule's words and hint when the AI is off", async () => {
