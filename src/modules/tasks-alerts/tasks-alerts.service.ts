@@ -43,6 +43,8 @@ export class TasksAlertsService {
     if (task.link?.startsWith('lab-line:')) throw new ConflictException('Acknowledge this critical result on the Lab page.');
     // A pharmacy query has one answer path, the query itself.
     if (task.link?.startsWith('pharmacy-line:')) throw new ConflictException('Answer this query on the Pharmacy Agent page.');
+    // A consult has one path, the consult itself.
+    if (task.link?.startsWith('scheduling-consult:')) throw new ConflictException('Accept or complete this consult on the Scheduling page.');
     if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
   }
 

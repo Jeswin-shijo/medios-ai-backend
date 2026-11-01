@@ -279,9 +279,9 @@ describe('EscalationsService', () => {
     await service.ensureDefaults();
     await service.ensureDefaults();
     const titles = await service.titles();
-    assert.equal(titles.length, 9);
+    assert.equal(titles.length, 10);
     assert.deepEqual(titles.find((t) => t.key === 'er-consultant')!.holders, [nurse.id]);
-    assert.equal((await service.ladders()).length, 7);
+    assert.equal((await service.ladders()).length, 8);
 
     await assert.rejects(service.saveTitle(nurse, { key: 'x', label: 'x', holders: [] }), { status: 403 });
     await assert.rejects(service.saveTitle(admin, { key: 'x', label: 'x', holders: [String(new Types.ObjectId())] }), { status: 400 });
@@ -293,7 +293,7 @@ describe('EscalationsService', () => {
       { status: 400 },
     );
     await service.saveLadder(admin, { key: 'l', label: 'l', steps: [{ title: 'er-consultant', waitMinutes: 5 }, { title: 'er-consultant', waitMinutes: 0 }] });
-    assert.equal((await service.ladders()).length, 8);
+    assert.equal((await service.ladders()).length, 9);
   });
 
   test('the lab and lab-critical ladders and the two titles exist after seeding defaults', async () => {
@@ -339,6 +339,61 @@ describe('EscalationsService', () => {
       status: 409,
       message: 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
     });
+  });
+
+  test("a duty source's holders replace the fixed holders while it returns people", async () => {
+    await hold('duty-doctor', dutyAdmin.id);
+    service.useDutySource(async (key) => (key === 'duty-doctor' ? [nurse.id] : null));
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Nina Nurse']);
+    // A title the source does not roster keeps its fixed holders.
+    await hold('lab-in-charge', dutyAdmin.id);
+    assert.deepEqual((await service.holders('lab-in-charge')).names, ['Dev Duty']);
+    // The alert text follows the roster too.
+    const e = await service.raise({ ladder: 'lab-critical', reason: 'Late', source: { kind: 'manual' } });
+    const alert: any = await TaskAlertItem.findById(e.alert).lean();
+    assert.equal(alert.subtitle, 'On duty: Nina Nurse');
+    // A source that throws never breaks escalations: the fixed holders answer.
+    service.useDutySource(async () => {
+      throw new Error('roster down');
+    });
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Dev Duty']);
+    // Inactive users are filtered out of the roster.
+    await User.updateOne({ _id: nurse.id }, { $set: { isActive: false } });
+    service.useDutySource(async () => [nurse.id]);
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Dev Duty']);
+  });
+
+  test('an empty duty source falls back to the fixed holders, then to the admins', async () => {
+    await hold('duty-doctor', dutyAdmin.id);
+    service.useDutySource(async () => []);
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Dev Duty']);
+    service.useDutySource(async () => null);
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Dev Duty']);
+    await hold('duty-doctor');
+    assert.deepEqual((await service.holders('duty-doctor')).names, ['Asha Admin']);
+  });
+
+  test('a rostered holder may acknowledge a step of their title', async () => {
+    const e = await service.raise({ ladder: 'lab-critical', reason: 'Late', source: { kind: 'manual' } });
+    await assert.rejects(service.acknowledge(nurse, String(e._id)), { status: 403 });
+    service.useDutySource(async (key) => (key === 'duty-doctor' ? [nurse.id] : null));
+    await service.acknowledge(nurse, String(e._id));
+    assert.equal((await Escalation.findById(e._id).lean())!.state, 'acknowledged');
+  });
+
+  test('ot-in-charge and the consult ladder are defaults', async () => {
+    const titles = await service.titles();
+    assert.equal(titles.length, 10);
+    assert.equal(titles.find((t) => t.key === 'ot-in-charge')!.label, 'OT and cath lab in charge');
+    const ladders = await service.ladders();
+    assert.equal(ladders.length, 8);
+    assert.deepEqual(ladders.find((l) => l.key === 'consult')!.steps, [{ title: 'medical-superintendent', waitMinutes: 0 }]);
+  });
+
+  test('a scheduling-consult escalation cannot be acknowledged directly', async () => {
+    const e = await service.raise({ ladder: 'consult', reason: 'Consult late', source: { kind: 'clock', id: 'c9' }, alertLink: 'scheduling-consult:s1' });
+    await assert.rejects(() => service.acknowledge(admin, String(e._id)), { status: 409, message: 'Mark the consult seen on the Scheduling page.' });
+    assert.equal((await Escalation.findById(e._id).lean())!.state, 'open');
   });
 
   test('holders leave out inactive users', async () => {

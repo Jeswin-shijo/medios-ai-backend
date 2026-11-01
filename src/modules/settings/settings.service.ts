@@ -76,6 +76,7 @@ const DEFAULT_SETTINGS = {
   er: { targets: {} as Record<string, number> },
   lab: {} as Record<string, unknown>,
   pharmacy: {} as Record<string, unknown>,
+  scheduling: {} as Record<string, unknown>,
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];
@@ -150,6 +151,11 @@ export class SettingsService {
       const { pharmacy: _ignored, ...rest } = updates as Record<string, unknown>;
       updates = rest as Partial<HospitalSettings>;
     }
+    // The scheduling section changes only through SchedulingSettingsService, the same way.
+    if (updates && typeof updates === 'object' && 'scheduling' in updates) {
+      const { scheduling: _ignored, ...rest } = updates as Record<string, unknown>;
+      updates = rest as Partial<HospitalSettings>;
+    }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];
       if (patch && typeof patch === 'object') {
@@ -177,6 +183,13 @@ export class SettingsService {
   async setPharmacy(section: NonNullable<HospitalSettings['pharmacy']>): Promise<void> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
     settings.set('pharmacy', section);
+    await settings.save();
+  }
+
+  /** Saves the scheduling section. Only SchedulingSettingsService.save calls this. */
+  async setScheduling(section: NonNullable<HospitalSettings['scheduling']>): Promise<void> {
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    settings.set('scheduling', section);
     await settings.save();
   }
 }

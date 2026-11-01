@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 import type { Actor } from '../beds/actor';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
+import type { DutySource } from './coordinator-types';
 import { CoordinatorEvents } from './coordinator-events';
 import { MessagesService } from './messages.service';
 import { DutyTitle, DutyTitleDocument } from './schemas/duty-title.schema';
@@ -22,6 +23,7 @@ export const DEFAULT_TITLES: { key: string; label: string }[] = [
   { key: 'lab-in-charge', label: 'Lab in charge' },
   { key: 'duty-doctor', label: 'Duty doctor' },
   { key: 'chief-pharmacist', label: 'Chief pharmacist' },
+  { key: 'ot-in-charge', label: 'OT and cath lab in charge' },
 ];
 
 export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] }[] = [
@@ -72,6 +74,7 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
     label: 'Pharmacy query',
     steps: [{ title: 'duty-doctor', waitMinutes: 10 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
+  { key: 'consult', label: 'Consult', steps: [{ title: 'medical-superintendent', waitMinutes: 0 }] },
 ];
 
 export interface DutyTitleView {
@@ -93,6 +96,7 @@ export const NO_HOLDERS = 'Admins (no one holds this title yet)';
 @Injectable()
 export class EscalationsService {
   private readonly logger = new Logger(EscalationsService.name);
+  private dutySource: DutySource | null = null;
 
   constructor(
     @InjectModel(Escalation.name) private readonly model: Model<EscalationDocument>,
@@ -135,10 +139,32 @@ export class EscalationsService {
     return users.map((u) => ({ id: String(u._id), name: u.name }));
   }
 
+  /** Lets the duty roster decide who holds a title right now. One source; a later call replaces it. */
+  useDutySource(source: DutySource): void {
+    this.dutySource = source;
+  }
+
+  /** Active people holding a title now: the roster's people when it names any, else the fixed holders. Empty when neither does. */
+  private async currentHolders(titleKey: string): Promise<{ id: string; name: string }[]> {
+    if (this.dutySource) {
+      let rostered: string[] | null = null;
+      try {
+        rostered = await this.dutySource(titleKey, new Date());
+      } catch (err) {
+        this.logger.warn(`The duty roster failed for "${titleKey}"; using the fixed holders: ${(err as Error).message}`);
+      }
+      if (rostered?.length) {
+        const people = await this.activeUsers(rostered.filter((id) => Types.ObjectId.isValid(id)));
+        if (people.length) return people;
+      }
+    }
+    const title = await this.titleModel.findOne({ key: titleKey }).lean().exec();
+    return this.activeUsers(title?.holders ?? []);
+  }
+
   /** The people holding a title; every admin when it has none. */
   async holders(titleKey: string): Promise<{ ids: string[]; names: string[] }> {
-    const title = await this.titleModel.findOne({ key: titleKey }).lean().exec();
-    let people = await this.activeUsers(title?.holders ?? []);
+    let people = await this.currentHolders(titleKey);
     if (!people.length) {
       const admins = await this.userModel.find({ role: UserRole.ADMIN, isActive: { $ne: false } }).select('name').sort({ name: 1 }).lean().exec();
       people = admins.map((u) => ({ id: String(u._id), name: u.name }));
@@ -147,10 +173,9 @@ export class EscalationsService {
   }
 
   private async stepView(titleKey: string) {
-    const [title, who] = await Promise.all([this.titleModel.findOne({ key: titleKey }).lean().exec(), this.holders(titleKey)]);
+    const [title, who, current] = await Promise.all([this.titleModel.findOne({ key: titleKey }).lean().exec(), this.holders(titleKey), this.currentHolders(titleKey)]);
     const label = title?.label ?? titleKey;
-    const hasHolders = (await this.activeUsers(title?.holders ?? [])).length > 0;
-    return { label, names: who.names, subtitle: hasHolders ? `On duty: ${who.names.join(', ')}` : NO_HOLDERS };
+    return { label, names: who.names, subtitle: current.length > 0 ? `On duty: ${who.names.join(', ')}` : NO_HOLDERS };
   }
 
   /**
@@ -270,6 +295,7 @@ export class EscalationsService {
     const e = await this.model.findById(id).exec();
     if (!e) throw new NotFoundException('Escalation not found');
     if (e.state === 'acknowledged') throw new ConflictException('Already acknowledged.');
+    if (e.alertLink?.startsWith('scheduling-consult:')) throw new ConflictException('Mark the consult seen on the Scheduling page.');
     if (e.closesOnStop) {
       throw new ConflictException(
         e.alertLink?.startsWith('pharmacy-line:')
@@ -280,8 +306,13 @@ export class EscalationsService {
     if (actor.role !== UserRole.ADMIN) {
       const ladder = await this.ladderModel.findOne({ key: e.ladder }).lean().exec();
       const keys = (ladder?.steps ?? []).slice(e.step).map((s) => s.title);
-      const titles = await this.titleModel.find({ key: { $in: keys } }).lean().exec();
-      const allowed = titles.some((t) => t.holders.some((h) => String(h) === actor.id));
+      let allowed = false;
+      for (const key of keys) {
+        if ((await this.currentHolders(key)).some((p) => p.id === actor.id)) {
+          allowed = true;
+          break;
+        }
+      }
       if (!allowed) throw new ForbiddenException('Only the person on duty for this step, someone further up, or an admin can acknowledge.');
     }
     const done = await this.model

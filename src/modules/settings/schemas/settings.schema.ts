@@ -59,6 +59,10 @@ export class HospitalSettings {
     targets?: Partial<Record<'check' | 'issue' | 'query', Partial<Record<'stat' | 'urgent' | 'routine', number>>>>;
     nearExpiryDays?: number;
   };
+
+  /** Scheduling: consult, procedure and roster settings (see SchedulingSettingsService). */
+  @Prop({ type: Object, default: {} })
+  scheduling: Record<string, unknown>;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

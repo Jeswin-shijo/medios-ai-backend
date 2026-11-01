@@ -25,6 +25,9 @@ export const AGENTS: { key: AgentKey; name: string; job: string }[] = [
   { key: 'patient-support', name: 'Patient Support', job: 'Talks to the patient and family: calls, messages, updates, reminders, check-up calls after going home' },
 ];
 
+/** Who is rostered for a duty title at a moment: user ids, or null for "not rostered" (the fixed holders then apply). */
+export type DutySource = (titleKey: string, at: Date) => Promise<string[] | null>;
+
 export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
 export type Priority = (typeof PRIORITIES)[number];
 

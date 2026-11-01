@@ -33,6 +33,14 @@ describe('TasksAlertsService', () => {
     assert.equal((await service.updateStatus(String(plain._id), 'Pending')).status, 'Pending');
   });
 
+  test('a scheduling-consult alert cannot be toggled', async () => {
+    const c = await m.TaskAlertItem.create({ title: 'Consult requested', type: 'System', category: 'Critical', priority: 'High', link: 'scheduling-consult:abc' });
+    const refusal = { status: 409, message: 'Accept or complete this consult on the Scheduling page.' };
+    await assert.rejects(() => service.toggleStatus(String(c._id)), refusal);
+    await assert.rejects(() => service.updateStatus(String(c._id), 'Completed'), refusal);
+    assert.equal(((await m.TaskAlertItem.findById(c._id).lean()) as any).status, 'Pending');
+  });
+
   test('a pharmacy-line alert can not be toggled or set Completed (409); a pharmacy-rejected alert toggles', async () => {
     const q = await m.TaskAlertItem.create({ title: 'Pharmacy query: Amoxicillin 500 mg (allergy)', type: 'Medication Alert', category: 'Medication', priority: 'High', link: 'pharmacy-line:abc' });
     const refusal = { status: 409, message: 'Answer this query on the Pharmacy Agent page.' };
