@@ -608,7 +608,9 @@ export class CallsService implements OnModuleInit {
         const old = { id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time };
         apt.date = slot.date;
         apt.time = slot.time;
-        Object.assign(apt, this.slots.fieldsFor(doctor, slot.date, slot.time));
+        const newFields = this.slots.fieldsFor(doctor, slot.date, slot.time);
+        await this.slots.releaseStale(newFields);
+        Object.assign(apt, newFields);
         apt.confirmation = 'Confirmed';
         apt.confirmedAt = new Date();
         apt.notes = [apt.notes, `Moved by AI call from ${booked}.`].filter(Boolean).join('\n');
@@ -693,6 +695,7 @@ export class CallsService implements OnModuleInit {
 
         let apt: AppointmentDocument;
         try {
+          await this.slots.releaseStale(this.slots.fieldsFor(doctor, slot.date, slot.time));
           apt = await this.appointments.create({
             uhid: patient.uhid,
             patientName: patient.name,

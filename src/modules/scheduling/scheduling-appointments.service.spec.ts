@@ -274,4 +274,20 @@ describe('Scheduling appointments by doctor', () => {
     await bad([{ from: 'tomorrow', to: day, reason: '' }]);
     await bad([{ from: day, to: day, reason: 'x'.repeat(121) }]);
   });
+
+  test('a slot freed through the plain appointments API reaches the onFreed listeners', async () => {
+    const events = new AppointmentEvents();
+    const own = new SchedulingAppointmentsService(m.Appointment, m.Patient, doctors, opd, events);
+    const got: any[] = [];
+    own.onFreed.push((s) => {
+      got.push(s);
+    });
+    await own.onModuleInit();
+    events.slotFreed({ id: 'a1', doctorId: String(shajin._id), date: '2026-09-28', time: '10:00 AM' });
+    await new Promise((r) => setTimeout(r, 20));
+    own.onModuleDestroy();
+    events.slotFreed({ id: 'a2', doctorId: String(shajin._id), date: '2026-09-28', time: '10:15 AM' });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(got.map((g) => g.id), ['a1']);
+  });
 });

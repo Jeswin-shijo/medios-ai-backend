@@ -1,10 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Appointment, AppointmentDocument } from './schemas/appointment.schema';
-import { clockMinutes, isoDate } from '../../common/utils/clinic-time';
+import { clockLabel, clockMinutes, isoDate } from '../../common/utils/clinic-time';
 import { escapeRegex } from '../../common/utils/escape-regex';
 import { AppointmentEvents } from './appointment-events';
+import { OpdService } from '../opd/opd.service';
+import { isDuplicateKey, releaseStaleSlot, slotKeyOf } from './slot-key';
 
 @Injectable()
 export class AppointmentsService {
@@ -12,6 +14,7 @@ export class AppointmentsService {
     @InjectModel(Appointment.name)
     private appointmentModel: Model<AppointmentDocument>,
     private readonly events: AppointmentEvents,
+    @Optional() private readonly opd?: OpdService,
   ) {}
 
   async findAll(query: {
@@ -69,20 +72,48 @@ export class AppointmentsService {
     return appointment;
   }
 
+  /**
+   * Books an appointment. One without a doctor gets the default doctor, so it holds a slot like every other booking; a taken slot is a 409.
+   * With no OP doctor set up at all, it is stored as before, without a slot key.
+   */
   async create(data: Partial<Appointment>): Promise<AppointmentDocument> {
-    const created = new this.appointmentModel(data);
-    return created.save();
+    const fields: Partial<Appointment> = { ...data };
+    if (!fields.doctorId && this.opd) {
+      const doctor = await this.opd.defaultDoctor();
+      if (doctor) Object.assign(fields, { doctorId: String(doctor._id), doctorName: doctor.name, departmentCode: doctor.departmentCode });
+    }
+    const minutes = clockMinutes(String(fields.time ?? ''));
+    if (fields.doctorId && fields.date && minutes !== Number.MAX_SAFE_INTEGER) {
+      fields.slotKey = slotKeyOf(fields.doctorId, fields.date, clockLabel(minutes));
+      await releaseStaleSlot(this.appointmentModel, fields.slotKey);
+    } else {
+      delete fields.slotKey;
+    }
+    try {
+      return await new this.appointmentModel(fields).save();
+    } catch (e) {
+      if (isDuplicateKey(e)) throw new ConflictException('That slot was just taken');
+      throw e;
+    }
   }
 
   async updateStatus(id: string, status: string): Promise<AppointmentDocument> {
     const appointment = await this.findOne(id);
+    const wasCanceled = appointment.status === 'Canceled';
+    if (wasCanceled && status !== 'Canceled') {
+      throw new ConflictException("A cancelled appointment can't be reopened; book a new one.");
+    }
     appointment.status = status;
+    if (status === 'Canceled') appointment.set('slotKey', undefined); // releases the slot for the database guard
     if (status === 'Checked In' && !appointment.checkedInTime) {
       const now = new Date();
       appointment.checkedInTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
     const saved = await appointment.save();
     this.events.statusChanged({ id: String(saved._id), status });
+    if (status === 'Canceled' && !wasCanceled && saved.doctorId) {
+      this.events.slotFreed({ id: String(saved._id), doctorId: saved.doctorId, date: saved.date, time: saved.time });
+    }
     return saved;
   }
 

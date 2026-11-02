@@ -431,6 +431,7 @@ export class InboundService {
 
     const reason = str(args.reason, 120);
     let apt: AppointmentDocument;
+    await this.slots.releaseStale(this.slots.fieldsFor(doctor, slot.date, slot.time));
     try {
       apt = await this.appointments.create({
         uhid: patient.uhid,
@@ -471,7 +472,9 @@ export class InboundService {
     const old = { id: String(apt._id), doctorId: apt.doctorId, date: apt.date, time: apt.time };
     apt.date = slot.date;
     apt.time = slot.time;
-    Object.assign(apt, this.slots.fieldsFor(doctor, slot.date, slot.time));
+    const newFields = this.slots.fieldsFor(doctor, slot.date, slot.time);
+    await this.slots.releaseStale(newFields);
+    Object.assign(apt, newFields);
     apt.confirmation = 'Confirmed';
     apt.confirmedAt = new Date();
     apt.notes = [apt.notes, `Moved by phone (AI) from ${before}.`].filter(Boolean).join(' ');

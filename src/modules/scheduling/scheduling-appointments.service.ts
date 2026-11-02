@@ -1,9 +1,11 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import type { Subscription } from 'rxjs';
 import { appointmentStart, clinicNow, clockLabel, clockMinutes, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { AppointmentEvents } from '../appointments/appointment-events';
+import { isDuplicateKey, releaseStaleSlot, slotKeyOf } from '../appointments/slot-key';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
 import { OpdService } from '../opd/opd.service';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
@@ -37,12 +39,12 @@ export interface FreedSlot {
 
 export type FreedListener = (slot: FreedSlot) => void | Promise<void>;
 
-export const slotKeyOf = (doctorId: string, date: string, time: string) => `${doctorId}|${date}|${time}`;
-const isDuplicate = (e: any) => e?.code === 11000;
+export { slotKeyOf };
+const isDuplicate = isDuplicateKey;
 
 /** Books, moves and cancels appointments with a named doctor. A unique slotKey makes a double booking impossible. */
 @Injectable()
-export class SchedulingAppointmentsService implements OnModuleInit {
+export class SchedulingAppointmentsService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(SchedulingAppointmentsService.name);
   /** Registered by the waitlist (Task 8): a slot was freed by a cancel or a move. */
   readonly onFreed: FreedListener[] = [];
@@ -60,12 +62,22 @@ export class SchedulingAppointmentsService implements OnModuleInit {
     return this.doctors.onLeave;
   }
 
+  private freedSub?: Subscription;
+
   async onModuleInit() {
+    // A cancel made through the plain appointments API (PATCH status) reaches the same waitlist listeners.
+    this.freedSub = this.events.slotFreed$.subscribe((slot) => {
+      void this.slotFreed(slot);
+    });
     try {
       await this.backfill();
     } catch (e) {
       this.log.warn(`Appointment backfill failed: ${(e as Error).message}`);
     }
+  }
+
+  onModuleDestroy() {
+    this.freedSub?.unsubscribe();
   }
 
   async book(actor: Actor, input: BookInput): Promise<AppointmentDocument> {
@@ -260,7 +272,7 @@ export class SchedulingAppointmentsService implements OnModuleInit {
 
   /** A canceled appointment (canceled by the call agent, which saves the document directly) may still hold the key: release it. */
   private async healStale(key: string) {
-    await this.appointments.updateOne({ slotKey: key, status: 'Canceled' }, { $unset: { slotKey: 1 } }).exec();
+    await releaseStaleSlot(this.appointments, key);
   }
 
   /** Hands a freed slot to the listeners (the waitlist). Cancel, move and the call agent's cancels and reschedules all use it. */

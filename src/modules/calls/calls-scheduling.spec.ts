@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AppointmentEvents } from '../appointments/appointment-events';
+import { AppointmentsService } from '../appointments/appointments.service';
 import { OpdService } from '../opd/opd.service';
 import { SettingsService } from '../settings/settings.service';
 import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
@@ -225,5 +226,34 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
     const apt = (await m.Appointment.findOne({ uhid: 'U1' }).lean().exec()) as any;
     assert.equal(apt.doctorId, undefined);
     assert.equal(apt.slotKey, undefined);
+  });
+
+  test('a slot freed by PATCH status Canceled can be booked by an outbound and an inbound AI call', async () => {
+    const apptsApi = new AppointmentsService(m.Appointment, new AppointmentEvents(), new OpdService(m.Department, m.OpDoctor, new SettingsService(m.HospitalSettings)));
+    await patient('U1', 'Rekha Suresh', { doctor: 'Dr. Priya' });
+    const call = await calls.requestBooking({ uhid: 'U1' }, 'Staff');
+    const slot = call.offeredSlots[0];
+    // Someone holds the slot, then cancels it through the old status route (the mobile app and the web "Cancel / No Show").
+    const held = await m.Appointment.create({ uhid: 'X1', patientName: 'Holder', age: 30, gender: 'Male', date: slot.date, time: slot.time, doctorId: String(afternoon._id), doctorName: 'Dr. Priya', departmentCode: 'gen-med', slotKey: `${afternoon._id}|${slot.date}|${slot.time}` });
+    await apptsApi.updateStatus(String(held._id), 'Canceled');
+    await calls.recordResult({ providerCallId: 'fake_1', outcome: 'booked', chosenSlot: 1, summary: '', transcript: [] });
+    assert.equal(await m.Appointment.countDocuments({ uhid: 'U1', status: 'Scheduled' }), 1, 'the outbound booking got the freed slot');
+    assert.equal(await m.TaskAlertItem.countDocuments({ title: /Rebook/ }), 0);
+  });
+
+  test('a stale key on a canceled appointment does not block a call booking (legacy rows)', async () => {
+    await patient('U1', 'Rekha Suresh', { doctor: 'Dr. Priya' });
+    await patient('U2', 'Bala Kumar', { doctor: 'Dr. Priya', phone: '+91 98765 43211' });
+    const ref = await verify('Rekha Suresh');
+    await inbound.run('find_free_slots', { caller_ref: ref }, STRONG);
+    const slot = ((await m.InboundSession.findOne({ code: ref }).lean().exec()) as any).slots[0];
+    await m.Appointment.collection.insertOne({ uhid: 'X1', patientName: 'Holder', age: 30, gender: 'Male', date: slot.date, time: slot.time, status: 'Canceled', doctorId: String(afternoon._id), slotKey: `${afternoon._id}|${slot.date}|${slot.time}`, createdAt: new Date(), updatedAt: new Date() });
+    const r = await inbound.run('book_appointment', { caller_ref: ref, slot_id: 'S1', reason: 'Fever' }, STRONG);
+    assert.equal(r.ok, true, String(r.message));
+    // And an outbound booking call.
+    await m.Appointment.collection.insertOne({ uhid: 'X2', patientName: 'Holder2', age: 30, gender: 'Male', date: slot.date, time: '04:00 PM', status: 'Canceled', doctorId: String(afternoon._id), slotKey: `${afternoon._id}|${slot.date}|04:00 PM`, createdAt: new Date(), updatedAt: new Date() });
+    await m.AgentCall.create({ purpose: 'booking', status: 'calling', uhid: 'U2', patientName: 'Bala Kumar', phone: '+919876543211', provider: 'simulated', scheduledFor: new Date(), providerCallId: 'x2', offeredSlots: [{ date: slot.date, time: '04:00 PM', label: 'x' }], visitReason: 'Review' });
+    await calls.recordResult({ providerCallId: 'x2', outcome: 'booked', chosenSlot: 1, summary: '', transcript: [] });
+    assert.equal(await m.Appointment.countDocuments({ uhid: 'U2', status: 'Scheduled' }), 1);
   });
 });

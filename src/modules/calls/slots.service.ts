@@ -5,7 +5,7 @@ import { Appointment, AppointmentDocument } from '../appointments/schemas/appoin
 import { OpdService } from '../opd/opd.service';
 import { OpDoctorDocument } from '../opd/schemas/op-doctor.schema';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
-import { slotKeyOf } from '../scheduling/scheduling-appointments.service';
+import { releaseStaleSlot, slotKeyOf } from '../appointments/slot-key';
 import { SchedulingDoctorsService } from '../scheduling/scheduling-doctors.service';
 import { clinicNow, clockLabel, clockMinutes, isoDate, parseIsoDay, spokenDay } from '../../common/utils/clinic-time';
 import { CallAgentSettings, parseSessions } from './call-agent-settings';
@@ -58,6 +58,11 @@ export class SlotsService {
     if (!doctor) return {};
     const id = String(doctor._id);
     return { doctorId: id, doctorName: doctor.name, departmentCode: doctor.departmentCode, slotKey: slotKeyOf(id, date, clockLabel(clockMinutes(time))) };
+  }
+
+  /** Releases the key of a canceled appointment that still holds this slot, so a booking or move into it is not refused. */
+  async releaseStale(fields: Partial<DoctorFields>): Promise<void> {
+    if (fields.slotKey) await releaseStaleSlot(this.appointments, fields.slotKey);
   }
 
   /**
