@@ -60,6 +60,13 @@ import { WaitItem, WaitItemDocument, WaitItemSchema } from '../modules/schedulin
 import { SchedulingSnapshot, SchedulingSnapshotDocument, SchedulingSnapshotSchema } from '../modules/scheduling/schemas/scheduling-snapshot.schema';
 import { SchedulingLock, SchedulingLockDocument, SchedulingLockSchema } from '../modules/scheduling/schemas/scheduling-lock.schema';
 import { PriceItem, PriceItemDocument, PriceItemSchema } from '../modules/revenue/schemas/price-item.schema';
+import { Bill, BillDocument, BillSchema } from '../modules/revenue/schemas/bill.schema';
+import { ChargeLine, ChargeLineDocument, ChargeLineSchema } from '../modules/revenue/schemas/charge-line.schema';
+import { Estimate, EstimateDocument, EstimateSchema } from '../modules/revenue/schemas/estimate.schema';
+import { Payment, PaymentDocument, PaymentSchema } from '../modules/revenue/schemas/payment.schema';
+import { Refund, RefundDocument, RefundSchema } from '../modules/revenue/schemas/refund.schema';
+import { Correction, CorrectionDocument, CorrectionSchema } from '../modules/revenue/schemas/correction.schema';
+import { RevenueSnapshot, RevenueSnapshotDocument, RevenueSnapshotSchema } from '../modules/revenue/schemas/revenue-snapshot.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -145,6 +152,13 @@ export function models() {
     SchedulingSnapshot: model(SchedulingSnapshot, SchedulingSnapshotSchema) as Model<SchedulingSnapshotDocument>,
     SchedulingLock: model(SchedulingLock, SchedulingLockSchema) as Model<SchedulingLockDocument>,
     PriceItem: model(PriceItem, PriceItemSchema) as Model<PriceItemDocument>,
+    Bill: model(Bill, BillSchema) as Model<BillDocument>,
+    ChargeLine: model(ChargeLine, ChargeLineSchema) as Model<ChargeLineDocument>,
+    Estimate: model(Estimate, EstimateSchema) as Model<EstimateDocument>,
+    Payment: model(Payment, PaymentSchema) as Model<PaymentDocument>,
+    Refund: model(Refund, RefundSchema) as Model<RefundDocument>,
+    Correction: model(Correction, CorrectionSchema) as Model<CorrectionDocument>,
+    RevenueSnapshot: model(RevenueSnapshot, RevenueSnapshotSchema) as Model<RevenueSnapshotDocument>,
   };
 }
 
