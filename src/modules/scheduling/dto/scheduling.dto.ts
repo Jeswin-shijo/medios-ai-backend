@@ -209,6 +209,8 @@ export class WaitBookDto {
 
 export class FollowUpDto {
   @IsMongoId() patientId: string;
+  /** Book into this existing follow-up row instead of creating a new one. */
+  @IsOptional() @IsMongoId() followUpId?: string;
   @IsOptional() @IsMongoId() doctorId?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(20) departmentCode?: string;
   @IsInt() @Min(1) @Max(365) inDays: number;

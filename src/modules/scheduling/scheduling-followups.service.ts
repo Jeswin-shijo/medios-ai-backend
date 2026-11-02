@@ -21,6 +21,8 @@ const NOTE_MAX = 300;
 
 export interface FollowUpOrder {
   patientId: string;
+  /** Book into this existing follow-up (a Pending, Overdue or Missed row) instead of creating a new one. */
+  followUpId?: string;
   doctorId?: string;
   departmentCode?: string;
   inDays: number;
@@ -66,10 +68,12 @@ export class SchedulingFollowupsService {
       throw new BadRequestException('"In how many days" must be a whole number from 1 to 365.');
     }
     if (input.note !== undefined && typeof input.note !== 'string') throw new BadRequestException('The note must be text.');
-    const note = (input.note ?? '').trim();
+    let note = (input.note ?? '').trim();
     if (note.length > NOTE_MAX) throw new BadRequestException(`The note is at most ${NOTE_MAX} characters.`);
     const patient = isValidObjectId(input.patientId) ? await this.patients.findById(input.patientId).exec() : null;
     if (!patient) throw new NotFoundException('Patient not found');
+    const existing = input.followUpId !== undefined ? await this.existingRow(patient, input.followUpId) : null;
+    if (existing && !note) note = existing.note ?? '';
     const doctor = await this.chooseDoctor(patient, input);
 
     const today = isoDate(clinicNow());
@@ -87,39 +91,68 @@ export class SchedulingFollowupsService {
         if (e instanceof ConflictException) continue;
         throw e;
       }
-      const item = await this.followUps.create({
+      let item: { _id: unknown };
+      if (existing) {
+        // The row keeps its type and note; it only gains the time, the doctor and the appointment.
+        const res = await this.followUps
+          .updateOne(
+            { _id: existing._id, appointmentId: { $exists: false } },
+            { $set: { status: 'Scheduled', followUpDate: displayDate(parseIsoDay(slot.date)), followUpTime: slot.time, assignedTo: doctor.name, appointmentId: apt._id } },
+          )
+          .exec();
+        if (!res.modifiedCount) {
+          await this.appointments.cancel(actor, String(apt._id), 'This follow-up was booked a moment ago');
+          throw new ConflictException('This follow-up has just been booked.');
+        }
+        item = existing;
+        await this.waitlist.settleForFollowUp(String(existing._id));
+      } else {
+        item = await this.followUps.create({
+          uhid: patient.uhid,
+          patientName: patient.name,
+          age: patient.age,
+          gender: patient.gender,
+          avatar: patient.avatar ?? '',
+          followUpDate: displayDate(parseIsoDay(slot.date)),
+          followUpTime: slot.time,
+          followUpType: 'Follow-up',
+          status: 'Scheduled',
+          assignedTo: doctor.name,
+          note,
+          appointmentId: apt._id,
+        });
+      }
+      await this.announce(patient, String(apt._id), slot.date, slot.time, doctor.name);
+      return { followUpId: String(item._id), status: 'booked', appointmentId: String(apt._id), date: slot.date, time: slot.time };
+    }
+
+    const item =
+      existing ??
+      (await this.followUps.create({
         uhid: patient.uhid,
         patientName: patient.name,
         age: patient.age,
         gender: patient.gender,
         avatar: patient.avatar ?? '',
-        followUpDate: displayDate(parseIsoDay(slot.date)),
-        followUpTime: slot.time,
+        followUpDate: displayDate(parseIsoDay(dayN)),
+        followUpTime: '',
         followUpType: 'Follow-up',
-        status: 'Scheduled',
+        status: 'Pending',
         assignedTo: doctor.name,
         note,
-        appointmentId: apt._id,
-      });
-      await this.announce(patient, String(apt._id), slot.date, slot.time, doctor.name);
-      return { followUpId: String(item._id), status: 'booked', appointmentId: String(apt._id), date: slot.date, time: slot.time };
-    }
-
-    const item = await this.followUps.create({
-      uhid: patient.uhid,
-      patientName: patient.name,
-      age: patient.age,
-      gender: patient.gender,
-      avatar: patient.avatar ?? '',
-      followUpDate: displayDate(parseIsoDay(dayN)),
-      followUpTime: '',
-      followUpType: 'Follow-up',
-      status: 'Pending',
-      assignedTo: doctor.name,
-      note,
-    });
+      }));
     const wait = await this.waitlist.add({ kind: 'appointment', refId: String(item._id), reason: 'no-slot', priority: 'routine', doctorId, dueDay: dayN });
     return { followUpId: String(item._id), status: 'waitlisted', waitItemId: wait.id };
+  }
+
+  /** The follow-up row to book into: it must be the patient's, not completed, and not booked already. */
+  private async existingRow(patient: PatientDocument, id: unknown): Promise<FollowUpDocument> {
+    const row = typeof id === 'string' && isValidObjectId(id) ? await this.followUps.findById(id).exec() : null;
+    if (!row) throw new NotFoundException('Follow-up not found');
+    if (row.uhid !== patient.uhid) throw new BadRequestException("That follow-up belongs to another patient.");
+    if (row.status === 'Completed') throw new ConflictException('That follow-up is already completed.');
+    if (row.appointmentId) throw new ConflictException('That follow-up already has an appointment.');
+    return row;
   }
 
   /** The named doctor; else the first active OP doctor of the department (by name); else the patient's usual doctor. */

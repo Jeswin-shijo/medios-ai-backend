@@ -143,4 +143,29 @@ describe('SchedulingFollowupsService', () => {
     assert.ok(!JSON.stringify(msgs[0]).includes('Asha'));
     assert.ok(msgs[0].summary.length <= 140);
   });
+
+  test('ordering with a followUpId books into that follow-up instead of creating a second one (I8)', async () => {
+    const row = await m.FollowUpItem.create({ uhid: 'MHK202600001', patientName: 'Asha Menon', age: 40, gender: 'Female', followUpDate: '20 Oct 2026', followUpType: 'Review', status: 'Overdue', assignedTo: 'Dr. Shajin', note: 'Old note' });
+    const out = await order({ followUpId: String(row._id), note: '' });
+    assert.deepEqual([out.status, out.followUpId, out.date, out.time], ['booked', String(row._id), '2026-10-27', '09:00 AM']);
+    assert.equal(await m.FollowUpItem.countDocuments({}), 1, 'no second follow-up');
+    const fu = (await m.FollowUpItem.findById(row._id).lean()) as any;
+    assert.deepEqual([fu.status, fu.followUpDate, fu.followUpTime, String(fu.appointmentId), fu.followUpType, fu.note], ['Scheduled', '27 Oct 2026', '09:00 AM', out.appointmentId, 'Review', 'Old note']);
+    const apt = (await m.Appointment.findById(out.appointmentId).lean()) as any;
+    assert.deepEqual([apt.type, apt.condition], ['Follow-up', 'Old note']);
+    // Booking the same row again is refused; so is a row of another patient.
+    await assert.rejects(() => order({ followUpId: String(row._id) }), /already/i);
+    const other = await m.FollowUpItem.create({ uhid: 'MHK-OTHER', patientName: 'Other', age: 40, gender: 'Male', followUpDate: '20 Oct 2026', followUpType: 'Review', status: 'Pending' });
+    await assert.rejects(() => order({ followUpId: String(other._id) }), BadRequestException);
+    await assert.rejects(() => order({ followUpId: 'not-an-id' }), /follow-up/i);
+  });
+
+  test('a followUpId with a full week keeps that one row Pending and wait-listed (no new row)', async () => {
+    for (const d of ['2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04']) await fill(d);
+    const row = await m.FollowUpItem.create({ uhid: 'MHK202600001', patientName: 'Asha Menon', age: 40, gender: 'Female', followUpDate: '20 Oct 2026', followUpType: 'Review', status: 'Pending', assignedTo: 'Dr. Shajin' });
+    const out = await order({ followUpId: String(row._id) });
+    assert.deepEqual([out.status, out.followUpId], ['waitlisted', String(row._id)]);
+    assert.equal(await m.FollowUpItem.countDocuments({}), 1);
+    assert.equal(await m.WaitItem.countDocuments({ refId: row._id, status: 'open', reason: 'no-slot' }), 1);
+  });
 });

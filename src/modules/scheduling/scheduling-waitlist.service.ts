@@ -365,6 +365,13 @@ export class SchedulingWaitlistService implements OnModuleInit {
     return to ? this.settle(String(item._id), to) : false;
   }
 
+  /** A follow-up that was booked outside the waitlist (from its own row): its "no free time" item is done. */
+  async settleForFollowUp(followUpId: string): Promise<boolean> {
+    if (!isValidObjectId(followUpId)) return false;
+    const item = await this.items.findOne({ kind: 'appointment', refId: followUpId, status: 'open', reason: 'no-slot' }).select('_id').lean().exec();
+    return item ? this.settle(String(item._id), 'resolved') : false;
+  }
+
   /** The reconcile pass: every open appointment item whose appointment moved or was cancelled without telling the waitlist. */
   async settleAppointmentItems(old: Date): Promise<number> {
     const open = await this.items.find({ kind: 'appointment', status: 'open', reason: { $ne: 'no-slot' }, updatedAt: { $lte: old } }).limit(500).lean().exec();
