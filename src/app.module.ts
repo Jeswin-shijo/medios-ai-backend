@@ -41,6 +41,7 @@ import { ErModule } from './modules/er/er.module';
 import { LabModule } from './modules/lab/lab.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
+import { RevenueModule } from './modules/revenue/revenue.module';
 import { OpdModule } from './modules/opd/opd.module';
 import { HealthController } from './health.controller';
 
@@ -93,6 +94,7 @@ import { HealthController } from './health.controller';
     LabModule,
     PharmacyModule,
     SchedulingModule,
+    RevenueModule,
     OpdModule,
   ],
   controllers: [HealthController],

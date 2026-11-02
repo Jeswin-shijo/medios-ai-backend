@@ -59,6 +59,7 @@ import { ConsultRequest, ConsultRequestDocument, ConsultRequestSchema } from '..
 import { WaitItem, WaitItemDocument, WaitItemSchema } from '../modules/scheduling/schemas/wait-item.schema';
 import { SchedulingSnapshot, SchedulingSnapshotDocument, SchedulingSnapshotSchema } from '../modules/scheduling/schemas/scheduling-snapshot.schema';
 import { SchedulingLock, SchedulingLockDocument, SchedulingLockSchema } from '../modules/scheduling/schemas/scheduling-lock.schema';
+import { PriceItem, PriceItemDocument, PriceItemSchema } from '../modules/revenue/schemas/price-item.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -143,6 +144,7 @@ export function models() {
     WaitItem: model(WaitItem, WaitItemSchema) as Model<WaitItemDocument>,
     SchedulingSnapshot: model(SchedulingSnapshot, SchedulingSnapshotSchema) as Model<SchedulingSnapshotDocument>,
     SchedulingLock: model(SchedulingLock, SchedulingLockSchema) as Model<SchedulingLockDocument>,
+    PriceItem: model(PriceItem, PriceItemSchema) as Model<PriceItemDocument>,
   };
 }
 
