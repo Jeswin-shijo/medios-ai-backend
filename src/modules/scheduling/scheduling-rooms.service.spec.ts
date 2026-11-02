@@ -29,7 +29,7 @@ describe('SchedulingRoomsService on the clinic clock', () => {
 
   test('rooms() keeps blocks that end after the clinic time, not after the real time', async () => {
     // Real time is long after 26 Sep 2026; the blocks are on the clinic clock.
-    const future = await svc.addBlock(ADMIN, 'ot-1', { from: new Date('2026-09-26T14:00'), to: new Date('2026-09-26T16:00'), reason: 'Deep clean' });
+    const future = await svc.addBlock(ADMIN, 'ot-1', { from: new Date('2026-09-26T14:00'), to: new Date('2026-09-27T02:00'), reason: 'Deep clean' });
     await svc.addBlock(ADMIN, 'ot-1', { from: new Date('2026-09-20T08:00'), to: new Date('2026-09-20T09:00'), reason: 'Past' });
     const rooms = await svc.rooms();
     const ot1 = rooms.find((r) => r.key === 'ot-1')!;
