@@ -351,4 +351,18 @@ describe('SchedulingConsultsService', () => {
     assert.deepEqual(r.pagedTo, { id: cardUser, name: 'Dr. Cardio2' });
     assert.equal(await m.Escalation.countDocuments({}), 1);
   });
+  test('list({patientId}) returns that patient\'s consults even when more than 200 newer ones exist for others', async () => {
+    const mine = await ask('routine');
+    const other = new Types.ObjectId();
+    const base = (await m.ConsultRequest.findById(mine.id).lean())!;
+    const { _id, ...rest } = base as any;
+    await m.ConsultRequest.insertMany(Array.from({ length: 210 }, (_, i) => ({
+      ...rest, number: `CO-X${i}`, patient: other, requestedAt: new Date(base.requestedAt.getTime() + (i + 1) * MIN),
+    })));
+    assert.ok(!(await consults.list()).some((v) => v.id === mine.id), 'the plain list drops it past the cap');
+    const got = await consults.list(undefined, patientId);
+    assert.deepEqual(got.map((v) => v.id), [mine.id]);
+    assert.deepEqual(await consults.list(undefined, String(new Types.ObjectId())), []);
+    assert.deepEqual(await consults.list(undefined, 'not-an-id'), []);
+  });
 });

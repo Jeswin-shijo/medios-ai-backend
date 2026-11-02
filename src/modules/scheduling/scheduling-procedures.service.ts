@@ -36,6 +36,8 @@ const BUMPED_MESSAGE = 'scheduling.procedure-bumped';
 const REQUESTED_GRACE_MS = 30_000;
 const TEXT_MAX = 300;
 const LIST_LIMIT = 300;
+/** One patient's list is capped higher so their open items never drop out of the window. */
+const PATIENT_LIST_LIMIT = 500;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const PRIORITIES: Priority[] = ['stat', 'urgent', 'routine'];
 const CASE_PRIORITY: Record<Priority, CasePriority> = { stat: 'high', urgent: 'medium', routine: 'low' };
@@ -734,7 +736,8 @@ export class SchedulingProceduresService implements OnModuleInit {
       if (!isValidObjectId(filter.patientId)) return [];
       q.patient = new Types.ObjectId(filter.patientId);
     }
-    const limit = Math.min(Math.max(Math.trunc(Number(filter.limit) || LIST_LIMIT), 1), LIST_LIMIT);
+    const cap = filter.patientId !== undefined ? PATIENT_LIST_LIMIT : LIST_LIMIT;
+    const limit = Math.min(Math.max(Math.trunc(Number(filter.limit) || cap), 1), cap);
     const rows = await this.bookings
       .find(q)
       .sort(filter.day !== undefined ? { start: 1, _id: 1 } : { createdAt: -1, _id: -1 })

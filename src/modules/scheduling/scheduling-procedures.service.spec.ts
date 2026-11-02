@@ -350,6 +350,19 @@ describe('SchedulingProceduresService', () => {
     assert.equal(next.team.find((t: any) => t.role === 'cath-nurse')!.name, 'Beena', 'Anitha has 45 minutes booked today');
   });
 
+  test('list({patientId}) returns that patient\'s procedures even when more than 300 newer ones exist for others', async () => {
+    await cathTeam();
+    const mine = await ask();
+    const { _id, ...rest } = (await m.ProcedureBooking.findById(mine.id).lean()) as any;
+    const other = new Types.ObjectId();
+    await m.ProcedureBooking.insertMany(Array.from({ length: 310 }, (_, i) => ({
+      ...rest, number: `PR-X${i}`, patient: other, createdAt: new Date(Date.now() + (i + 1) * 1000),
+    })));
+    assert.ok(!(await procedures.list()).some((v) => v.id === mine.id), 'the plain list drops it past the cap');
+    assert.deepEqual((await procedures.list({ patientId })).map((v) => v.id), [mine.id]);
+    assert.equal((await procedures.list({ patientId: String(other) })).length, 310, 'a patient list is capped at 500, not 300');
+  });
+
   test('list and board; request refuses bad input', async () => {
     await cathTeam();
     const a = await ask();

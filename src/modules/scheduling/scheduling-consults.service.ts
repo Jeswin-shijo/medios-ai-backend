@@ -225,8 +225,14 @@ export class SchedulingConsultsService {
   // ---------- reads ----------
 
   /** Consults newest first, optionally of one status (at most 200). */
-  async list(status?: ConsultStatus): Promise<ConsultView[]> {
-    const rows = await this.consults.find(status ? { status } : {}).sort({ requestedAt: -1, _id: -1 }).limit(200).lean<Lean[]>().exec();
+  /** Newest first. The plain list is capped at 200; one patient's list at 500 so their open items never drop out. */
+  async list(status?: ConsultStatus, patientId?: string): Promise<ConsultView[]> {
+    const q: Record<string, unknown> = status ? { status } : {};
+    if (patientId !== undefined) {
+      if (!isValidObjectId(patientId)) return [];
+      q.patient = new Types.ObjectId(patientId);
+    }
+    const rows = await this.consults.find(q).sort({ requestedAt: -1, _id: -1 }).limit(patientId !== undefined ? 500 : 200).lean<Lean[]>().exec();
     return Promise.all(rows.map((c) => this.view(c)));
   }
 

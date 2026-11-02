@@ -180,7 +180,7 @@ export class SchedulingController {
   @Roles(...SCHED_READ)
   @ApiOperation({ summary: 'Procedure requests, optionally of one status or day' })
   async listProcedures(@Query() q: ProceduresQueryDto) {
-    return { procedures: await this.procedures.list({ status: q.status, day: q.day }) };
+    return { procedures: await this.procedures.list({ status: q.status, day: q.day, patientId: q.patientId }) };
   }
 
   @Get('procedures/board')
@@ -231,7 +231,7 @@ export class SchedulingController {
   @Roles(...SCHED_READ)
   @ApiOperation({ summary: 'Consult requests, newest first, optionally of one status' })
   async listConsults(@Query() q: ConsultsQueryDto) {
-    return { consults: await this.consults.list(q.status) };
+    return { consults: await this.consults.list(q.status, q.patientId) };
   }
 
   @Post('consults')

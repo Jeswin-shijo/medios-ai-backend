@@ -76,6 +76,7 @@ export class AppointmentsQueryDto {
 export class ProceduresQueryDto {
   @IsOptional() @IsIn([...PROCEDURE_STATUSES]) status?: string;
   @IsOptional() @RealDay('day') day?: string;
+  @IsOptional() @IsMongoId() patientId?: string;
 }
 
 export class BoardQueryDto {
@@ -84,6 +85,7 @@ export class BoardQueryDto {
 
 export class ConsultsQueryDto {
   @IsOptional() @IsIn([...CONSULT_STATUSES]) status?: (typeof CONSULT_STATUSES)[number];
+  @IsOptional() @IsMongoId() patientId?: string;
 }
 
 export class RosterQueryDto {

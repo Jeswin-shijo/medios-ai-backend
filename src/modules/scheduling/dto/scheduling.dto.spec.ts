@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import {
-  BookAppointmentDto, ConsultRequestDto, FollowUpDto, LeaveRangeDto, MoveAppointmentDto, OverviewQueryDto, ProcedureRequestDto, RoomBlockDto,
+  BookAppointmentDto, ConsultRequestDto, ConsultsQueryDto, ProceduresQueryDto, FollowUpDto, LeaveRangeDto, MoveAppointmentDto, OverviewQueryDto, ProcedureRequestDto, RoomBlockDto,
   RosterEntryDto, SchedulingSlotsQueryDto,
 } from './scheduling.dto';
 
@@ -70,5 +70,13 @@ describe('Scheduling DTOs: real dates, room blocks, whitelist', () => {
     assert.equal('bookedVia' in out, false);
     assert.equal('leadMinutes' in out, false);
     assert.equal(out.date, '2026-10-05');
+  });
+  test('the consults and procedures lists take an optional patientId that must be an id', async () => {
+    const q = <T>(metatype: new () => T, value: unknown) => pipe.transform(value, { type: 'query', metatype }) as Promise<T>;
+    assert.equal(((await q(ConsultsQueryDto, { patientId: ID })) as ConsultsQueryDto).patientId, ID);
+    assert.equal(((await q(ProceduresQueryDto, { patientId: ID })) as ProceduresQueryDto).patientId, ID);
+    await q(ConsultsQueryDto, {});
+    await assert.rejects(() => q(ConsultsQueryDto, { patientId: 'nope' }), BadRequestException);
+    await assert.rejects(() => q(ProceduresQueryDto, { patientId: 'nope' }), BadRequestException);
   });
 });
