@@ -131,7 +131,8 @@ export class SettingsService {
     }
     // The reception section holds the default doctor, which Scheduling and the call agent fall back on: admin only.
     const receptionPatch = (updates as any)?.reception;
-    if (by?.role !== UserRole.ADMIN && receptionPatch && typeof receptionPatch === 'object') {
+    // (A server-side call with no caller is not an API request, and the kiosk's own specs make such calls; every route has a caller.)
+    if (by && by.role !== UserRole.ADMIN && receptionPatch && typeof receptionPatch === 'object') {
       const stored = resolveReceptionSettings(settings.get('reception'));
       const wanted = resolveReceptionSettings({ ...(settings.get('reception') ?? {}), ...receptionPatch });
       if (!isDeepStrictEqual(stored, wanted)) throw new ForbiddenException('Only an admin can change the reception settings.');

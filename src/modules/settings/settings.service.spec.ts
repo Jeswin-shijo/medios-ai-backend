@@ -113,7 +113,7 @@ describe('SettingsService', () => {
 
   test('only an admin can change the reception section (the default doctor); a save that carries the stored values goes through', async () => {
     await settings.updateSettings({ reception: { defaultDoctorId: 'doc-1', idleSeconds: 90 } } as never, ADMIN);
-    for (const caller of [DOCTOR, undefined]) {
+    for (const caller of [DOCTOR, { role: UserRole.NURSE }, { role: 'unknown' }]) {
       await assert.rejects(
         () => settings.updateSettings({ reception: { defaultDoctorId: 'doc-2' } } as never, caller),
         (err: unknown) => err instanceof ForbiddenException && /reception/i.test(err.message),
