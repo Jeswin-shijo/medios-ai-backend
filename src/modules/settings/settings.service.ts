@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { Model } from 'mongoose';
 import { HospitalSettings, HospitalSettingsDocument } from './schemas/settings.schema';
 import { DEFAULT_CALL_AGENT_SETTINGS, resolveCallAgentSettings } from '../calls/call-agent-settings';
+import { resolveReceptionSettings } from '../reception/reception-settings';
 import { DEFAULT_QUEUE_SETTINGS } from '../queue/queue-settings';
 import { DEFAULT_RECEPTION_SETTINGS } from '../reception/reception-settings';
 import { UserRole } from '../users/schemas/user.schema';
@@ -127,6 +128,13 @@ export class SettingsService {
       if (erPatch.targets !== undefined && !isDeepStrictEqual(erPatch.targets, stored)) {
         throw new ForbiddenException('Only an admin can change pathway targets.');
       }
+    }
+    // The reception section holds the default doctor, which Scheduling and the call agent fall back on: admin only.
+    const receptionPatch = (updates as any)?.reception;
+    if (by?.role !== UserRole.ADMIN && receptionPatch && typeof receptionPatch === 'object') {
+      const stored = resolveReceptionSettings(settings.get('reception'));
+      const wanted = resolveReceptionSettings({ ...(settings.get('reception') ?? {}), ...receptionPatch });
+      if (!isDeepStrictEqual(stored, wanted)) throw new ForbiddenException('Only an admin can change the reception settings.');
     }
     const callAgentPatch = (updates as any)?.callAgent;
     if (by?.role !== UserRole.ADMIN && callAgentPatch && typeof callAgentPatch === 'object') {

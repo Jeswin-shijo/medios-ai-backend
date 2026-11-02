@@ -110,4 +110,21 @@ describe('SettingsService', () => {
     await assert.rejects(() => settings.updateSettings({ callAgent: { inboundChanges: true } } as any, DOCTOR), ForbiddenException);
     await assert.rejects(() => settings.updateSettings({ callAgent: { publicApiUrl: '' } } as any, DOCTOR), ForbiddenException);
   });
+
+  test('only an admin can change the reception section (the default doctor); a save that carries the stored values goes through', async () => {
+    await settings.updateSettings({ reception: { defaultDoctorId: 'doc-1', idleSeconds: 90 } } as never, ADMIN);
+    for (const caller of [DOCTOR, undefined]) {
+      await assert.rejects(
+        () => settings.updateSettings({ reception: { defaultDoctorId: 'doc-2' } } as never, caller),
+        (err: unknown) => err instanceof ForbiddenException && /reception/i.test(err.message),
+      );
+    }
+    await assert.rejects(() => settings.updateSettings({ reception: { idleSeconds: 30 } } as never, DOCTOR), ForbiddenException);
+    assert.equal(((await settings.getSettings()) as any).reception.defaultDoctorId, 'doc-1');
+    // A doctor's save that sends the reception section back unchanged still works, and so does a save without it.
+    await settings.updateSettings({ reception: { defaultDoctorId: 'doc-1', idleSeconds: 90 } } as never, DOCTOR);
+    await settings.updateSettings({ preferences: { compactMode: true } } as never, DOCTOR);
+    await settings.updateSettings({ reception: { defaultDoctorId: 'doc-2' } } as never, ADMIN);
+    assert.equal(((await settings.getSettings()) as any).reception.defaultDoctorId, 'doc-2');
+  });
 });
