@@ -103,14 +103,16 @@ export class SchedulingReconcileService {
   }
 
   /**
-   * An open procedure wait item whose booking has moved on (booked, started or done: resolved; cancelled: cancelled).
+   * An open wait item whose booking has moved on. Procedures: booked, started or done is resolved, cancelled is cancelled.
+   * Appointments: moved to another time or doctor is resolved, cancelled is cancelled.
    * This covers "Book offered" failing to book while the pass booked it later.
    */
   private async settleWaitItems(old: Date): Promise<number> {
+    const appointmentItems = await this.waitlist.settleAppointmentItems(old);
     const open = await this.waitItems.find({ kind: 'procedure', status: 'open', updatedAt: { $lte: old } }).select('_id refId').lean().exec();
-    if (!open.length) return 0;
+    if (!open.length) return appointmentItems;
     const state = new Map((await this.bookings.find({ _id: { $in: open.map((w) => w.refId) } }).select('status').lean().exec()).map((b) => [String(b._id), b.status]));
-    let n = 0;
+    let n = appointmentItems;
     for (const w of open) {
       const status = state.get(String(w.refId));
       const to = status === 'cancelled' ? 'cancelled' : status === 'booked' || status === 'in-progress' || status === 'done' ? 'resolved' : null;

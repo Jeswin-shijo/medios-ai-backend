@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { appointmentStart, clinicNow, displayDate, parseIsoDay } from '../../common/utils/clinic-time';
+import { appointmentStart, clinicNow, clockMinutes, displayDate, parseIsoDay } from '../../common/utils/clinic-time';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
 import type { Actor } from '../beds/actor';
 import { FollowUpDocument, FollowUpItem } from '../follow-ups/schemas/follow-up.schema';
@@ -166,6 +166,8 @@ export class SchedulingWaitlistService implements OnModuleInit {
 
   /** A slot was freed: it goes first in the offers of the oldest open "earlier wanted" item of that doctor whose time is later. Never books. */
   async onFreed(slot: FreedSlot): Promise<void> {
+    // Whoever freed it (a move or a cancel, here, in a call or in the plain appointments API), the appointment's own item is done.
+    await this.settleFor(slot.id);
     if (!slot.doctorId) return;
     const freedStart = appointmentStart(slot.date, slot.time).getTime();
     // Not offered if it is already past the booking floor, or taken again (a repeated cancel result, P6-a).
@@ -342,6 +344,40 @@ export class SchedulingWaitlistService implements OnModuleInit {
     if (outcome !== 'booked') throw new ConflictException(OFFER_CHANGED);
   }
 
+  /**
+   * Closes the open item of an appointment that was cancelled (item cancelled) or moved to another time or doctor
+   * (item resolved). A follow-up with no slot has no appointment yet and is left alone.
+   */
+  async settleFor(appointmentId: string): Promise<boolean> {
+    if (!isValidObjectId(appointmentId)) return false;
+    const item = await this.items.findOne({ kind: 'appointment', refId: appointmentId, status: 'open', reason: { $ne: 'no-slot' } }).lean().exec();
+    if (!item) return false;
+    const apt = await this.appointments.findById(appointmentId).select('status date time doctorId').lean().exec();
+    const to = this.settledState(item as Lean<WaitItem>, apt);
+    return to ? this.settle(String(item._id), to) : false;
+  }
+
+  /** The reconcile pass: every open appointment item whose appointment moved or was cancelled without telling the waitlist. */
+  async settleAppointmentItems(old: Date): Promise<number> {
+    const open = await this.items.find({ kind: 'appointment', status: 'open', reason: { $ne: 'no-slot' }, updatedAt: { $lte: old } }).limit(500).lean().exec();
+    if (!open.length) return 0;
+    const apts = new Map((await this.appointments.find({ _id: { $in: open.map((w) => w.refId) } }).select('status date time doctorId').lean().exec()).map((a) => [String(a._id), a]));
+    let n = 0;
+    for (const w of open) {
+      const to = this.settledState(w as Lean<WaitItem>, apts.get(String(w.refId)) ?? null);
+      if (to && (await this.settle(String(w._id), to))) n++;
+    }
+    return n;
+  }
+
+  private settledState(item: Lean<WaitItem>, apt: { status: string; date: string; time: string; doctorId?: string } | null): 'resolved' | 'cancelled' | null {
+    if (!apt || apt.status === 'Canceled') return 'cancelled';
+    const o = item.original as { date?: string; time?: string };
+    const sameDoctor = !apt.doctorId || !item.doctorId || apt.doctorId === item.doctorId;
+    if (apt.date !== o.date || clockMinutes(apt.time) !== clockMinutes(o.time ?? '') || !sameDoctor) return 'resolved';
+    return null;
+  }
+
   /** Closes an open item as resolved or cancelled, with its age alert (the reconcile pass, for a booking that moved on). True when it changed. */
   async settle(id: string, status: 'resolved' | 'cancelled'): Promise<boolean> {
     const res = await this.items.updateOne({ _id: id, status: 'open' }, { $set: { status, resolvedAt: new Date() } }).exec();
@@ -355,7 +391,9 @@ export class SchedulingWaitlistService implements OnModuleInit {
       .lean()
       .exec();
     await this.completeAlert(String(item._id));
-    return this.view((saved ?? item) as Lean<WaitItem>);
+    // Already closed by the move itself (a freed slot settles the appointment's own item): report what is stored.
+    const stored = saved ?? ((await this.items.findById(item._id).lean().exec()) as Lean<WaitItem> | null);
+    return this.view((stored ?? item) as Lean<WaitItem>);
   }
 
   private async completeAlert(itemId: string) {

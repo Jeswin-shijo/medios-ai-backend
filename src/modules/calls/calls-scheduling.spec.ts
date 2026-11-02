@@ -256,4 +256,20 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
     await calls.recordResult({ providerCallId: 'x2', outcome: 'booked', chosenSlot: 1, summary: '', transcript: [] });
     assert.equal(await m.Appointment.countDocuments({ uhid: 'U2', status: 'Scheduled' }), 1);
   });
+
+  test('an inbound cancel or move settles the appointment\'s waitlist item', async () => {
+    await m.WaitItem.syncIndexes();
+    schedulingApts.onFreed.push((slot) => waitlist.onFreed(slot));
+    const p = await patient('U1', 'Rekha Suresh', { doctor: 'Dr. Priya' });
+    const a1 = await schedulingApts.book(ADMIN, { patientId: String(p._id), doctorId: String(afternoon._id), date: dayOffset(4), time: '03:00 PM' });
+    const a2 = await schedulingApts.book(ADMIN, { patientId: String(p._id), doctorId: String(afternoon._id), date: dayOffset(5), time: '03:00 PM' });
+    for (const a of [a1, a2]) await waitlist.add({ kind: 'appointment', refId: String(a._id), reason: 'patient-request', priority: 'routine' });
+    const ref = await verify('Rekha Suresh');
+    await inbound.run('list_appointments', { caller_ref: ref }, STRONG);
+    await inbound.run('find_free_slots', { caller_ref: ref, appointment_id: 'A2', preferred_date: dayOffset(8) }, STRONG);
+    assert.equal((await inbound.run('cancel_appointment', { caller_ref: ref, appointment_id: 'A1' }, STRONG)).ok, true);
+    assert.equal((await inbound.run('reschedule_appointment', { caller_ref: ref, appointment_id: 'A2', slot_id: 'S1' }, STRONG)).ok, true);
+    const state = async (a: any) => ((await m.WaitItem.findOne({ refId: a._id }).lean()) as any).status;
+    assert.deepEqual([await state(a1), await state(a2)], ['cancelled', 'resolved']);
+  });
 });

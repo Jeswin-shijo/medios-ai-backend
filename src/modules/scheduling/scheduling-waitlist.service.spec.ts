@@ -347,4 +347,34 @@ describe('SchedulingWaitlistService', () => {
     assert.ok(still.offered.every((o: any) => new Date(o.start).getTime() !== offeredStart), 'the offers were refreshed');
     assert.equal(await m.TaskAlertItem.countDocuments({ link: new RegExp(`scheduling-wait.*${v.id}`) }), 0, 'no wait alert from Book offered');
   });
+
+  test('an appointment item settles when the appointment is moved or cancelled outside the waitlist (I4)', async () => {
+    const moved = await book('Moved', shajin, D2, '09:00 AM');
+    const gone = await book('Gone', shajin, D2, '09:15 AM');
+    const kept = await book('Kept', shajin, D2, '09:30 AM');
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: D2, to: D2, reason: '' }] });
+    assert.equal((await openItems()).length, 3);
+    const item = async (apt: any) => (await m.WaitItem.findOne({ refId: apt._id }).lean()) as any;
+    // The front desk moves one on the Appointments screen, and cancels another.
+    await appts.move(FRONT, String(moved._id), { date: D1, time: '10:00 AM' });
+    await appts.cancel(FRONT, String(gone._id), 'Patient cancelled');
+    assert.equal((await item(moved)).status, 'resolved');
+    assert.equal((await item(gone)).status, 'cancelled');
+    assert.equal((await item(kept)).status, 'open');
+    assert.equal((await m.TaskAlertItem.countDocuments({ link: `scheduling-waitlist:${(await item(moved))._id}`, status: { $ne: 'Completed' } })), 0);
+  });
+
+  test('settleAppointmentItems (the reconcile pass) settles items whose appointment changed through a direct save (calls, other paths)', async () => {
+    const a = await book('A', shajin, D2, '09:00 AM');
+    const b = await book('B', shajin, D2, '09:15 AM');
+    const c = await book('C', shajin, D2, '09:30 AM');
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: D2, to: D2, reason: '' }] });
+    await m.Appointment.updateOne({ _id: a._id }, { $set: { date: D1, time: '11:00 AM', slotKey: `${shajin._id}|${D1}|11:00 AM` } });
+    await m.Appointment.updateOne({ _id: b._id }, { $set: { status: 'Canceled' }, $unset: { slotKey: 1 } });
+    mock.timers.tick(60_000);
+    assert.equal(await waitlist.settleAppointmentItems(new Date(Date.now() - 30_000)), 2);
+    const state = async (apt: any) => ((await m.WaitItem.findOne({ refId: apt._id }).lean()) as any).status;
+    assert.deepEqual([await state(a), await state(b), await state(c)], ['resolved', 'cancelled', 'open']);
+    assert.equal(await waitlist.settleAppointmentItems(new Date(Date.now() - 30_000)), 0, 'nothing more to settle');
+  });
 });
