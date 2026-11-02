@@ -377,4 +377,22 @@ describe('SchedulingWaitlistService', () => {
     assert.deepEqual([await state(a), await state(b), await state(c)], ['resolved', 'cancelled', 'open']);
     assert.equal(await waitlist.settleAppointmentItems(new Date(Date.now() - 30_000)), 0, 'nothing more to settle');
   });
+
+  test('removing leave cancels the open doctor-leave items whose appointment is no longer on leave (I6)', async () => {
+    const a = await book('A', shajin, D2, '09:00 AM');
+    const b = await book('B', shajin, D1, '09:00 AM');
+    await book('Other', arun, D2, '09:00 AM');
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: D1, to: D1, reason: '' }, { from: D2, to: D2, reason: '' }] });
+    assert.equal((await openItems()).length, 2);
+    // The admin removes the D2 leave; D1 stays.
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [{ from: D1, to: D1, reason: '' }] });
+    const state = async (apt: any) => ((await m.WaitItem.findOne({ refId: apt._id }).lean()) as any).status;
+    assert.deepEqual([await state(a), await state(b)], ['cancelled', 'open']);
+    // All leave removed: the rest go too, and a late-added item of a patient request is not touched.
+    const c = await book('C', shajin, '2026-10-23', '09:00 AM');
+    await waitlist.add({ kind: 'appointment', refId: String(c._id), reason: 'patient-request', priority: 'routine' });
+    await doctors.setProfile(ADMIN, String(shajin._id), { leave: [] });
+    assert.deepEqual([await state(a), await state(b), await state(c)], ['cancelled', 'cancelled', 'open']);
+    assert.equal((await m.Appointment.findById(b._id).lean() as any).status, 'Scheduled', 'the appointments themselves are untouched');
+  });
 });

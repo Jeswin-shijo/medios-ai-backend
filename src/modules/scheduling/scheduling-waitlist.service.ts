@@ -203,6 +203,14 @@ export class SchedulingWaitlistService implements OnModuleInit {
         this.log.warn(`Could not wait-list appointment ${a._id}: ${(e as Error).message}`);
       }
     }
+    // Leave that was removed or shortened: its items no longer have a reason to wait.
+    const stillOnLeave = info.appointments.map((a) => String(a._id));
+    const stale = await this.items
+      .find({ kind: 'appointment', status: 'open', reason: 'doctor-leave', doctorId: info.doctorId, refId: { $nin: stillOnLeave } })
+      .select('_id')
+      .lean()
+      .exec();
+    for (const i of stale) await this.settle(String(i._id), 'cancelled');
   }
 
   // ---------- ageing ----------
