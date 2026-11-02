@@ -5,6 +5,8 @@ import { OpDoctor, OpDoctorSchema } from '../opd/schemas/op-doctor.schema';
 import { SettingsModule } from '../settings/settings.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
 import { Patient, PatientSchema } from '../patients/schemas/patient.schema';
+import { TaskAlertItem, TaskAlertItemSchema } from '../tasks-alerts/schemas/task-alert.schema';
+import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { PriceListService } from './price-list.service';
 import { RevenueSettingsService } from './revenue-settings.service';
 import { RevenueBillsService } from './revenue-bills.service';
@@ -35,11 +37,12 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
       { name: Refund.name, schema: RefundSchema },
       { name: Correction.name, schema: CorrectionSchema },
       { name: RevenueSnapshot.name, schema: RevenueSnapshotSchema },
+      { name: TaskAlertItem.name, schema: TaskAlertItemSchema },
     ]),
     SettingsModule,
     CoordinatorModule, // the counter model
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration],
 })
 export class RevenueModule {}

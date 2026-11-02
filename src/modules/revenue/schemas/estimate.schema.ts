@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { ActorRef, ActorRefSchema } from './actor-ref';
 
 export type EstimateDocument = Estimate & Document;
@@ -13,7 +13,7 @@ export const EstimateLineSchema = SchemaFactory.createForClass(EstimateLine);
 
 @Schema({ timestamps: true })
 export class Estimate {
-  @Prop({ type: Types.ObjectId, required: true, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
   bill: Types.ObjectId;
 
   @Prop({ type: [EstimateLineSchema], default: [] })

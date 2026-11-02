@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import type { WardType } from '../../beds/bed-types';
 
 export type BillDocument = Bill & Document;
@@ -27,7 +27,7 @@ export class Bill {
   @Prop({ required: true, unique: true })
   number: string;
 
-  @Prop({ type: Types.ObjectId, required: true, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
   patient: Types.ObjectId;
 
   @Prop({ required: true })
@@ -42,16 +42,16 @@ export class Bill {
   @Prop({ type: String, required: true, enum: BILL_STATES, default: 'open' })
   state: BillState;
 
-  @Prop({ type: Types.ObjectId, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, index: true })
   case?: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   erVisit?: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   admission?: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   appointment?: Types.ObjectId;
 
   /** The clinic day (YYYY-MM-DD) for opd and walk-in bills. */

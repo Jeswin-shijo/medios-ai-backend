@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { ActorRef, ActorRefSchema } from './actor-ref';
 import type { PaymentMode } from './payment.schema';
 
@@ -22,7 +22,7 @@ export class Refund {
   @Prop({ required: true, unique: true })
   number: string;
 
-  @Prop({ type: Types.ObjectId, required: true, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
   bill: Types.ObjectId;
 
   @Prop({ required: true, min: 1 })
@@ -31,7 +31,7 @@ export class Refund {
   @Prop({ type: String, required: true, enum: REFUND_STATES, default: 'requested' })
   state: RefundState;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   approvalId?: Types.ObjectId;
 
   @Prop({ type: RefundPaidSchema })

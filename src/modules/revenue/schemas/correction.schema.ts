@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { ActorRef, ActorRefSchema } from './actor-ref';
 
 export type CorrectionDocument = Correction & Document;
@@ -11,10 +11,10 @@ export type CorrectionState = (typeof CORRECTION_STATES)[number];
 
 @Schema({ timestamps: true })
 export class Correction {
-  @Prop({ type: Types.ObjectId, required: true, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
   bill: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   line?: Types.ObjectId;
 
   @Prop({ type: String, required: true, enum: CORRECTION_KINDS })
@@ -41,7 +41,7 @@ export class Correction {
   @Prop({ type: String, required: true, enum: CORRECTION_STATES, default: 'pending' })
   state: CorrectionState;
 
-  @Prop({ type: Types.ObjectId })
+  @Prop({ type: MongooseSchema.Types.ObjectId })
   approvalId?: Types.ObjectId;
 
   @Prop({ type: Date })

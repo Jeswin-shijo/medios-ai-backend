@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { PRICE_CATEGORIES, PriceCategory } from '../revenue-catalogue';
 import { ActorRef, ActorRefSchema } from './actor-ref';
 
@@ -15,7 +15,7 @@ export const ChargeSourceSchema = SchemaFactory.createForClass(ChargeSource);
 /** One line on a bill. Never edited or deleted: changes are corrections. */
 @Schema({ timestamps: true })
 export class ChargeLine {
-  @Prop({ type: Types.ObjectId, required: true, index: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
   bill: Types.ObjectId;
 
   @Prop({ required: true })
