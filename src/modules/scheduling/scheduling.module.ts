@@ -14,6 +14,7 @@ import { SchedulingController } from './scheduling.controller';
 import { SchedulingScheduler } from './scheduling.scheduler';
 import { SchedulingRoomsService } from './scheduling-rooms.service';
 import { SchedulingCoordinatorRegistration } from './scheduling-coordinator.registration';
+import { SchedulingOpdMigration } from './scheduling-opd.migration';
 import { SchedulingAppointmentsService } from './scheduling-appointments.service';
 import { SchedulingConflictsService } from './scheduling-conflicts.service';
 import { SchedulingConsultsService } from './scheduling-consults.service';
@@ -80,6 +81,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
     SchedulingAiService,
     SchedulingOverviewService,
     SchedulingRoomsService,
+    SchedulingOpdMigration,
     SchedulingScheduler,
   ],
   exports: [SchedulingSettingsService, SchedulingRosterService, SchedulingDoctorsService, SchedulingAppointmentsService, SchedulingProceduresService, SchedulingWaitlistService, SchedulingFollowupsService, SchedulingConsultsService, SchedulingConflictsService, SchedulingReconcileService, SchedulingOverviewService, SchedulingRoomsService],
