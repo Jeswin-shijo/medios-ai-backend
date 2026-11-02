@@ -205,4 +205,45 @@ describe('RevenueCaptureService', () => {
     await deliver('er', 'er.arrived', { visitId: String(v._id), visitNumber: v.number, complaint: 'x' });
     assert.equal(await m.ChargeLine.countDocuments({}), 0);
   });
+
+  test('a replay after the bill is settled opens no new bill', async () => {
+    await price('er:registration', 200);
+    await price('er:doctor', 500);
+    await price('lab:cbc', 300);
+    await price('proc:angiography', 25000);
+    await price('consult:urgent', 800);
+    const v = await visit();
+    const r = await labRequest([{ test: 'cbc' }]);
+    const b = await m.ProcedureBooking.create({ number: 'PB-2', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, procedure: 'angiography', priority: 'urgent', requestedBy: BY, earliest: new Date() } as any);
+    const c = await m.ConsultRequest.create({ number: 'CN-2', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, departmentCode: 'cardio', priority: 'urgent', dueAt: new Date(), requestedBy: BY, requestedAt: new Date() } as any);
+    const order = await m.PharmacyOrder.create({ number: 'PO-2', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, setting: 'ER', orderedBy: BY, priority: 'routine', orderedAt: new Date() });
+    await price('med:para500', 4);
+    const pl = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued' });
+    const send = async () => {
+      await deliver('er', 'er.arrived', { visitId: String(v._id), visitNumber: v.number, complaint: 'x' });
+      await deliver('er', 'er.doctor-seen', { visitId: String(v._id) });
+      await deliver('lab', 'lab.collected', { requestId: String(r._id), sampleId: 's1', sampleNumber: 'S-1', tube: 'x', tests: ['cbc'] });
+      await deliver('pharmacy', 'pharmacy.issued', issued(String(pl._id), 1));
+      await deliver('scheduling', 'scheduling.procedure-done', { bookingId: String(b._id), number: 'PB-2', procedure: 'angiography', priority: 'urgent', status: 'done' });
+      await deliver('scheduling', 'scheduling.consult-seen', { consultId: String(c._id), number: 'CN-2', department: 'Cardiology', priority: 'urgent', dueAt: new Date() });
+    };
+    await send();
+    const before = await m.ChargeLine.countDocuments({});
+    await m.Bill.updateMany({}, { state: 'settled' });
+    const bills0 = await m.Bill.countDocuments({});
+    await send();
+    assert.equal(await m.Bill.countDocuments({}), bills0);
+    assert.equal(await m.Bill.countDocuments({ state: 'open' }), 0);
+    assert.equal(await m.ChargeLine.countDocuments({}), before);
+  });
+
+  test('a failed price lookup still charges 0 with needs price and does not throw', async () => {
+    prices.priceFor = async () => {
+      throw new Error('db down');
+    };
+    const v = await visit();
+    await deliver('er', 'er.arrived', { visitId: String(v._id), visitNumber: v.number, complaint: 'x' });
+    const l = (await lines())[0];
+    assert.deepEqual([l.code, l.name, l.unitPrice, l.amount, l.needsPrice], ['er:registration', 'er:registration', 0, 0, true]);
+  });
 });

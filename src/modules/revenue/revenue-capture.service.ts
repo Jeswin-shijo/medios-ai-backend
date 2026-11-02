@@ -24,6 +24,8 @@ export interface SuggestedReversal {
   reason: string;
 }
 
+type Msg = { case: string | null; payload: Record<string, unknown> };
+
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 
 /**
@@ -51,7 +53,7 @@ export class RevenueCaptureService {
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
   ) {
-    const on = (type: string, fn: (message: { case: string | null; payload: Record<string, unknown> }) => Promise<void>) =>
+    const on = (type: string, fn: (message: Msg) => Promise<void>) =>
       registration.capture.set(type, (id) => this.run(type, id, fn));
     on('er.arrived', (m) => this.erArrived(m));
     on('er.doctor-seen', (m) => this.erDoctorSeen(m));
@@ -66,7 +68,7 @@ export class RevenueCaptureService {
   private async run(
     type: string,
     messageId: string,
-    fn: (message: { case: string | null; payload: Record<string, unknown> }) => Promise<void>,
+    fn: (message: Msg) => Promise<void>,
   ): Promise<void> {
     try {
       const message = await this.messages.get(messageId);
@@ -111,6 +113,11 @@ export class RevenueCaptureService {
     });
   }
 
+  /** True when this source was already charged, on any bill. Checked before a bill is opened, so a replay never makes an empty bill. */
+  private async charged(type: string, ref: string): Promise<boolean> {
+    return !!(await this.chargeLines.exists({ 'source.type': type, 'source.ref': ref }).exec());
+  }
+
   private async erVisit(payload: Record<string, unknown>) {
     const visitId = str(payload.visitId);
     const visit = visitId ? await this.visits.findById(visitId).lean().exec() : null;
@@ -125,21 +132,21 @@ export class RevenueCaptureService {
     return this.bills.open({ kind: 'er', erVisitId: String(visit._id), caseId, patientId: String(visit.patient) });
   }
 
-  private async erArrived(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async erArrived(m: Msg): Promise<void> {
     const visit = await this.erVisit(m.payload);
-    if (!visit) return;
+    if (!visit || (await this.charged('er.arrived', String(visit._id)))) return;
     const bill = await this.erBill(visit, m.case);
     await this.charge(String(bill._id), 'er:registration', 'er', 1, { type: 'er.arrived', ref: String(visit._id) });
   }
 
-  private async erDoctorSeen(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async erDoctorSeen(m: Msg): Promise<void> {
     const visit = await this.erVisit(m.payload);
-    if (!visit) return;
+    if (!visit || (await this.charged('er.doctor-seen', String(visit._id)))) return;
     const bill = await this.erBill(visit, m.case);
     await this.charge(String(bill._id), 'er:doctor', 'er', 1, { type: 'er.doctor-seen', ref: String(visit._id) });
   }
 
-  private async labCollected(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async labCollected(m: Msg): Promise<void> {
     const requestId = str(m.payload.requestId);
     const tests = Array.isArray(m.payload.tests) ? m.payload.tests.filter((t): t is string => typeof t === 'string') : [];
     const request = requestId ? await this.labRequests.findById(requestId).lean().exec() : null;
@@ -147,7 +154,9 @@ export class RevenueCaptureService {
       this.logger.warn(`Lab request ${requestId ?? '(none)'} not found; no charge`);
       return;
     }
-    const lines = await this.labLines.find({ request: request._id, test: { $in: tests }, status: { $ne: 'cancelled' } }).lean().exec();
+    const found = await this.labLines.find({ request: request._id, test: { $in: tests }, status: { $ne: 'cancelled' } }).lean().exec();
+    const lines = [];
+    for (const l of found) if (!(await this.charged('lab', `${request._id}:${l.test}`))) lines.push(l);
     if (!lines.length) return;
     const bill = await this.bills.forCharge({ patientId: String(request.patient), caseId: m.case });
     for (const line of lines) {
@@ -159,7 +168,7 @@ export class RevenueCaptureService {
     }
   }
 
-  private async labCancelled(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async labCancelled(m: Msg): Promise<void> {
     const requestId = str(m.payload.requestId);
     const test = str(m.payload.test);
     if (!requestId || !test) return;
@@ -179,13 +188,14 @@ export class RevenueCaptureService {
     }
   }
 
-  private async pharmacyIssued(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async pharmacyIssued(m: Msg): Promise<void> {
     const lineId = str(m.payload.lineId);
     const line = lineId ? await this.pharmacyLines.findById(lineId).lean().exec() : null;
     if (!line) {
       this.logger.warn(`Pharmacy line ${lineId ?? '(none)'} not found; no charge`);
       return;
     }
+    if (await this.charged('pharmacy.issued', String(line._id))) return;
     const order = await this.pharmacyOrders.findById(line.order).select('patient').lean().exec();
     const patientId = String(order?.patient ?? line.patient);
     const raw = Number(m.payload.quantity);
@@ -212,24 +222,26 @@ export class RevenueCaptureService {
     await this.bills.addCharge(String(bill._id), { code, name, category: 'pharmacy', qty, unitPrice: p.price, source, needsPrice: p.needsPrice, by: BY });
   }
 
-  private async procedureDone(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async procedureDone(m: Msg): Promise<void> {
     const id = str(m.payload.bookingId);
     const booking = id ? await this.procedures.findById(id).lean().exec() : null;
     if (!booking) {
       this.logger.warn(`Procedure booking ${id ?? '(none)'} not found; no charge`);
       return;
     }
+    if (await this.charged('procedure', String(booking._id))) return;
     const bill = await this.bills.forCharge({ patientId: String(booking.patient), caseId: m.case });
     await this.charge(String(bill._id), procCode(booking.procedure), 'procedure', 1, { type: 'procedure', ref: String(booking._id) });
   }
 
-  private async consultSeen(m: { case: string | null; payload: Record<string, unknown> }): Promise<void> {
+  private async consultSeen(m: Msg): Promise<void> {
     const id = str(m.payload.consultId);
     const consult = id ? await this.consults.findById(id).lean().exec() : null;
     if (!consult) {
       this.logger.warn(`Consult ${id ?? '(none)'} not found; no charge`);
       return;
     }
+    if (await this.charged('consult', String(consult._id))) return;
     const bill = await this.bills.forCharge({ patientId: String(consult.patient), caseId: m.case });
     await this.charge(String(bill._id), consultCode(consult.priority), 'consultation', 1, { type: 'consult', ref: String(consult._id) });
   }
