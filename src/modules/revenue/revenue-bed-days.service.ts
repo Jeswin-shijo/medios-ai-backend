@@ -10,6 +10,8 @@ import { PriceListService } from './price-list.service';
 import { nursingCode, wardGroupOf } from './revenue-catalogue';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { RevenueDepositsService } from './revenue-deposits.service';
+import { RevenueEstimatesService } from './revenue-estimates.service';
 import { ACTIVE_BILL_STATES, Bill, BillDocument } from './schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from './schemas/charge-line.schema';
 
@@ -43,6 +45,8 @@ export class RevenueBedDaysService {
     @InjectModel(Case.name) private readonly cases: Model<CaseDocument>,
     @InjectModel(Bill.name) private readonly billModel: Model<BillDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
+    private readonly estimates: RevenueEstimatesService,
+    private readonly deposits: RevenueDepositsService,
   ) {
     registration.capture.set('bed.assigned', (id) => this.run('bed.assigned', id, (m) => this.onAssigned(m)));
     registration.capture.set('bed.transferred', (id) => this.run('bed.transferred', id, (m) => this.onTransferred(m)));
@@ -84,16 +88,41 @@ export class RevenueBedDaysService {
     }
     if (admission.sample) return;
     // Step 1: the admission bill.
-    await this.ensureBill(admission, m.case);
-    // Step 2: bed days and nursing so far. Task 8 adds the estimate and deposit after this step.
+    const bill = await this.ensureBill(admission, m.case);
+    // Step 2: bed days and nursing so far.
     await this.chargeDue(String(admission._id));
+    // Steps 3 and 4 (R1): the estimate, then the deposit. A failure in one never stops the next.
+    await this.step('estimate', () => this.estimates.draft(String(bill._id)));
+    await this.step('deposit', () => this.deposits.raise(String(bill._id)));
   }
 
-  /** bed.transferred: the ward history lives on the Admission, so there is only the days to catch up. */
+  private async step(what: string, fn: () => Promise<unknown>): Promise<void> {
+    try {
+      await fn();
+    } catch (e) {
+      this.logger.warn(`bed.assigned: ${what} not made (${(e as Error).message})`);
+    }
+  }
+
+  /**
+   * bed.transferred: the days to catch up, then the bill takes the new ward's type and an open deposit task is rewritten
+   * with the new group's amount (a deposit already met is not asked again). A failure in one step never stops the next.
+   */
   private async onTransferred(m: Msg): Promise<void> {
     const admission = await this.admissionOf(m);
     if (!admission || admission.sample) return;
     await this.chargeDue(String(admission._id));
+    const bill = await this.billModel.findOne({ kind: 'admission', admission: admission._id, state: { $in: ACTIVE_BILL_STATES } }).exec();
+    if (!bill) return;
+    await this.step('ward update', async () => {
+      const last = admission.transfers?.length ? admission.transfers[admission.transfers.length - 1].toBed : admission.bed;
+      const bed = await this.beds.findById(last as Types.ObjectId).select('ward').lean().exec();
+      if (!bed) return;
+      const { wardType } = await this.prices.bedRate(String(bed.ward));
+      await this.billModel.updateOne({ _id: bill._id }, { $set: { wardType } }).exec();
+    });
+    await this.step('estimate', () => this.estimates.draft(String(bill._id)));
+    await this.step('deposit', () => this.deposits.raise(String(bill._id), { onlyIfOpen: true }));
   }
 
   /** bed.discharged: the case may be null and the message may carry no admission id. */

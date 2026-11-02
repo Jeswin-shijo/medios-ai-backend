@@ -13,6 +13,11 @@ import { RevenueBedDaysService } from './revenue-bed-days.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCaptureService } from './revenue-capture.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { RevenueDepositsService } from './revenue-deposits.service';
+import { RevenueEstimatesService } from './revenue-estimates.service';
+import { RevenueSettingsService } from './revenue-settings.service';
+import { RulesService } from '../coordinator/rules.service';
+import { SettingsService } from '../settings/settings.service';
 
 const H = 60 * 60 * 1000;
 const T0 = new Date('2026-09-26T00:10:00.000Z'); // admitted
@@ -66,7 +71,11 @@ describe('RevenueBedDaysService', () => {
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     // The capture service registers the other handlers; the bed-day service registers its own three.
     new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
-    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine);
+    const settingsService = new SettingsService(m.HospitalSettings);
+    const revenueSettings = new RevenueSettingsService(settingsService);
+    const estimates = new RevenueEstimatesService(reg, revenueSettings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
+    const deposits = new RevenueDepositsService(messages, reg, new RulesService(registry, settingsService, new CoordinatorEvents()), revenueSettings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
+    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits);
     reg.onModuleInit();
     svc.clock = () => at(0);
     patient = await m.Patient.create({ uhid: 'MHK202600961', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000061' });

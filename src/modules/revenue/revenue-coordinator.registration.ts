@@ -95,6 +95,7 @@ export const CAPTURE_TYPES = [
   'lab.cancelled',
   'pharmacy.issued',
   'scheduling.procedure-done',
+  'scheduling.procedure-booked',
   'scheduling.consult-seen',
   'bed.assigned',
   'bed.transferred',

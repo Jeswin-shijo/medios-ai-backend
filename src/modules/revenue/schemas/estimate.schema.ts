@@ -39,6 +39,18 @@ export class Estimate {
 
   @Prop({ type: Date })
   announcedAt?: Date;
+
+  /** The procedure bookings counted in this estimate (R17). */
+  @Prop({ type: [String], default: [] })
+  bookings: string[];
+
+  /** Lines the desk added by hand; they survive a redraft. */
+  @Prop({ type: [EstimateLineSchema], default: [] })
+  extra: EstimateLine[];
+
+  /** Set when the desk chose the number of days; a redraft keeps it. */
+  @Prop({ type: Boolean, default: false })
+  daysEdited: boolean;
 }
 
 export const EstimateSchema = SchemaFactory.createForClass(Estimate);

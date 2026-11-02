@@ -13,6 +13,8 @@ import { Bed, BedSchema } from '../beds/schemas/bed.schema';
 import { Ward, WardSchema } from '../beds/schemas/ward.schema';
 import { Case, CaseSchema } from '../coordinator/schemas/case.schema';
 import { RevenueBedDaysService } from './revenue-bed-days.service';
+import { RevenueDepositsService } from './revenue-deposits.service';
+import { RevenueEstimatesService } from './revenue-estimates.service';
 import { RevenueOpdService } from './revenue-opd.service';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { OpdModule } from '../opd/opd.module';
@@ -72,7 +74,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     AppointmentsModule, // AppointmentEvents
     OpdModule,
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService],
 })
 export class RevenueModule {}
