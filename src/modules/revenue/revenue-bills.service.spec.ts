@@ -117,4 +117,47 @@ describe('RevenueBillsService', () => {
     assert.equal((await svc.list({ kind: 'er' })).length, 1);
     assert.equal((await svc.list({ q: 'mohan' })).length, 2);
   });
+
+  test('a source is charged once across all bills', async () => {
+    const pid = String(patient._id);
+    const walk = await svc.open({ kind: 'walk-in', patientId: pid });
+    const first = await svc.addCharge(String(walk.id), line('rx-9', 150));
+    const opd = await svc.open({ kind: 'opd', patientId: pid, appointmentId: oid() });
+    const again = await svc.addCharge(String(opd.id), line('rx-9', 150));
+    assert.equal(again.created, false);
+    assert.equal(String(again.line._id), String(first.line._id));
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': 'rx-9' }), 1);
+    assert.equal((await m.Bill.findById(walk._id).lean())!.totals.charges, 150);
+    assert.equal((await m.Bill.findById(opd._id).lean())!.totals.charges, 0);
+  });
+
+  test('a failed adjust removes the new line so a retry charges cleanly', async () => {
+    const bill = await svc.open({ kind: 'walk-in', patientId: String(patient._id) });
+    const real = svc.adjust.bind(svc);
+    let fail = true;
+    svc.adjust = async (id, d) => {
+      if (fail) {
+        fail = false;
+        throw new Error('boom');
+      }
+      return real(id, d);
+    };
+    await assert.rejects(() => svc.addCharge(String(bill.id), line('rx-5', 80)), /boom/);
+    assert.equal(await m.ChargeLine.countDocuments({}), 0);
+    const r = await svc.addCharge(String(bill.id), line('rx-5', 80));
+    assert.equal(r.created, true);
+    assert.equal((await m.Bill.findById(bill._id).lean())!.totals.balance, 80);
+  });
+
+  test('a settled bill refuses charges, huge amounts are 400, and bad listeners do not break a charge', async () => {
+    const bill = await svc.open({ kind: 'walk-in', patientId: String(patient._id) });
+    await assert.rejects(() => svc.addCharge(String(bill.id), line('big', Number.MAX_SAFE_INTEGER, 2)), (e: any) => e.status === 400);
+    svc.onTotalsChanged.push(() => { throw new Error('sync'); });
+    svc.onTotalsChanged.push(() => Promise.reject(new Error('async')) as never);
+    const ok = await svc.addCharge(String(bill.id), line('ok', 10));
+    assert.equal(ok.created, true);
+    await new Promise((r) => setImmediate(r));
+    await m.Bill.updateOne({ _id: bill._id }, { state: 'settled' });
+    await assert.rejects(() => svc.addCharge(String(bill.id), line('late', 10)), (e: any) => e.status === 409);
+  });
 });

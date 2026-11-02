@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
@@ -163,7 +163,7 @@ export class RevenueBillsService {
     if (!bill) throw new NotFoundException('Bill not found');
     for (const fn of this.onTotalsChanged) {
       try {
-        fn(billId);
+        Promise.resolve(fn(billId)).catch((e) => this.logger.warn(`A totals listener failed: ${(e as Error).message}`));
       } catch (e) {
         this.logger.warn(`A totals listener failed: ${(e as Error).message}`);
       }
@@ -172,7 +172,7 @@ export class RevenueBillsService {
   }
 
   /**
-   * Adds a charge line once per source. A duplicate source is "already charged" (created: false),
+   * Adds a charge line once per source, across all bills. A duplicate source is "already charged" (created: false),
    * never an error, and never touches the totals.
    */
   async addCharge(billId: string, input: ChargeInput): Promise<{ line: ChargeLineDocument; created: boolean }> {
@@ -180,8 +180,11 @@ export class RevenueBillsService {
     if (!Number.isInteger(input.qty) || input.qty < 1) throw new BadRequestException('Quantity must be a whole number, 1 or more');
     if (!Number.isInteger(input.unitPrice)) throw new BadRequestException('Prices are whole rupees');
     const amount = input.qty * input.unitPrice;
+    if (!Number.isSafeInteger(amount)) throw new BadRequestException('That amount is too large');
     if (amount < 0 && input.source.type !== 'correction') throw new BadRequestException('Only a correction can take money off a bill');
-    if (!(await this.bills.exists({ _id: bill }))) throw new NotFoundException('Bill not found');
+    const target = await this.bills.findById(bill, { state: 1 }).lean().exec();
+    if (!target) throw new NotFoundException('Bill not found');
+    if (target.state === 'settled') throw new ConflictException('This bill is settled');
     try {
       const line = await this.lines.create({
         bill,
@@ -196,11 +199,17 @@ export class RevenueBillsService {
         by: { id: input.by.id ?? '', name: input.by.name },
         needsPrice: !!input.needsPrice,
       });
-      await this.adjust(billId, { charges: amount });
+      try {
+        await this.adjust(billId, { charges: amount });
+      } catch (e) {
+        // No total, no line: a retry can then charge cleanly.
+        await this.lines.deleteOne({ _id: line._id }).exec();
+        throw e;
+      }
       return { line, created: true };
     } catch (e) {
       if ((e as { code?: number }).code === 11000) {
-        const line = await this.lines.findOne({ bill, 'source.type': input.source.type, 'source.ref': input.source.ref }).exec();
+        const line = await this.lines.findOne({ 'source.type': input.source.type, 'source.ref': input.source.ref }).exec();
         if (line) return { line, created: false };
       }
       throw e;

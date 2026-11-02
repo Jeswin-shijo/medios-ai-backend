@@ -58,4 +58,6 @@ export class ChargeLine {
 }
 
 export const ChargeLineSchema = SchemaFactory.createForClass(ChargeLine);
-ChargeLineSchema.index({ bill: 1, 'source.type': 1, 'source.ref': 1 }, { unique: true });
+/** One charge per source across all bills: a source is never billed twice, whichever bill routing picks. */
+ChargeLineSchema.index({ 'source.type': 1, 'source.ref': 1 }, { unique: true });
+ChargeLineSchema.index({ bill: 1, chargedAt: 1 });
