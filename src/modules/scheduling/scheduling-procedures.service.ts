@@ -210,11 +210,21 @@ export class SchedulingProceduresService implements OnModuleInit {
 
   /** The lock relies on the unique key: make sure the index is there before the first claim. */
   async onModuleInit(): Promise<void> {
+    await this.checkLockIndex();
+  }
+
+  /** True while the last check of the lock's unique index failed: without it two bookings could take one room (P7-b). */
+  private lockIndexFailed = false;
+
+  private async checkLockIndex(): Promise<boolean> {
     try {
       await this.locks.init();
+      this.lockIndexFailed = false;
     } catch (e) {
-      this.logger.error(`The procedures lock index could not be built: ${(e as Error).message}`);
+      this.lockIndexFailed = true;
+      this.logger.error(`The procedures lock index could not be built, so no procedure is booked until it can: ${(e as Error).message}`);
     }
+    return !this.lockIndexFailed;
   }
 
   // ---------- asking ----------
@@ -533,6 +543,8 @@ export class SchedulingProceduresService implements OnModuleInit {
 
   /** Claims the lock (real time) or returns null when someone holds it. A duplicate key on the upsert means it is held. */
   private async claim(): Promise<Date | null> {
+    // Fail closed: without the unique index an upsert could create a second lock document. Look again, and wait if still broken.
+    if (this.lockIndexFailed && !(await this.checkLockIndex())) return null;
     const now = new Date();
     const until = new Date(now.getTime() + LOCK_MS);
     try {

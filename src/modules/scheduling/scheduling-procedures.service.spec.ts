@@ -724,4 +724,24 @@ describe('SchedulingProceduresService', () => {
     assert.deepEqual(after.map((i) => [String(i._id), JSON.stringify(i.offered), i.status]), before.map((i) => [String(i._id), JSON.stringify(i.offered), i.status]));
     assert.equal((await procedures.get(routine.id)).status, 'requested');
   });
+
+  test('while the lock index check has failed, nothing is booked (P7-b); it books again once the index is there', async () => {
+    await cathTeam();
+    const real = m.SchedulingLock.init.bind(m.SchedulingLock);
+    (m.SchedulingLock as any).init = async () => {
+      throw new Error('index build failed');
+    };
+    try {
+      await procedures.onModuleInit();
+      const v = await ask('routine');
+      assert.equal(v.status, 'requested', 'refused to book without the unique index');
+      assert.equal(await m.SchedulingLock.countDocuments({}), 0, 'no lock document was upserted');
+      assert.equal(await procedures.tryBook(v.id), 'busy');
+      assert.equal(((await m.ProcedureBooking.findById(v.id).lean()) as any).status, 'requested');
+    } finally {
+      (m.SchedulingLock as any).init = real;
+    }
+    const booked = await ask('routine');
+    assert.equal(booked.status, 'booked', 'the index check passes again: booking resumes');
+  });
 });
