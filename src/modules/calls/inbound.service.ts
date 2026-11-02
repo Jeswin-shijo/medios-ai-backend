@@ -395,7 +395,9 @@ export class InboundService {
       throw new Refusal(`Appointments can be booked up to ${MAX_DAYS_AHEAD} days ahead. Ask for an earlier day, or offer a call back from the front desk (request_callback).`);
     }
     const from = preferred && preferred > now ? preferred : now;
-    const doctor = await this.slots.doctorFor({ uhid: session.uhid });
+    // To move an appointment, the slots are that appointment's own doctor's (reschedule checks the pick against the same doctor).
+    const apt = str(args.appointment_id) ? await this.appointmentFor(session, args) : null;
+    const doctor = await this.slots.doctorFor(apt ? { doctorId: apt.doctorId, uhid: session.uhid } : { uhid: session.uhid });
     const offered = await this.slots.findFree(cfg, from, SLOT_OFFERS, undefined, doctor ? String(doctor._id) : undefined);
     session.slots = offered.map((s, i) => ({ code: `S${i + 1}`, date: s.date, time: s.time, label: s.label }));
     await session.save();

@@ -189,9 +189,13 @@ const INBOUND_TOOLS: AgentTool[] = [
   },
   {
     name: 'find_free_slots',
-    description: 'Find free appointment slots, from a preferred day if the caller named one.',
+    description: "Find free appointment slots, from a preferred day if the caller named one. To move an existing appointment, pass its appointment_id: the slots are then that appointment's own doctor's.",
     preToolMessage: 'Let me check the free times.',
-    parameters: [CALLER_REF, { name: 'preferred_date', type: 'string', description: 'Earliest day the caller wants, as YYYY-MM-DD. Leave empty for the next free slots.', required: false }],
+    parameters: [
+      CALLER_REF,
+      { name: 'preferred_date', type: 'string', description: 'Earliest day the caller wants, as YYYY-MM-DD. Leave empty for the next free slots.', required: false },
+      { name: 'appointment_id', type: 'string', description: 'Only when moving an existing appointment: its appointment_id, e.g. A1. Leave empty when booking a new one.', required: false },
+    ],
   },
   {
     name: 'book_appointment',
@@ -271,7 +275,8 @@ VERIFY THE CALLER FIRST
 APPOINTMENTS
 - Only use dates and times from the tools. Never guess them.
 - To book or move: call find_free_slots (with preferred_date if they named a
-  day), offer at most two of the slots, then call book_appointment or
+  day; to move an appointment, also its appointment_id so the slots are that
+  doctor's), offer at most two of the slots, then call book_appointment or
   reschedule_appointment with the slot_id they chose. Read the result back.
 - To cancel: check which appointment, ask once whether another day would suit,
   then call cancel_appointment.

@@ -272,4 +272,26 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
     const state = async (a: any) => ((await m.WaitItem.findOne({ refId: a._id }).lean()) as any).status;
     assert.deepEqual([await state(a1), await state(a2)], ['cancelled', 'resolved']);
   });
+
+  test("find_free_slots with an appointment_id offers that appointment's own doctor's slots (I9)", async () => {
+    const p = await patient('U1', 'Rekha Suresh', { doctor: 'Dr. Priya' }); // usual doctor: afternoon
+    const apt = await schedulingApts.book(ADMIN, { patientId: String(p._id), doctorId: String(morning._id), date: dayOffset(4), time: '09:00 AM' });
+    const ref = await verify('Rekha Suresh');
+    await inbound.run('list_appointments', { caller_ref: ref }, STRONG);
+    const slotsOf = async () => ((await m.InboundSession.findOne({ code: ref }).lean().exec()) as any).slots as any[];
+    assert.equal((await inbound.run('find_free_slots', { caller_ref: ref, appointment_id: 'A1', preferred_date: dayOffset(6) }, STRONG)).ok, true);
+    const own = await slotsOf();
+    assert.ok(own.length > 0);
+    for (const s of own) assert.match(s.time, /^09:\d\d AM$/, "Dr. Shajin's morning session, not the patient's usual afternoon doctor");
+    // Moving to the first of them works (this used to be refused: the pick was checked against a different doctor).
+    assert.equal((await inbound.run('reschedule_appointment', { caller_ref: ref, appointment_id: 'A1', slot_id: 'S1' }, STRONG)).ok, true);
+    const moved = (await m.Appointment.findById(apt._id).lean()) as any;
+    assert.deepEqual([moved.doctorId, moved.date, moved.time], [String(morning._id), own[0].date, own[0].time]);
+    // Without an appointment_id it is the patient's usual doctor, as before (a new booking).
+    await inbound.run('find_free_slots', { caller_ref: ref }, STRONG);
+    for (const s of await slotsOf()) assert.match(s.time, /PM$/);
+    // An unknown id is refused.
+    const bad = await inbound.run('find_free_slots', { caller_ref: ref, appointment_id: 'A9' }, STRONG);
+    assert.equal(bad.ok, false);
+  });
 });

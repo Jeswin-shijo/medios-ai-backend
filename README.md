@@ -214,7 +214,7 @@ An AI voice agent phones patients for two jobs, and a third agent answers the ho
 |---|---|
 | `find_patient` | Verifies the caller and returns a `caller_ref` plus their next three appointments (first name, day, time, doctor, type) |
 | `list_appointments` | Lists them again |
-| `find_free_slots` | Three free slots from a preferred day |
+| `find_free_slots` | Three free slots from a preferred day; with `appointment_id` (to move an appointment), that appointment's own doctor's slots |
 | `book_appointment`, `reschedule_appointment`, `cancel_appointment`, `confirm_appointment` | Change the verified patient's appointments |
 | `request_callback` | Front-desk task; `urgent` makes it a high-priority alert |
 
