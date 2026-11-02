@@ -45,6 +45,8 @@ export class TasksAlertsService {
     if (task.link?.startsWith('pharmacy-line:')) throw new ConflictException('Answer this query on the Pharmacy Agent page.');
     // A consult has one path, the consult itself.
     if (task.link?.startsWith('scheduling-consult:')) throw new ConflictException('Accept or complete this consult on the Scheduling page.');
+    // A bill or refund closes on the Revenue page.
+    if (task.link?.startsWith('revenue-bill:') || task.link?.startsWith('revenue-refund:')) throw new ConflictException('This closes on the Revenue page.');
     if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
   }
 

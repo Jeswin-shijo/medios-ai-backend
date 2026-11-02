@@ -34,7 +34,7 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
   payload,
 });
 
-const MESSAGE_TYPES: MessageTypeDef[] = [
+export const BED_MESSAGE_TYPES: MessageTypeDef[] = [
   type('bed.request', 'A bed was requested for a patient', { requestId: 'string', requestType: 'string', priority: 'string' }),
   type('bed.assigned', 'A patient was placed in a bed', { bedId: 'string', bedLabel: 'string', admissionId: 'string', ward: 'string' }),
   type('bed.waiting', 'No bed fits yet; the request waits', { requestId: 'string' }),
@@ -95,7 +95,7 @@ export class BedCoordinatorBridge implements OnModuleInit, OnModuleDestroy {
   private definition(): AgentDefinition {
     return {
       key: 'bed',
-      messageTypes: MESSAGE_TYPES,
+      messageTypes: BED_MESSAGE_TYPES,
       clocks: [
         {
           key: 'bed-wait',

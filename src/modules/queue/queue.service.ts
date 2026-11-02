@@ -363,7 +363,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   private async syncAppointment(token: QueueToken, status: string, from: string[], extra: Record<string, unknown> = {}) {
     if (!token.appointmentId) return;
     try {
-      await this.appointments.updateOne({ _id: token.appointmentId, status: { $in: from } }, { $set: { status, ...extra } }).exec();
+      const res = await this.appointments.updateOne({ _id: token.appointmentId, status: { $in: from } }, { $set: { status, ...extra } }).exec();
+      // Announce only a real change. The queue's own subscriber acts on Completed, Canceled and No Show alone, and by then the token
+      // has already ended, so it finds nothing and never syncs back.
+      if (res.modifiedCount > 0) this.appointmentEvents.statusChanged({ id: String(token.appointmentId), status });
     } catch (err) {
       this.logger.warn(`Token ${token.label}: could not mark appointment ${token.appointmentId} ${status}: ${(err as Error).message}`);
     }

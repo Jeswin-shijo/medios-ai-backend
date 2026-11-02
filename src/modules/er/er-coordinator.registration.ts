@@ -23,7 +23,7 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
   payload,
 });
 
-const MESSAGE_TYPES: MessageTypeDef[] = [
+export const ER_MESSAGE_TYPES: MessageTypeDef[] = [
   type('er.expected', 'A patient is on the way to the ER', { expectedId: 'string' }),
   type('er.arrived', 'A patient arrived in the ER', { visitId: 'string', visitNumber: 'string', complaint: 'string' }),
   type('er.triaged', 'Triage was confirmed', { visitId: 'string', colour: 'string', doctorDueAt: 'date' }),
@@ -128,7 +128,7 @@ export class ErCoordinatorRegistration implements OnModuleInit {
   private definition(): AgentDefinition {
     return {
       key: 'er',
-      messageTypes: MESSAGE_TYPES,
+      messageTypes: ER_MESSAGE_TYPES,
       clocks: [
         {
           key: 'er-triage',

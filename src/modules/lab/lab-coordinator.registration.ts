@@ -16,7 +16,7 @@ const type = (t: string, description: string, payload: MessageTypeDef['payload']
   payload,
 });
 
-const MESSAGE_TYPES: MessageTypeDef[] = [
+export const LAB_MESSAGE_TYPES: MessageTypeDef[] = [
   type('lab.ordered', 'Lab tests were ordered', { requestId: 'string', requestNumber: 'string', priority: 'string', tests: 'string[]', collectBy: 'date', tatDueAt: 'date' }),
   // The free-text reason stays on the line, never in a message.
   type('lab.cancelled', 'A lab test was cancelled', { requestId: 'string', lineId: 'string', test: 'string', tatDueAt: 'date', escalateAt: 'date' }),
@@ -149,7 +149,7 @@ export class LabCoordinatorRegistration implements OnModuleInit {
   private definition(): AgentDefinition {
     return {
       key: 'lab',
-      messageTypes: MESSAGE_TYPES,
+      messageTypes: LAB_MESSAGE_TYPES,
       clocks: LAB_CLOCKS,
       handles: [
         { type: 'er.arrived', handler: (id) => this.locate(id, () => ({ area: 'ER' })) },

@@ -10,6 +10,8 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
 import { parseIsoDay } from '../../common/utils/clinic-time';
 
 @ApiTags('Billing & Invoices')
@@ -18,6 +20,7 @@ import { parseIsoDay } from '../../common/utils/clinic-time';
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Get('invoices')
   @ApiOperation({ summary: 'Get list of invoices with filters' })
   @ApiQuery({ name: 'uhid', required: false })
@@ -29,18 +32,21 @@ export class BillingController {
     return this.billingService.findAll({ uhid, status });
   }
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Get('invoices/:id')
   @ApiOperation({ summary: 'Get invoice by ID' })
   async findOne(@Param('id') id: string) {
     return this.billingService.findOne(id);
   }
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Post('invoices')
   @ApiOperation({ summary: 'Create a new invoice' })
   async create(@Body() body: any, @CurrentUser('name') userName: string) {
     return this.billingService.create({ ...body, createdBy: body.createdBy || userName });
   }
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Patch('invoices/:id/pay')
   @ApiOperation({ summary: 'Record payment for invoice' })
   async recordPayment(
@@ -51,12 +57,14 @@ export class BillingController {
     return this.billingService.recordPayment(id, amount, paymentMode);
   }
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Patch('invoices/:id/notes')
   @ApiOperation({ summary: 'Update the notes on an invoice' })
   async updateNotes(@Param('id') id: string, @Body('notes') notes: string) {
     return this.billingService.updateNotes(id, notes ?? '');
   }
 
+  @Roles(UserRole.ADMIN, UserRole.STAFF)
   @Get('stats')
   @ApiOperation({ summary: 'Get billing financial overview stats' })
   @ApiQuery({ name: 'date', required: false, description: 'Day for todayRevenue, YYYY-MM-DD (default today)' })

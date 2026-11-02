@@ -540,6 +540,8 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   for (const l of DEFAULT_LADDERS) await ladders.updateOne({ key: l.key }, { $setOnInsert: { key: l.key, label: l.label, steps: l.steps } }, { upsert: true });
   await titles.updateOne({ key: 'ot-in-charge' }, { $set: { holders: [new Types.ObjectId(nurseAt.id)] } });
   await titles.updateOne({ key: 'chief-pharmacist' }, { $set: { holders: [new Types.ObjectId(pharmacistAt.id)] } });
+  // Billing in charge has no rostered person in this demo, so the admin holds it and no roster gap shows.
+  await titles.updateOne({ key: 'billing-in-charge' }, { $set: { holders: [new Types.ObjectId(admin.id)] } });
 
   // ---- Outpatients and appointments ---------------------------------------------------------------------------
   const prefix = `MHK${new Date(nowMs).getFullYear()}`;

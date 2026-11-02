@@ -90,7 +90,9 @@ export class AppointmentsService {
       delete fields.slotKey;
     }
     try {
-      return await new this.appointmentModel(fields).save();
+      const saved = await new this.appointmentModel(fields).save();
+      if (saved.status && saved.status !== 'Scheduled') this.events.statusChanged({ id: String(saved._id), status: saved.status });
+      return saved;
     } catch (e) {
       if (isDuplicateKey(e)) throw new ConflictException('That slot was just taken');
       throw e;
@@ -119,8 +121,11 @@ export class AppointmentsService {
 
   async update(id: string, updates: Partial<Appointment>): Promise<AppointmentDocument> {
     const appointment = await this.findOne(id);
+    const before = appointment.status;
     Object.assign(appointment, updates);
-    return appointment.save();
+    const saved = await appointment.save();
+    if (saved.status !== before) this.events.statusChanged({ id: String(saved._id), status: saved.status });
+    return saved;
   }
 
   async remove(id: string): Promise<{ success: boolean; message: string }> {

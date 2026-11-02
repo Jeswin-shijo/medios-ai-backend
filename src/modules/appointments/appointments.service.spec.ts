@@ -52,6 +52,21 @@ describe('AppointmentsService keeps the slot guard (mobile-style routes)', () =>
     events.slotFreed$.subscribe((s) => freed.push(s));
   });
 
+  test('create and update emit statusChanged when the status is not Scheduled or changed', async () => {
+    const seen: any[] = [];
+    events.statusChanges$.subscribe((c) => seen.push(c));
+    const a: any = await service.create(body('U1', '10:00 AM') as any);
+    assert.equal(seen.length, 0);
+    const b: any = await service.create(body('U2', '10:30 AM', { status: 'Checked In' }) as any);
+    assert.deepEqual(seen, [{ id: String(b._id), status: 'Checked In' }]);
+    await service.update(String(a._id), { status: 'Checked In' } as any);
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[1], { id: String(a._id), status: 'Checked In' });
+    await service.update(String(a._id), { condition: 'Fever' } as any);
+    await service.update(String(a._id), { status: 'Checked In' } as any);
+    assert.equal(seen.length, 2);
+  });
+
   test('a doctor-less POST gets the default doctor and a slot key', async () => {
     const apt: any = await service.create(body('U1', '10:00 AM') as any);
     assert.equal(apt.doctorId, String(shajin._id));

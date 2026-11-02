@@ -41,6 +41,8 @@ import { PharmacyProcedureNote, PharmacyProcedureNoteDocument, PharmacyProcedure
 import { LabTestReport, LabReportDocument, LabTestReportSchema } from '../modules/lab-reports/schemas/lab-report.schema';
 import { Prescription, PrescriptionDocument, PrescriptionSchema } from '../modules/prescriptions/schemas/prescription.schema';
 import { User, UserDocument, UserSchema } from '../modules/users/schemas/user.schema';
+import { QueueToken, QueueTokenDocument, QueueTokenSchema } from '../modules/queue/schemas/queue-token.schema';
+import { QueueSequence, QueueSequenceDocument, QueueSequenceSchema } from '../modules/queue/schemas/queue-sequence.schema';
 import { Appointment, AppointmentDocument, AppointmentSchema } from '../modules/appointments/schemas/appointment.schema';
 import { FollowUpItem, FollowUpDocument, FollowUpItemSchema } from '../modules/follow-ups/schemas/follow-up.schema';
 import { AgentCall, AgentCallDocument, AgentCallSchema } from '../modules/calls/schemas/agent-call.schema';
@@ -124,6 +126,8 @@ export function models() {
     User: model(User, UserSchema) as Model<UserDocument>,
     HospitalSettings: model(HospitalSettings, HospitalSettingsSchema) as Model<HospitalSettingsDocument>,
     Appointment: model(Appointment, AppointmentSchema) as Model<AppointmentDocument>,
+    QueueToken: model(QueueToken, QueueTokenSchema) as Model<QueueTokenDocument>,
+    QueueSequence: model(QueueSequence, QueueSequenceSchema) as Model<QueueSequenceDocument>,
     FollowUpItem: model(FollowUpItem, FollowUpItemSchema) as Model<FollowUpDocument>,
     AgentCall: model(AgentCall, AgentCallSchema) as Model<AgentCallDocument>,
     InboundSession: model(InboundSession, InboundSessionSchema) as Model<InboundSessionDocument>,

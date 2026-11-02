@@ -63,6 +63,10 @@ export class HospitalSettings {
   /** Scheduling: consult, procedure and roster settings (see SchedulingSettingsService). */
   @Prop({ type: Object, default: {} })
   scheduling: Record<string, unknown>;
+
+  /** Revenue: price, deposit and approval settings (see RevenueSettingsService). */
+  @Prop({ type: Object, default: {} })
+  revenue: Record<string, unknown>;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

@@ -63,6 +63,13 @@ describe('SettingsService', () => {
     assert.deepEqual((await settings.getSettings()).scheduling, { x: 1 });
   });
 
+  test('a generic patch cannot change the revenue section', async () => {
+    await settings.updateSettings({ revenue: { x: 1 } } as any, ADMIN);
+    assert.deepEqual((await settings.getSettings()).revenue ?? {}, {});
+    await settings.setRevenue({ x: 1 } as any);
+    assert.deepEqual((await settings.getSettings()).revenue, { x: 1 });
+  });
+
   test('an ai patch with one key keeps the other ai keys', async () => {
     await settings.updateSettings({ ai: { model: 'claude-opus-5-5', bedSuggestions: true } }, ADMIN);
 
