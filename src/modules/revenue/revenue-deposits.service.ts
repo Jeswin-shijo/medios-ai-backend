@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { formatRupees } from '../../common/utils/money';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { Bed, BedDocument } from '../beds/schemas/bed.schema';
@@ -78,7 +79,9 @@ export class RevenueDepositsService {
       return;
     }
     const caseId = m.case ?? String(booking.case);
-    // Only a bill that exists (or an outpatient one) takes it; the routing is the same as for any charge.
+    // A STAT booking never opens a bill: it joins one that exists, or nothing happens.
+    if (booking.priority === 'stat' && !(await this.hasActiveBill(String(booking.patient), caseId))) return;
+    // The routing is the same as for any charge.
     const bill = await this.bills.forCharge({ patientId: String(booking.patient), caseId });
     const billId = String(bill._id);
     try {
@@ -91,6 +94,13 @@ export class RevenueDepositsService {
     } catch (e) {
       this.logger.warn(`Deposit for ${bill.number} failed (${(e as Error).message})`);
     }
+  }
+
+  /** The bill forCharge would pick, without opening one. */
+  private async hasActiveBill(patientId: string, caseId: string): Promise<boolean> {
+    const active = { $in: ACTIVE_BILL_STATES };
+    if (isValidObjectId(caseId) && (await this.billModel.exists({ case: new Types.ObjectId(caseId), kind: { $in: ['er', 'admission'] }, state: active }))) return true;
+    return !!(await this.billModel.exists({ patient: new Types.ObjectId(patientId), kind: { $in: ['opd', 'walk-in'] }, day: isoDate(clinicNow()), state: active }));
   }
 
   /** The advance that should be collected, or null: ER bills, STAT bookings, no ward or package, or the reminder rule off. */

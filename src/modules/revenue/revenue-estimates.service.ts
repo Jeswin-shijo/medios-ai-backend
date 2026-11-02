@@ -81,6 +81,16 @@ export class RevenueEstimatesService {
     return { lines, days: stay };
   }
 
+  /** One line per booking: the procedure's package price. */
+  private async packageLines(bookings: { procedure: string; number: string }[]): Promise<EstimateLine[]> {
+    const lines: EstimateLine[] = [];
+    for (const b of bookings) {
+      const p = await this.prices.priceFor(procCode(b.procedure));
+      lines.push({ name: `${p.name === procCode(b.procedure) ? b.procedure : p.name} (${b.number})`, amount: p.price });
+    }
+    return lines;
+  }
+
   private build(lines: EstimateLine[], extra: EstimateLine[]) {
     const all = [...lines, ...extra];
     const total = all.reduce((sum, l) => sum + l.amount, 0);
@@ -99,11 +109,7 @@ export class RevenueEstimatesService {
     const existing = await this.estimates.findOne({ bill: bill._id }).exec();
     const stay = await this.stayLines(bill, existing?.daysEdited ? existing.days : null, cfg);
     const bookings = await bookingsOf(this.procedures, bill, COUNTED);
-    const packages: EstimateLine[] = [];
-    for (const b of bookings) {
-      const p = await this.prices.priceFor(procCode(b.procedure));
-      packages.push({ name: `${p.name === procCode(b.procedure) ? b.procedure : p.name} (${b.number})`, amount: p.price });
-    }
+    const packages = await this.packageLines(bookings);
     const extra = (existing?.extra ?? []).map((e) => ({ name: e.name, amount: e.amount }));
     const built = this.build([...stay.lines, ...packages], extra);
     if (!existing && !stay.lines.length && !packages.length) return null;
@@ -165,11 +171,7 @@ export class RevenueEstimatesService {
     const extra = (input.extra ?? current.extra).map((e) => ({ name: e.name.trim(), amount: e.amount }));
     const stay = await this.stayLines(bill, days, cfg);
     const bookings = await bookingsOf(this.procedures, bill, COUNTED);
-    const packages: EstimateLine[] = [];
-    for (const b of bookings) {
-      const p = await this.prices.priceFor(procCode(b.procedure));
-      packages.push({ name: `${p.name === procCode(b.procedure) ? b.procedure : p.name} (${b.number})`, amount: p.price });
-    }
+    const packages = await this.packageLines(bookings);
     const built = this.build([...stay.lines, ...packages], extra);
     const updated = await this.estimates
       .findByIdAndUpdate(

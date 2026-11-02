@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Types } from 'mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { BED_MESSAGE_TYPES } from '../beds/bed-coordinator.bridge';
 import { AgentRegistry } from '../coordinator/agent-registry';
@@ -258,6 +259,70 @@ describe('Estimates, deposits and top-ups', () => {
     await until(async () => (await m.TaskAlertItem.findOne({ link: `revenue-bill:${bill._id}:deposit` }).lean())!.status === 'Completed');
     await deliver('bed', 'bed.transferred', { admissionId: String(adm._id), bedId: String(bedB._id), bedLabel: 'ICU-01', fromBedLabel: 'ICU-01', ward: 'ICU' });
     assert.equal((await tasks())[0].status, 'Completed');
+  });
+
+  test('a priced STAT procedure on an admission is in the estimate but never in the deposit', async () => {
+    await assigned(await admit());
+    const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
+    await booked(await booking('stat'));
+    assert.equal((await estimates.get(String(bill._id)))!.total, 9900 + 40000, 'the estimate is a price guide');
+    const [task] = await tasks();
+    assert.equal(task.title, `Collect advance ₹10,000: ${bill.number}`, 'no package in the deposit');
+    assert.equal((await deposits.dueFor((await m.Bill.findById(bill._id))!))!.amount, 10000);
+  });
+
+  test('on an outpatient bill a routine booking asks for its package and a STAT one adds nothing', async () => {
+    const opd = await bills.open({ kind: 'opd', appointmentId: String(new Types.ObjectId()), patientId: String(patient._id), caseId: String(caseDoc._id), day: isoDate(clinicNow()) });
+    await booked(await booking('routine'));
+    const [task] = await tasks();
+    assert.equal(task.link, `revenue-bill:${opd._id}:deposit`, 'the booking reached this bill');
+    assert.equal(task.title, `Collect advance ₹40,000: ${opd.number}`);
+    await price('proc:ct-head', 7000, 'procedure');
+    await booked(await booking('stat', 'ct-head'));
+    assert.equal((await tasks()).length, 1);
+    assert.equal((await tasks())[0].title, `Collect advance ₹40,000: ${opd.number}`);
+    assert.equal((await deposits.dueFor((await m.Bill.findById(opd._id))!))!.amount, 40000);
+  });
+
+  test('a STAT booking for a patient with no active bill opens nothing', async () => {
+    await booked(await booking('stat'));
+    assert.equal(await m.Bill.countDocuments({}), 0);
+    assert.equal(await m.Estimate.countDocuments({}), 0);
+    assert.equal((await tasks()).length, 0);
+  });
+
+  test('a second dip after a met top-up raises the task again and starts a new clock', async () => {
+    await assigned(await admit());
+    const id = String((await m.Bill.findOne({ kind: 'admission' }).lean())!._id);
+    const link = `revenue-bill:${id}:topup`;
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:deposit` }).lean())!.status === 'Completed');
+    await bills.adjust(id, { charges: 6200 }); // 8,000 of 10,000
+    await until(async () => (await sent('revenue.topup-due')).length === 1);
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await sent('revenue.topup-met')).length === 1);
+    await until(async () => (await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running' })) === 0);
+    await bills.adjust(id, { charges: 9000 }); // 17,000 of 20,000
+    await until(async () => (await sent('revenue.topup-due')).length === 2);
+    assert.equal(await m.TaskAlertItem.countDocuments({ link }), 1, 'same link, no duplicate');
+    assert.equal((await m.TaskAlertItem.findOne({ link }).lean())!.status, 'Pending');
+    await until(async () => (await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running', ref: id })) === 1);
+  });
+
+  test('a routine booking after the deposit was met reopens the same task with the new amount', async () => {
+    await assigned(await admit());
+    const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
+    const link = `revenue-bill:${bill._id}:deposit`;
+    await bills.adjust(String(bill._id), { payments: 10000 });
+    await until(async () => (await m.TaskAlertItem.findOne({ link }).lean())!.status === 'Completed');
+    const taskId = String((await m.TaskAlertItem.findOne({ link }).lean())!._id);
+    await booked(await booking('routine'));
+    const task = (await m.TaskAlertItem.findOne({ link }).lean())!;
+    assert.equal(String(task._id), taskId);
+    assert.equal(task.status, 'Pending');
+    assert.equal(task.title, `Collect advance ₹40,000: ${bill.number}`);
+    assert.equal(await m.TaskAlertItem.countDocuments({ link }), 1);
+    assert.equal((await sent('revenue.deposit-due')).length, 2);
   });
 
   test('the desk can edit the days and add lines; a redraft keeps them; others cannot edit', async () => {
