@@ -87,6 +87,17 @@ export const REVENUE_CLOCKS: ClockDef[] = [
   },
 ];
 
+/** The messages whose charges Revenue collects itself. The handler for each is set by RevenueCaptureService. */
+export const CAPTURE_TYPES = [
+  'er.arrived',
+  'er.doctor-seen',
+  'lab.collected',
+  'lab.cancelled',
+  'pharmacy.issued',
+  'scheduling.procedure-done',
+  'scheduling.consult-seen',
+] as const;
+
 export type ApprovalListener = (approvalId: string, decision: 'approved' | 'rejected', actor: Actor) => Promise<void>;
 
 const OPEN_TASK_LINK = /^revenue-bill:[^:]+:(deposit|topup)$/;
@@ -97,6 +108,8 @@ export class RevenueCoordinatorRegistration implements OnModuleInit {
   /** Task 10 (corrections) and Task 9 (refunds) register here, so the services need not import each other. Awaited in order; a throw reopens the approval. */
   readonly onCorrectionDecision: ApprovalListener[] = [];
   readonly onRefundDecision: ApprovalListener[] = [];
+  /** Message handlers by type, set by the capture service (and later tasks) so this file need not import them. A type with none does nothing. */
+  readonly capture = new Map<string, (messageId: string) => Promise<void>>();
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -143,7 +156,7 @@ export class RevenueCoordinatorRegistration implements OnModuleInit {
       key: 'revenue',
       messageTypes: REVENUE_MESSAGE_TYPES,
       clocks: REVENUE_CLOCKS,
-      handles: [],
+      handles: CAPTURE_TYPES.map((t) => ({ type: t, handler: async (id: string) => { await this.capture.get(t)?.(id); } })),
       approvalTypes: [
         { type: 'revenue.correction', agent: 'revenue', roles: [UserRole.ADMIN], primary: { kind: 'approve', label: 'Approve' }, onDecision: decide(this.onCorrectionDecision) },
         { type: 'revenue.refund', agent: 'revenue', roles: [UserRole.ADMIN], primary: { kind: 'approve', label: 'Approve' }, onDecision: decide(this.onRefundDecision) },

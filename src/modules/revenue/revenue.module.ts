@@ -1,5 +1,13 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ErVisit, ErVisitSchema } from '../er/schemas/er-visit.schema';
+import { LabLine, LabLineSchema } from '../lab/schemas/lab-line.schema';
+import { LabRequest, LabRequestSchema } from '../lab/schemas/lab-request.schema';
+import { PharmacyLine, PharmacyLineSchema } from '../pharmacy/schemas/pharmacy-line.schema';
+import { PharmacyOrder, PharmacyOrderSchema } from '../pharmacy/schemas/pharmacy-order.schema';
+import { ConsultRequest, ConsultRequestSchema } from '../scheduling/schemas/consult-request.schema';
+import { ProcedureBooking, ProcedureBookingSchema } from '../scheduling/schemas/procedure-booking.schema';
+import { RevenueCaptureService } from './revenue-capture.service';
 import { Ward, WardSchema } from '../beds/schemas/ward.schema';
 import { OpDoctor, OpDoctorSchema } from '../opd/schemas/op-doctor.schema';
 import { SettingsModule } from '../settings/settings.module';
@@ -38,11 +46,19 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
       { name: Correction.name, schema: CorrectionSchema },
       { name: RevenueSnapshot.name, schema: RevenueSnapshotSchema },
       { name: TaskAlertItem.name, schema: TaskAlertItemSchema },
+      // Other agents' records, read-only.
+      { name: ErVisit.name, schema: ErVisitSchema },
+      { name: LabRequest.name, schema: LabRequestSchema },
+      { name: LabLine.name, schema: LabLineSchema },
+      { name: PharmacyLine.name, schema: PharmacyLineSchema },
+      { name: PharmacyOrder.name, schema: PharmacyOrderSchema },
+      { name: ProcedureBooking.name, schema: ProcedureBookingSchema },
+      { name: ConsultRequest.name, schema: ConsultRequestSchema },
     ]),
     SettingsModule,
     CoordinatorModule, // the counter model
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService],
 })
 export class RevenueModule {}

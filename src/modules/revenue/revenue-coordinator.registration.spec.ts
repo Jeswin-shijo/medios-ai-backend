@@ -11,7 +11,7 @@ import { EscalationsService } from '../coordinator/escalations.service';
 import { MessagesService } from '../coordinator/messages.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
-import { REVENUE_MESSAGE_TYPES, RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { CAPTURE_TYPES, REVENUE_MESSAGE_TYPES, RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 
 const ADMIN = { id: 'a1', name: 'Admin', role: UserRole.ADMIN };
 
@@ -75,7 +75,7 @@ describe('RevenueCoordinatorRegistration', () => {
       assert.deepEqual(d!.payload, payload, t);
     }
     assert.deepEqual(await def().status(), { open: 0, capacity: 0, onTimePct: null });
-    assert.deepEqual(def().handles ?? [], []);
+    assert.deepEqual(def().handles!.map((h) => h.type), [...CAPTURE_TYPES]);
 
     const f = registry.clock('revenue-final')!;
     const t = registry.clock('revenue-topup')!;
