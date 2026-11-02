@@ -13,6 +13,10 @@ import { Bed, BedSchema } from '../beds/schemas/bed.schema';
 import { Ward, WardSchema } from '../beds/schemas/ward.schema';
 import { Case, CaseSchema } from '../coordinator/schemas/case.schema';
 import { RevenueBedDaysService } from './revenue-bed-days.service';
+import { RevenueOpdService } from './revenue-opd.service';
+import { AppointmentsModule } from '../appointments/appointments.module';
+import { OpdModule } from '../opd/opd.module';
+import { Appointment, AppointmentSchema } from '../appointments/schemas/appointment.schema';
 import { OpDoctor, OpDoctorSchema } from '../opd/schemas/op-doctor.schema';
 import { SettingsModule } from '../settings/settings.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
@@ -44,6 +48,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
       { name: Admission.name, schema: AdmissionSchema },
       { name: Case.name, schema: CaseSchema },
       { name: OpDoctor.name, schema: OpDoctorSchema },
+      { name: Appointment.name, schema: AppointmentSchema },
       { name: Patient.name, schema: PatientSchema },
       { name: Bill.name, schema: BillSchema },
       { name: ChargeLine.name, schema: ChargeLineSchema },
@@ -64,8 +69,10 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     ]),
     SettingsModule,
     CoordinatorModule, // the counter model
+    AppointmentsModule, // AppointmentEvents
+    OpdModule,
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService],
 })
 export class RevenueModule {}
