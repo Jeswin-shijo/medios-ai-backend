@@ -8,7 +8,11 @@ import { PharmacyOrder, PharmacyOrderSchema } from '../pharmacy/schemas/pharmacy
 import { ConsultRequest, ConsultRequestSchema } from '../scheduling/schemas/consult-request.schema';
 import { ProcedureBooking, ProcedureBookingSchema } from '../scheduling/schemas/procedure-booking.schema';
 import { RevenueCaptureService } from './revenue-capture.service';
+import { Admission, AdmissionSchema } from '../beds/schemas/admission.schema';
+import { Bed, BedSchema } from '../beds/schemas/bed.schema';
 import { Ward, WardSchema } from '../beds/schemas/ward.schema';
+import { Case, CaseSchema } from '../coordinator/schemas/case.schema';
+import { RevenueBedDaysService } from './revenue-bed-days.service';
 import { OpDoctor, OpDoctorSchema } from '../opd/schemas/op-doctor.schema';
 import { SettingsModule } from '../settings/settings.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
@@ -36,6 +40,9 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     MongooseModule.forFeature([
       { name: PriceItem.name, schema: PriceItemSchema },
       { name: Ward.name, schema: WardSchema },
+      { name: Bed.name, schema: BedSchema },
+      { name: Admission.name, schema: AdmissionSchema },
+      { name: Case.name, schema: CaseSchema },
       { name: OpDoctor.name, schema: OpDoctorSchema },
       { name: Patient.name, schema: PatientSchema },
       { name: Bill.name, schema: BillSchema },
@@ -58,7 +65,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     SettingsModule,
     CoordinatorModule, // the counter model
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService],
 })
 export class RevenueModule {}

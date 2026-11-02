@@ -87,7 +87,7 @@ export const REVENUE_CLOCKS: ClockDef[] = [
   },
 ];
 
-/** The messages whose charges Revenue collects itself. The handler for each is set by RevenueCaptureService. */
+/** The messages whose charges Revenue collects itself (bed days included). The handler for each is set by RevenueCaptureService. */
 export const CAPTURE_TYPES = [
   'er.arrived',
   'er.doctor-seen',
@@ -96,6 +96,9 @@ export const CAPTURE_TYPES = [
   'pharmacy.issued',
   'scheduling.procedure-done',
   'scheduling.consult-seen',
+  'bed.assigned',
+  'bed.transferred',
+  'bed.discharged',
 ] as const;
 
 export type ApprovalListener = (approvalId: string, decision: 'approved' | 'rejected', actor: Actor) => Promise<void>;
