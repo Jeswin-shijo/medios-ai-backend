@@ -160,4 +160,14 @@ describe('RevenueBillsService', () => {
     await m.Bill.updateOne({ _id: bill._id }, { state: 'settled' });
     await assert.rejects(() => svc.addCharge(String(bill.id), line('late', 10)), (e: any) => e.status === 409);
   });
+
+  test('a charge line\'s corrections are ObjectIds: a pushed id can be found by query', async () => {
+    const bill = await svc.open({ kind: 'walk-in', patientId: String(patient._id) });
+    await svc.addCharge(String(bill.id), line('rx-c', 50));
+    const found = await m.ChargeLine.findOne({ bill: bill._id }).lean();
+    const id = new (require('mongoose').Types.ObjectId)();
+    await m.ChargeLine.updateOne({ _id: found!._id }, { $push: { corrections: id } });
+    assert.equal(await m.ChargeLine.countDocuments({ corrections: String(id) }), 1);
+    assert.equal(await m.ChargeLine.countDocuments({ corrections: new (require('mongoose').Types.ObjectId)() }), 0);
+  });
 });

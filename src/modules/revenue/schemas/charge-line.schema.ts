@@ -53,7 +53,7 @@ export class ChargeLine {
   @Prop({ default: false })
   reversed: boolean;
 
-  @Prop({ type: [Types.ObjectId], default: [] })
+  @Prop({ type: [MongooseSchema.Types.ObjectId], default: [] })
   corrections: Types.ObjectId[];
 }
 

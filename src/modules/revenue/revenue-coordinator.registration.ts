@@ -122,13 +122,14 @@ export class RevenueCoordinatorRegistration implements OnModuleInit {
   ) {
     const prefix = bill ? `${bill.number}: ` : '';
     const amount = extra.amount === undefined ? '' : ` (${formatRupees(extra.amount)})`;
+    const room = Math.max(0, 140 - prefix.length - amount.length);
     return this.messages.send({
       case: bill?.case ? String(bill.case) : null,
       from: 'revenue',
       to: ['coordinator'],
       type: messageType,
       priority: extra.priority ?? 'medium',
-      summary: `${prefix}${extra.text}${amount}`.slice(0, 140),
+      summary: `${prefix}${extra.text.slice(0, room)}${amount}`,
       payload,
       ...(extra.dedupeKey ? { dedupeKey: extra.dedupeKey } : {}),
     });
@@ -171,6 +172,7 @@ export class RevenueCoordinatorRegistration implements OnModuleInit {
 
   /** 'fail' while the case's ER or admission bill is open, final with a balance, or has a refund not yet paid; 'pass' once settled; 'n/a' with no bill. */
   private async closeCheck(caseId: string): Promise<'pass' | 'fail' | 'n/a'> {
+    if (!Types.ObjectId.isValid(caseId)) return 'n/a';
     const bills = await this.bills
       .find({ case: new Types.ObjectId(caseId), kind: { $in: ['er', 'admission'] } })
       .select('state totals.balance')

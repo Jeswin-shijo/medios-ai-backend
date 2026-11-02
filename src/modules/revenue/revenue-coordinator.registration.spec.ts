@@ -134,6 +134,22 @@ describe('RevenueCoordinatorRegistration', () => {
     assert.equal(await closeCheck(), 'n/a');
   });
 
+  test('send keeps the amount: a long text is cut, not the trailing amount', async () => {
+    await reg.send('revenue.bill-settled', { number: 'BL-0001', case: caseId }, { billId: 'b', billNumber: 'BL-0001', total: 1 }, { text: 'x'.repeat(300), amount: 123456 });
+    const summary = (await m.AgentMessage.findOne({ type: 'revenue.bill-settled' }).lean())!.summary;
+    assert.equal(summary.length, 140);
+    assert.ok(summary.startsWith('BL-0001: xxx'));
+    assert.ok(summary.endsWith(' (₹1,23,456)'), summary);
+  });
+
+  test('close check: an old settled bill plus a newer active one fails; a malformed case id is n/a', async () => {
+    await bill({ kind: 'admission', erVisit: undefined, admission: new Types.ObjectId(), state: 'settled', openedAt: new Date(Date.now() - 86_400_000) });
+    assert.equal(await closeCheck(), 'pass');
+    await bill({ openedAt: new Date() });
+    assert.equal(await closeCheck(), 'fail');
+    assert.equal(await registry.closeChecks().find((c) => c.agent === 'revenue')!.check('not-an-id'), 'n/a');
+  });
+
   test('the status counts open bills, open deposit and top-up tasks, and final bills with a balance', async () => {
     await bill();
     await bill({ kind: 'admission', erVisit: undefined, admission: new Types.ObjectId() });
