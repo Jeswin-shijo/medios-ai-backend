@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
+import { clinicNow } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { UserRole } from '../users/schemas/user.schema';
 import { ROOMS, RoomKind, roomByKey } from './scheduling-catalogue';
@@ -46,7 +47,7 @@ export class SchedulingRoomsService {
 
   async rooms(): Promise<RoomView[]> {
     const cfg = await this.settings.get();
-    const rows = await this.blocks.find({ to: { $gt: new Date() } }).sort({ from: 1 }).limit(BLOCK_LIMIT).lean().exec();
+    const rows = await this.blocks.find({ to: { $gt: clinicNow() } }).sort({ from: 1 }).limit(BLOCK_LIMIT).lean().exec();
     return ROOMS.map((r) => {
       const hours = cfg.roomHours[r.key] ?? { open: r.open, close: r.close, turnover: r.turnover };
       return {
