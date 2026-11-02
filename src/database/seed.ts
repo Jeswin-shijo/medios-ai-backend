@@ -34,6 +34,7 @@ import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
 import { seedPharmacy } from './seed-pharmacy';
 import { seedScheduling } from './seed-scheduling';
+import { resolveDemoPassword } from './seed-password';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 
@@ -46,7 +47,6 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios
 // Demo accounts for local development only; never seed these into a real deployment.
 const DEMO_EMAIL = 'doctor@medios.ai';
 const ADMIN_EMAIL = 'admin@medios.ai';
-const DEMO_PASSWORD = 'Admin@123';
 const STAFF_ACCOUNTS = [
   { email: 'nurse@medios.ai', name: 'Nurse Anjali Thomas', department: 'Nursing', role: 'nurse' },
   { email: 'pharmacy@medios.ai', name: 'Neethu George', department: 'Pharmacy', role: 'pharmacist' },
@@ -170,6 +170,7 @@ async function seedQueue() {
 }
 
 async function seed() {
+  const DEMO_PASSWORD = resolveDemoPassword(); // refuses a remote database without SEED_DEMO_PASSWORD, before anything is wiped
   console.log('🌱 Connecting to MongoDB at', MONGODB_URI);
   await mongoose.connect(MONGODB_URI);
 
@@ -247,7 +248,7 @@ async function seed() {
   await seedScheduling(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
-    `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}`,
+    `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; ${process.env.SEED_DEMO_PASSWORD ? 'password from SEED_DEMO_PASSWORD' : `password ${DEMO_PASSWORD}`}`,
   );
 }
 

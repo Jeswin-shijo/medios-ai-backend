@@ -57,7 +57,9 @@ npm run create-user
 
 `npm run seed` loads the demo hospital instead. It wipes the database first and creates demo logins whose password is published (`Admin@123`). It refuses any database that isn't on this machine unless you set `SEED_ALLOW_REMOTE=true`. Only do that for a throwaway demo database.
 
-Then replace the demo passwords straight away. Run `npm run create-user` (same `MONGODB_URI`) once per demo login, with a new `USER_PASSWORD` and the login's own `USER_ROLE` (create-user also sets the role, and defaults to `admin`):
+**Demo password on a remote database.** The seed gives every demo login the password in `SEED_DEMO_PASSWORD`. Without it, `Admin@123` is used only when `MONGODB_URI` points at `localhost` or `127.0.0.1`; a seed against any other host refuses to run, before it wipes anything. Seeding the Atlas demo therefore needs `SEED_DEMO_PASSWORD='<private password>'` (the scheduling seed adds 12 more doctor logins and uses the same password, so all 19 demo logins get it).
+
+Then replace the demo passwords straight away if you seeded without `SEED_DEMO_PASSWORD`. Run `npm run create-user` (same `MONGODB_URI`) once per demo login, with a new `USER_PASSWORD` and the login's own `USER_ROLE` (create-user also sets the role, and defaults to `admin`):
 
 | `USER_EMAIL` | `USER_ROLE` |
 |---|---|
@@ -68,6 +70,7 @@ Then replace the demo passwords straight away. Run `npm run create-user` (same `
 | `pharmacy@medios.ai` | `pharmacist` |
 | `lab@medios.ai` | `lab` |
 | `pathologist@medios.ai` | `lab` |
+| `arun@`, `priya@`, `meena@`, `rajesh@`, `john@`, `lakshmi@`, `suresh@`, `kavitha@`, `vinod@`, `anand@`, `anitha.anaesthesia@`, `ravi.radiology@medios.ai` | `doctor` (added by the scheduling seed) |
 
 ## 4. Web app: Vercel
 

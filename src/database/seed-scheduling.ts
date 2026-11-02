@@ -1,5 +1,6 @@
 import mongoose, { Model, Schema, Types } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
+import { resolveDemoPassword } from './seed-password';
 import { clockLabel, displayDateTime, isoDate, parseIsoDay } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
 import { AppointmentEvents } from '../modules/appointments/appointment-events';
@@ -73,7 +74,6 @@ const model = (cls: { name: string }, schema: Schema): Model<any> => mongoose.mo
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 /** Demo password for the doctor logins: local development only. */
-const DEMO_PASSWORD = 'Admin@123';
 const BCRYPT_ROUNDS = 12;
 /** Marks the made-up outpatients of this seed (never a demo patient), so a rerun clears them and nothing else. */
 export const SCHEDULING_MARK = 'Seed: scheduling demo';
@@ -468,6 +468,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   for (const d of EXTRA_DOCTORS) await w.opd.createDoctor(d as never);
 
   // ---- Logins: every doctor, linked to the OP doctor of the same name ------------------------------------------
+  const DEMO_PASSWORD = resolveDemoPassword();
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_ROUNDS);
   const userOf = new Map<string, string>([['Dr. Shajin', doctorAt.id]]);
   for (const a of SCHEDULING_DOCTOR_ACCOUNTS) {
@@ -635,7 +636,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
 
   const total = await bookings.countDocuments();
   console.log(
-    `✅ Scheduling: ${SCHEDULING_DOCTOR_ACCOUNTS.length} doctor logins (${SCHEDULING_DOCTOR_ACCOUNTS.map((a) => a.email).join(', ')}; password ${DEMO_PASSWORD}), ` +
+    `✅ Scheduling: ${SCHEDULING_DOCTOR_ACCOUNTS.length} doctor logins (${SCHEDULING_DOCTOR_ACCOUNTS.map((a) => a.email).join(', ')}; the demo password), ` +
       `${staffId.size} staff, ${rostered} roster entries, ${todays.length + booked.size} appointments, ${total} procedures, ${await consultsModel.countDocuments()} consults, ` +
       `${await waitItems.countDocuments({ status: 'open' })} on the waitlist, ${found.length} conflicts, ${points.length + 1} snapshots`,
   );
