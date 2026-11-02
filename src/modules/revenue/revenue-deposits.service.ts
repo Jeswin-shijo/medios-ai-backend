@@ -249,7 +249,7 @@ export class RevenueDepositsService {
       return 'met';
     }
     const group = bill.wardType ? wardGroupOf(bill.wardType) : null;
-    const amount = Math.max(group ? cfg.deposits[group] : 0, owed - payments);
+    const amount = (group ? cfg.deposits[group] : 0) + Math.max(0, owed - payments);
     if (!(amount > 0)) return null;
     const fields = {
       title: `Ask for a top-up ${formatRupees(amount)}: ${bill.number}`,

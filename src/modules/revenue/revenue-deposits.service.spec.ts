@@ -229,6 +229,18 @@ describe('Estimates, deposits and top-ups', () => {
     assert.equal(await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running' }), 0);
   });
 
+  test('a top-up asks for the shortfall plus the ward deposit when charges already exceed payments', async () => {
+    await assigned(await admit());
+    const id = String((await m.Bill.findOne({ kind: 'admission' }).lean())!._id);
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:deposit` }).lean())!.status === 'Completed');
+    await bills.adjust(id, { charges: 11200 }); // 1,800 + 11,200 = 13,000
+    await until(async () => (await sent('revenue.topup-due')).length === 1);
+    const task = (await m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:topup` }).lean())!;
+    assert.match(task.title, /^Ask for a top-up ₹13,000: /);
+    assert.equal((await sent('revenue.topup-due'))[0].payload.amount, 13000);
+  });
+
   test('with the reminder rule off no deposit or top-up task is raised', async () => {
     await rules.set(ADMIN, 'revenue-deposit-reminders', false);
     await assigned(await admit());
