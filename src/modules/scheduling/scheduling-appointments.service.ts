@@ -149,7 +149,7 @@ export class SchedulingAppointmentsService implements OnModuleInit, OnModuleDest
     this.requireBook(actor);
     const why = String(reason ?? '').trim();
     if (!why) throw new BadRequestException('Please give a reason for the cancellation.');
-    if (why.length > 200) throw new BadRequestException('The reason is at most 200 characters.');
+    if (why.length > 300) throw new BadRequestException('The reason is at most 300 characters.');
     const apt = await this.find(id);
     if (apt.status === 'Canceled') return apt;
     if (!CHANGEABLE.includes(apt.status)) throw new BadRequestException(`A ${apt.status.toLowerCase()} appointment can't be canceled.`);

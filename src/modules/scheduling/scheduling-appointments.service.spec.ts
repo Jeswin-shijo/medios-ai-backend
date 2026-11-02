@@ -290,4 +290,14 @@ describe('Scheduling appointments by doctor', () => {
     await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(got.map((g) => g.id), ['a1']);
   });
+
+  test('a cancel reason may be up to 300 characters (as the DTO and the web allow)', async () => {
+    const p = await patient('U300', 'Long Reason');
+    const later = clinicNow();
+    later.setDate(later.getDate() + 5);
+    const apt = await book(p, shajin, isoDate(later), '09:00 AM');
+    await assert.rejects(() => appts.cancel(ADMIN, String(apt._id), 'x'.repeat(301)), /300/);
+    const done = await appts.cancel(ADMIN, String(apt._id), 'x'.repeat(300));
+    assert.equal(done.status, 'Canceled');
+  });
 });

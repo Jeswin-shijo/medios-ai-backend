@@ -365,4 +365,16 @@ describe('SchedulingConsultsService', () => {
     assert.deepEqual(await consults.list(undefined, String(new Types.ObjectId())), []);
     assert.deepEqual(await consults.list(undefined, 'not-an-id'), []);
   });
+
+  test("list('open') returns only paged and accepted consults, from the whole collection (Minor 9)", async () => {
+    const old = await ask('routine'); // the oldest, still open
+    const base = (await m.ConsultRequest.findById(old.id).lean())!;
+    const { _id, ...rest } = base as any;
+    await m.ConsultRequest.insertMany(Array.from({ length: 210 }, (_, i) => ({ ...rest, number: `CO-S${i}`, status: 'seen', requestedAt: new Date(base.requestedAt.getTime() + (i + 1) * MIN) })));
+    await m.ConsultRequest.insertMany([{ ...rest, number: 'CO-ACC', status: 'accepted', requestedAt: new Date(base.requestedAt.getTime() + MIN / 2) }, { ...rest, number: 'CO-CAN', status: 'cancelled' }]);
+    assert.ok(!(await consults.list()).some((v) => v.id === old.id), 'the plain list drops it past the cap');
+    const open = await consults.list('open');
+    assert.deepEqual(open.map((v) => v.number).sort(), ['CO-ACC', old.number].sort());
+    assert.ok(open.every((v) => v.status === 'paged' || v.status === 'accepted'));
+  });
 });

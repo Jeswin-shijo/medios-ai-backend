@@ -8,6 +8,7 @@ import { FollowUpDocument, FollowUpItem } from '../follow-ups/schemas/follow-up.
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { UserRole } from '../users/schemas/user.schema';
+import { roomByKey } from './scheduling-catalogue';
 import { FreedSlot, SchedulingAppointmentsService } from './scheduling-appointments.service';
 import { FRONT_DESK_LEAD_MINUTES, FreeSlot, SchedulingDoctorsService } from './scheduling-doctors.service';
 import { BumpedProcedure, SchedulingProceduresService } from './scheduling-procedures.service';
@@ -225,7 +226,7 @@ export class SchedulingWaitlistService implements OnModuleInit {
           { link: `scheduling-waitlist:${i._id}` },
           {
             $setOnInsert: {
-              title: `Waiting for a new time: ${i.patientName}`,
+              title: `${i.kind === 'procedure' ? 'Procedure' : 'Appointment'} waiting for a new time`,
               subtitle: `${i.kind === 'procedure' ? 'Procedure' : 'Appointment'} · ${this.reasonText(i.reason)} · open for more than 24 hours`,
               patientName: i.patientName,
               uhid: i.patientUhid,
@@ -292,7 +293,7 @@ export class SchedulingWaitlistService implements OnModuleInit {
   private async offersFor(base: Pick<WaitItem, 'doctorId' | 'original'> | Lean<WaitItem>, input: WaitInput, after: any[] = []): Promise<any[]> {
     if (input.kind === 'procedure') {
       const latest = after.length ? Math.max(...after.map((o) => new Date(o.start).getTime())) : 0;
-      return this.procedures.offers(input.refId, OFFER_COUNT, latest ? new Date(latest + GRID_MS) : undefined);
+      return (await this.procedures.offers(input.refId, OFFER_COUNT, latest ? new Date(latest + GRID_MS) : undefined)).map((o) => ({ ...o, roomName: roomByKey(o.room)?.name ?? o.room }));
     }
     const doctorId = base.doctorId!;
     const o = base.original as { date: string; time: string };
@@ -430,7 +431,7 @@ export class SchedulingWaitlistService implements OnModuleInit {
       patientName: r.patientName,
       doctorId: r.doctorId,
       original: r.original as any,
-      offered: (r.offered ?? []) as any[],
+      offered: ((r.offered ?? []) as any[]).map((o) => (o?.room && !o.roomName ? { ...o, roomName: roomByKey(o.room)?.name ?? o.room } : o)),
       wantsEarlier: !!r.wantsEarlier,
       status: r.status,
       createdAt: r.createdAt,

@@ -84,7 +84,7 @@ export class BoardQueryDto {
 }
 
 export class ConsultsQueryDto {
-  @IsOptional() @IsIn([...CONSULT_STATUSES]) status?: (typeof CONSULT_STATUSES)[number];
+  @IsOptional() @IsIn([...CONSULT_STATUSES, 'open']) status?: (typeof CONSULT_STATUSES)[number] | 'open';
   @IsOptional() @IsMongoId() patientId?: string;
 }
 

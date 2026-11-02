@@ -224,10 +224,12 @@ export class SchedulingConsultsService {
 
   // ---------- reads ----------
 
-  /** Consults newest first, optionally of one status (at most 200). */
-  /** Newest first. The plain list is capped at 200; one patient's list at 500 so their open items never drop out. */
-  async list(status?: ConsultStatus, patientId?: string): Promise<ConsultView[]> {
-    const q: Record<string, unknown> = status ? { status } : {};
+  /**
+   * Newest first, optionally of one status; 'open' means paged or accepted, chosen by the database so an old open consult
+   * never drops out. The plain list is capped at 200; one patient's list at 500 so their open items never drop out.
+   */
+  async list(status?: ConsultStatus | 'open', patientId?: string): Promise<ConsultView[]> {
+    const q: Record<string, unknown> = status === 'open' ? { status: { $in: ['paged', 'accepted'] } } : status ? { status } : {};
     if (patientId !== undefined) {
       if (!isValidObjectId(patientId)) return [];
       q.patient = new Types.ObjectId(patientId);

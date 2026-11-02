@@ -284,6 +284,8 @@ describe('SchedulingWaitlistService', () => {
     assert.equal((await waitlist.ageAlerts()).raised, 0, 'only once');
     const alerts = await m.TaskAlertItem.find({ link: `scheduling-waitlist:${item.id}` }).lean();
     assert.equal(alerts.length, 1);
+    assert.ok(!alerts[0].title.includes('Asha') && !alerts[0].subtitle.includes('Asha'), 'no patient name in the alert text (Minor 1)');
+    assert.equal(alerts[0].patientName, 'Asha', 'the name stays in its own field');
     assert.deepEqual([alerts[0].type, alerts[0].category, alerts[0].priority, alerts[0].status], ['Follow-up', 'System', 'Medium', 'Pending']);
     // A day later the old offers are stale: ask for new ones, then book.
     await waitlist.findAnother(FRONT, item.id);
@@ -310,6 +312,8 @@ describe('SchedulingWaitlistService', () => {
     const [o1, o2] = item.offered as any[];
     assert.ok(new Date(o2.start).getTime() >= new Date(o1.start).getTime() + 15 * 60_000, 'the second is planned from the first + 15 minutes');
     assert.equal(o1.room, 'cath-lab');
+    assert.equal(o1.roomName, 'Cath lab', 'procedure offers carry the room name (Minor 8)');
+    assert.equal(((await waitlist.list('open'))[0].offered[0] as any).roomName, 'Cath lab');
     assert.equal(new Date((item.original as any).start).getTime(), new Date(v.start!).getTime(), 'original is where it was bumped from');
     const next = await waitlist.findAnother(FRONT, item.id);
     assert.ok(new Date((next.offered[0] as any).start).getTime() >= new Date(o2.start).getTime() + 15 * 60_000);
