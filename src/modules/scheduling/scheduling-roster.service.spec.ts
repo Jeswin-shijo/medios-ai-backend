@@ -40,7 +40,7 @@ describe('SchedulingRosterService', () => {
     const messages = new MessagesService(m.AgentMessage, new AgentRegistry(), events);
     escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
     await escalations.ensureDefaults();
-    roster = new SchedulingRosterService(m.StaffMember, m.RosterEntry, settings, escalations);
+    roster = new SchedulingRosterService(m.StaffMember, m.RosterEntry, settings, escalations, m.User);
   });
 
   test('the roster finds who is on duty at 02:00 from a night entry of the day before', async () => {
@@ -170,5 +170,21 @@ describe('SchedulingRosterService', () => {
     const again = await entry('2026-09-26', 'morning', s._id, { titles: ['duty-doctor'] });
     const changed = await entry('2026-09-26', 'morning', s._id, { titles: [] });
     assert.equal(String(again._id), String(changed._id), 'the same shift is updated, not duplicated');
+  });
+
+  test('logins lists active users not linked to a staff member (plus the one asked for), admin only, with no secrets (I7)', async () => {
+    const free = await user('Free Nurse', 'free@x.in');
+    const taken = await user('Taken Nurse', 'taken@x.in');
+    const mine = await user('My Nurse', 'mine@x.in');
+    await m.User.create({ email: 'off@x.in', passwordHash: 'x', name: 'Off', role: 'nurse', isActive: false });
+    await staff('Linked', ['ward-nurse'], 'GM', String(taken._id));
+    const own = await staff('Mine', ['ward-nurse'], 'GM', String(mine._id));
+    const list = await roster.logins(ADMIN);
+    assert.deepEqual(list.map((u) => u.email).sort(), ['free@x.in']);
+    assert.deepEqual(Object.keys(list[0]).sort(), ['email', 'id', 'name', 'role']);
+    const withOwn = await roster.logins(ADMIN, String(own._id));
+    assert.deepEqual(withOwn.map((u) => u.email).sort(), ['free@x.in', 'mine@x.in']);
+    assert.equal(withOwn.find((u) => u.email === 'free@x.in')!.id, String(free._id));
+    await assert.rejects(() => roster.logins({ id: 'n1', name: 'N', role: UserRole.NURSE }), /admin/i);
   });
 });

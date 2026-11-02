@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Delete, Get, Logger, Param, Patch, Post, Put, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { clinicNow, parseIsoDay } from '../../common/utils/clinic-time';
@@ -311,6 +311,14 @@ export class SchedulingController {
   @ApiOperation({ summary: 'Staff members who can be put on the roster' })
   async staff() {
     return { staff: await this.roster.staff() };
+  }
+
+  @Get('staff/logins')
+  @Roles(...SCHED_ADMIN)
+  @ApiOperation({ summary: 'Logins a staff member can be linked to (not held by another staff member)' })
+  @ApiQuery({ name: 'staffId', required: false })
+  async staffLogins(@CurrentUser() user: unknown, @Query('staffId') staffId?: string) {
+    return { logins: await this.roster.logins(actorOf(user), staffId) };
   }
 
   @Put('staff')

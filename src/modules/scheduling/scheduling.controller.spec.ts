@@ -50,6 +50,7 @@ const TABLE: Record<string, UserRole[]> = {
   'DELETE roster/entries/:id': ADMIN,
   'POST roster/copy-week': ADMIN,
   'GET staff': READ,
+  'GET staff/logins': ADMIN,
   'PUT staff': ADMIN,
   'GET duty-now': READ,
   'GET rooms': READ,
@@ -86,7 +87,7 @@ const allowed = (name: string, role: UserRole) => {
 describe('SchedulingController roles', () => {
   test('the controller is mounted at scheduling and has exactly the routes of the table', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, SchedulingController), 'scheduling');
-    assert.equal(Object.keys(TABLE).length, 42);
+    assert.equal(Object.keys(TABLE).length, 43);
     assert.deepEqual(handlers.map((n) => keyOf(proto[n] as object)).sort(), Object.keys(TABLE).sort());
   });
 

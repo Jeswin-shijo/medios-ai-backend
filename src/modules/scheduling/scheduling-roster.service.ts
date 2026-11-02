@@ -1,10 +1,10 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { EscalationsService } from '../coordinator/escalations.service';
-import { UserRole } from '../users/schemas/user.schema';
+import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
 import { SKILLS, Shift, Skill } from './scheduling-catalogue';
 import { SchedulingSettingsService } from './scheduling-settings.service';
 import { covers, shiftWindow } from './scheduling-time';
@@ -74,6 +74,7 @@ export class SchedulingRosterService implements OnModuleInit {
     @InjectModel(RosterEntry.name) private readonly entries: Model<RosterEntryDocument>,
     private readonly settings: SchedulingSettingsService,
     private readonly escalations: EscalationsService,
+    @Optional() @InjectModel(User.name) private readonly users?: Model<UserDocument>,
   ) {}
 
   onModuleInit(): void {
@@ -83,6 +84,26 @@ export class SchedulingRosterService implements OnModuleInit {
 
   async staff(): Promise<StaffMemberDocument[]> {
     return this.staffModel.find().sort({ name: 1 }).lean<StaffMemberDocument[]>().exec();
+  }
+
+  /**
+   * Admin only. The active logins a staff member can be linked to: those no staff member holds yet, plus the login of
+   * `staffId` itself (so the card can keep it). Nothing but id, name, email and role is returned.
+   */
+  async logins(actor: Actor, staffId?: string): Promise<{ id: string; name: string; email: string; role: string }[]> {
+    requireAdmin(actor);
+    if (!this.users) return [];
+    const taken = await this.staffModel.find({ userId: { $type: 'string' } }).select('userId').lean().exec();
+    const own = staffId && Types.ObjectId.isValid(staffId) ? await this.staffModel.findById(staffId).select('userId').lean().exec() : null;
+    const blocked = taken.map((t) => String(t.userId)).filter((id) => id !== own?.userId);
+    const rows = await this.users
+      .find({ isActive: { $ne: false }, _id: { $nin: blocked.filter((id) => Types.ObjectId.isValid(id)) } })
+      .select('name email role')
+      .sort({ name: 1 })
+      .limit(500)
+      .lean()
+      .exec();
+    return rows.map((u) => ({ id: String(u._id), name: u.name, email: u.email, role: u.role }));
   }
 
   /** Admin only. Creates a staff member, or updates the one with `id`. */

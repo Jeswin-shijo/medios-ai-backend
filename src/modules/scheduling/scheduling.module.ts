@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { User, UserSchema } from '../users/schemas/user.schema';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AiModule } from '../ai/ai.module';
 import { AppointmentsModule } from '../appointments/appointments.module';
@@ -52,6 +53,7 @@ import { WaitItem, WaitItemSchema } from './schemas/wait-item.schema';
       { name: WaitItem.name, schema: WaitItemSchema },
       { name: SchedulingSnapshot.name, schema: SchedulingSnapshotSchema },
       { name: SchedulingLock.name, schema: SchedulingLockSchema },
+      { name: User.name, schema: UserSchema },
     ]),
     CoordinatorModule, // registry, messages, cases, escalations, and the Clock model
     SettingsModule,
