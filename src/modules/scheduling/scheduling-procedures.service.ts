@@ -322,30 +322,7 @@ export class SchedulingProceduresService implements OnModuleInit {
       if (!started) break;
       plan = await this.plan(b);
     }
-    if (plan) {
-      const room = roomByKey(plan.room);
-      const at = clinicNow();
-      const history = [
-        { at, what: `Booked for ${displayDateTime(plan.start)} in ${room?.name ?? plan.room}`, by: 'Scheduling Agent' },
-        ...bumped.map((x) => ({ at, what: `Took the place of ${x.number}, which went to the waitlist`, by: 'Scheduling Agent' })),
-        ...plan.team.filter((t) => t.unfilled).map((t) => ({ at, what: `No ${skillText(t.role)} available`, by: 'Scheduling Agent' })),
-      ];
-      const saved = await this.bookings
-        .updateOne(
-          { _id: b._id, status: b.status },
-          {
-            $set: { status: 'booked', room: plan.room, start: plan.start, end: plan.end, team: plan.team },
-            $push: { history: { $each: history } },
-            $unset: { announcedAt: '' },
-          },
-        )
-        .exec();
-      if (!saved.modifiedCount) return 'unchanged';
-      await this.completeWaitAlert(id);
-      await this.announce(id, 'booked');
-      await this.raiseTeamAlerts(id);
-      return 'booked';
-    }
+    if (plan) return this.commit(b, plan, bumped);
     if (b.status === 'cant-book') return 'cant-book';
     const waiting = await this.bookings
       .updateOne(
@@ -357,6 +334,55 @@ export class SchedulingProceduresService implements OnModuleInit {
     await this.announce(id, 'cant-book');
     await this.raiseWaitAlert(id);
     return 'cant-book';
+  }
+
+  /** Saves a plan as the booking (status still waiting), then announces it and raises the team alerts. */
+  private async commit(b: Lean<ProcedureBooking>, plan: NamedPlan, bumped: BumpedCase[]): Promise<TryBookOutcome> {
+    const id = String(b._id);
+    const room = roomByKey(plan.room);
+    const at = clinicNow();
+    const history = [
+      { at, what: `Booked for ${displayDateTime(plan.start)} in ${room?.name ?? plan.room}`, by: 'Scheduling Agent' },
+      ...bumped.map((x) => ({ at, what: `Took the place of ${x.number}, which went to the waitlist`, by: 'Scheduling Agent' })),
+      ...plan.team.filter((t) => t.unfilled).map((t) => ({ at, what: `No ${skillText(t.role)} available`, by: 'Scheduling Agent' })),
+    ];
+    const saved = await this.bookings
+      .updateOne(
+        { _id: b._id, status: b.status },
+        {
+          $set: { status: 'booked', room: plan.room, start: plan.start, end: plan.end, team: plan.team },
+          $push: { history: { $each: history } },
+          $unset: { announcedAt: '' },
+        },
+      )
+      .exec();
+    if (!saved.modifiedCount) return 'unchanged';
+    await this.completeWaitAlert(id);
+    await this.announce(id, 'booked');
+    await this.raiseTeamAlerts(id);
+    return 'booked';
+  }
+
+  /**
+   * Books a waiting request at exactly `start` (any free room of the kind, with a full team), or not at all: used by the
+   * waitlist's Book offered, where a person has confirmed that time with the patient. 'taken' when the planner no longer
+   * gives that start (nothing is changed: not even a request that is a bumped case is moved to can't book).
+   */
+  async bookAt(id: string, start: Date): Promise<'booked' | 'taken' | 'unchanged'> {
+    if (!isValidObjectId(id)) throw new NotFoundException('Procedure not found');
+    const until = await this.acquire(1);
+    if (!until) return 'taken';
+    try {
+      const b = await this.bookings.findById(id).lean<Lean<ProcedureBooking>>().exec();
+      if (!b) throw new NotFoundException('Procedure not found');
+      if (!WAITING.includes(b.status)) return 'unchanged';
+      const plan = await this.plan(b, start);
+      if (!plan || plan.start.getTime() !== start.getTime() || plan.bump.length || plan.team.some((t) => 'unfilled' in t && t.unfilled)) return 'taken';
+      const outcome = await this.commit(b, plan, []);
+      return outcome === 'booked' ? 'booked' : 'unchanged';
+    } finally {
+      await this.release(until);
+    }
   }
 
   /**

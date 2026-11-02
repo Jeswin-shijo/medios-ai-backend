@@ -319,4 +319,32 @@ describe('SchedulingWaitlistService', () => {
     assert.equal(booked.status, 'booked');
     assert.equal(booked.start.getTime(), new Date((next.offered[0] as any).start).getTime(), 'booked at the offered start');
   });
+
+  test('book offered with the offered start taken: 409, nothing booked, a bumped case stays requested (I3)', async () => {
+    const cardio = await m.StaffMember.create({ name: 'Dr. Arun', skills: ['cardiologist'], departmentCode: 'CARD' });
+    const nurse = await m.StaffMember.create({ name: 'Anitha', skills: ['cath-nurse'], departmentCode: 'CARD' });
+    const tech = await m.StaffMember.create({ name: 'Ravi', skills: ['cath-technician'], departmentCode: 'CARD' });
+    for (const day of [D, D1]) for (const s of [cardio, nurse, tech]) await m.RosterEntry.create({ date: day, shift: 'morning', staff: s._id });
+    const p = await patient('Mohan Raj');
+    const v = await procedures.request(ADMIN, { patientId: String(p._id), procedure: 'coronary-angiography', priority: 'routine' } as any);
+    await m.ProcedureBooking.updateOne(
+      { _id: v.id },
+      { $set: { status: 'requested', bumpedFrom: { start: v.start, room: v.room } }, $unset: { room: 1, start: 1, end: 1 } },
+    );
+    const item = await waitlist.add({ kind: 'procedure', refId: v.id, reason: 'bumped', priority: 'routine' });
+    const offeredStart = new Date((item.offered[0] as any).start).getTime();
+    // Another request takes the offered start before the person presses Book offered.
+    const q = await patient('Taken First');
+    const other = await procedures.request(ADMIN, { patientId: String(q._id), procedure: 'coronary-angiography', priority: 'routine' } as any);
+    assert.equal(new Date(other.start!).getTime(), offeredStart, 'the other request now holds the offered start');
+    await assert.rejects(() => waitlist.bookOffered(FRONT, item.id, 0), (e: any) => e instanceof ConflictException && /just taken/.test(e.message));
+    const after = (await m.ProcedureBooking.findById(v.id).lean()) as any;
+    assert.equal(after.status, 'requested', 'a bumped case never becomes cant-book here');
+    assert.ok(!after.start && !after.room, 'nothing was booked, not even a later time');
+    assert.ok(after.bumpedFrom, 'it still remembers where it was bumped from');
+    const still = (await m.WaitItem.findById(item.id).lean()) as any;
+    assert.equal(still.status, 'open');
+    assert.ok(still.offered.every((o: any) => new Date(o.start).getTime() !== offeredStart), 'the offers were refreshed');
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: new RegExp(`scheduling-wait.*${v.id}`) }), 0, 'no wait alert from Book offered');
+  });
 });

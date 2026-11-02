@@ -336,8 +336,9 @@ export class SchedulingWaitlistService implements OnModuleInit {
     if (b.status !== 'requested' && b.status !== 'cant-book') {
       throw new ConflictException('That procedure is no longer waiting for a time.');
     }
-    await this.procedures.setEarliest(id, new Date(pick.start));
-    const outcome = await this.procedures.tryBook(id);
+    // Exactly the time the person confirmed with the patient, or nothing: never a later time, never can't book (Z25).
+    const outcome = await this.procedures.bookAt(id, new Date(pick.start));
+    if (outcome === 'unchanged') throw new ConflictException('That procedure is no longer waiting for a time.');
     if (outcome !== 'booked') throw new ConflictException(OFFER_CHANGED);
   }
 
