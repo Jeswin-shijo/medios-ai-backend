@@ -171,12 +171,23 @@ export class FinalBillService {
     const id = isValidObjectId(billId) ? new Types.ObjectId(billId) : null;
     if (!id) throw new NotFoundException('Bill not found');
     const bill = await this.billModel
-      .findOneAndUpdate({ _id: id, state: { $in: ACTIVE_BILL_STATES }, 'totals.balance': 0 }, { $set: { state: 'settled', settledAt: clinicNow() } }, { new: true })
+      .findOneAndUpdate(
+        {
+          _id: id,
+          'totals.balance': 0,
+          // R21: an ER or admission bill settles only once final; OPD and walk-in bills from open or final.
+          $or: [{ kind: { $in: ['opd', 'walk-in'] }, state: { $in: ACTIVE_BILL_STATES } }, { kind: { $in: ['er', 'admission'] }, state: 'final' }],
+        },
+        { $set: { state: 'settled', settledAt: clinicNow() } },
+        { new: true },
+      )
       .exec();
     if (!bill) {
-      const now = await this.billModel.findById(id).select('state').lean().exec();
+      const now = await this.billModel.findById(id).select('state kind').lean().exec();
       if (!now) throw new NotFoundException('Bill not found');
-      throw new ConflictException(now.state === 'settled' ? 'This bill is settled' : 'The balance is not zero');
+      if (now.state === 'settled') throw new ConflictException('This bill is settled');
+      if (now.state === 'open' && (now.kind === 'er' || now.kind === 'admission')) throw new ConflictException('Prepare the final bill first');
+      throw new ConflictException('The balance is not zero');
     }
     try {
       await this.alerts.updateMany({ link: new RegExp(`^revenue-bill:${String(bill._id)}:`), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
@@ -201,6 +212,8 @@ export class FinalBillService {
       if (!bill || bill.kind !== 'opd' || !ACTIVE_BILL_STATES.includes(bill.state) || (bill.totals?.balance ?? 0) !== 0 || !bill.appointment) return false;
       const appointment = await this.appointments.findById(bill.appointment).select('status').lean().exec();
       if (appointment?.status !== 'Completed') return false;
+      // R20: an unpriced line is not "nothing due"; the desk prices it or settles by hand.
+      if (await this.chargeLines.exists({ bill: bill._id, needsPrice: true })) return false;
       await this.settle('agent', String(bill._id));
       return true;
     } catch (e) {

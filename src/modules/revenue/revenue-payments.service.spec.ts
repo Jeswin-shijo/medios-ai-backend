@@ -97,6 +97,7 @@ describe('PaymentsService', () => {
     await assert.rejects(svc.record(DESK, id, { amount: 100, mode: 'cash', kind: 'weird' as any }), /kind/i);
     assert.equal(await m.Payment.countDocuments({}), 0);
     await svc.record(DESK, id, { amount: 5000, mode: 'card', kind: 'settlement' });
+    await final.prepare(DESK, id);
     await final.settle(DESK, id);
     await assert.rejects(svc.record(DESK, id, { amount: 100, mode: 'cash', kind: 'part' }), /settled/i);
     const p = (await m.Payment.findOne({}).lean())!;

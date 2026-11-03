@@ -111,8 +111,9 @@ describe('FinalBillService', () => {
   test('settle succeeds only at balance zero and is 409 when a charge landed first', async () => {
     const b = await erBill(1000);
     const id = String(b._id);
+    await final.prepare(DESK, id);
     await assert.rejects(final.settle(DESK, id), (e: any) => e.status === 409 && /balance is not zero/i.test(e.message));
-    assert.equal((await fresh(id))!.state, 'open');
+    assert.equal((await fresh(id))!.state, 'final');
     await payments.record(DESK, id, { amount: 1000, mode: 'cash', kind: 'settlement' });
 
     // A charge lands after the desk saw balance 0 but before the write: the guarded update refuses.
@@ -138,7 +139,7 @@ describe('FinalBillService', () => {
     }
     assert.equal(injected, true);
     const mid = (await fresh(id))!;
-    assert.equal(mid.state, 'open');
+    assert.equal(mid.state, 'final');
     assert.equal(mid.totals.balance, 250);
     assert.equal((await sent('revenue.bill-settled')).length, 0);
 
@@ -155,6 +156,7 @@ describe('FinalBillService', () => {
       const b = await erBill(1000, new Types.ObjectId());
       const id = String(b._id);
       await payments.record(DESK, id, { amount: 1000, mode: 'cash', kind: 'settlement' });
+      await final.prepare(DESK, id);
       const [s, c] = await Promise.allSettled([
         final.settle(DESK, id),
         bills.addCharge(id, { code: 'x', name: 'Racing charge', category: 'other', qty: 1, unitPrice: 100, source: { type: 'manual', ref: `race-${i}` }, by: { name: 'Desk' } }),
@@ -178,6 +180,7 @@ describe('FinalBillService', () => {
     const b = await erBill(1000);
     const id = String(b._id);
     await Promise.all([payments.record(DESK, id, { amount: 600, mode: 'cash', kind: 'part' }), payments.record(DESK, id, { amount: 400, mode: 'upi', kind: 'part' })]);
+    await final.prepare(DESK, id);
     const [a, c] = await Promise.allSettled([final.settle(DESK, id), final.settle(DESK, id)]);
     assert.deepEqual([a.status, c.status].sort(), ['fulfilled', 'rejected']);
     assert.equal((await sent('revenue.bill-settled')).length, 1, 'one settled message');
@@ -216,6 +219,49 @@ describe('FinalBillService', () => {
     assert.equal((await sent('revenue.bill-settled')).length, 2);
     assert.equal((await running('revenue-final')).length, 0, 'an OPD bill never gets a final-bill clock');
     assert.equal(await m.TaskAlertItem.countDocuments({ link: /:final$/ }), 0);
+  });
+
+  test('R20: an OPD bill with an unpriced line never settles by itself, on either auto path; manual settle still works', async () => {
+    const appt = () =>
+      m.Appointment.create({ uhid: patient.uhid, patientName: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000091', time: '09:30 AM', date: isoDate(clinicNow()), type: 'Consultation', condition: 'Fever', status: 'Completed' });
+    const unpriced = (b: any, ref: string) =>
+      m.ChargeLine.create({ bill: b._id, code: 'opd:consult', name: 'Consultation', category: 'consultation', qty: 1, unitPrice: 0, amount: 0, source: { type: 'opd', ref }, chargedAt: new Date(), by: { name: 'Revenue Agent' }, needsPrice: true });
+
+    // Completed path: the only line is a needs-price consultation at 0.
+    const a1 = await appt();
+    const b1 = await bills.open({ kind: 'opd', patientId: String(patient._id), appointmentId: String(a1._id), day: a1.date });
+    await unpriced(b1, 'u1');
+    await opd.onStatusChange({ id: String(a1._id), status: 'Completed' });
+    assert.equal((await fresh(b1._id))!.state, 'open', 'a bill with an unpriced line stays open');
+    assert.equal((await sent('revenue.bill-settled')).length, 0);
+
+    // Payment path (R18): an unpriced line next to a priced one, the priced one paid in full.
+    const a2 = await appt();
+    const b2 = await bills.open({ kind: 'opd', patientId: String(patient._id), appointmentId: String(a2._id), day: a2.date });
+    await unpriced(b2, 'u2');
+    await bills.adjust(String(b2._id), { charges: 300 });
+    await payments.record(DESK, String(b2._id), { amount: 300, mode: 'cash', kind: 'settlement' });
+    assert.equal((await fresh(b2._id))!.totals.balance, 0);
+    assert.equal((await fresh(b2._id))!.state, 'open', 'a payment to 0 does not settle an unpriced bill');
+
+    // The desk can still settle by hand.
+    assert.equal((await final.settle(DESK, String(b1._id))).state, 'settled');
+  });
+
+  test('R21: an open ER or admission bill cannot settle until it is prepared; OPD and walk-in settle from open', async () => {
+    const adm = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(new Types.ObjectId()) });
+    const id = String(adm._id);
+    await assert.rejects(final.settle(DESK, id), (e: any) => e.status === 409 && /Prepare the final bill first/.test(e.message));
+    assert.equal((await fresh(id))!.state, 'open');
+    assert.equal((await sent('revenue.bill-settled')).length, 0);
+    await final.prepare(DESK, id);
+    assert.equal((await final.settle(DESK, id)).state, 'settled');
+
+    const er = await erBill(0, new Types.ObjectId());
+    await assert.rejects(final.settle(DESK, String(er._id)), (e: any) => e.status === 409 && /Prepare the final bill first/.test(e.message));
+
+    const walk = await bills.open({ kind: 'walk-in', patientId: String(patient._id) });
+    assert.equal((await final.settle(DESK, String(walk._id))).state, 'settled');
   });
 
   test('prepare lists an approved-not-issued medicine, a collected test with no charge, an active admission and a needs-price line', async () => {
@@ -353,6 +399,7 @@ describe('FinalBillService', () => {
     await final.request('agent', id);
     await until(async () => (await running('revenue-final')).length === 1, 'the clock');
     await payments.record(DESK, id, { amount: 100, mode: 'cash', kind: 'settlement' });
+    await final.prepare(DESK, id);
     await final.settle(ADMIN, id);
     await until(async () => (await running('revenue-final')).length === 0, 'settle to stop the clock');
     await assert.rejects(final.prepare(DESK, id), /settled/i);
