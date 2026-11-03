@@ -21,6 +21,9 @@ import { PaymentsService } from './revenue-payments.service';
 import { CorrectionsService } from './revenue-corrections.service';
 import { RefundsService } from './revenue-refunds.service';
 import { RevenueReconcileService } from './revenue-reconcile.service';
+import { AiModule } from '../ai/ai.module';
+import { RevenueAiService } from './revenue-ai';
+import { RevenueOverviewService } from './revenue-overview.service';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { OpdModule } from '../opd/opd.module';
 import { Appointment, AppointmentSchema } from '../appointments/schemas/appointment.schema';
@@ -78,8 +81,9 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     CoordinatorModule, // the counter model
     AppointmentsModule, // AppointmentEvents
     OpdModule,
+    AiModule,
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService],
 })
 export class RevenueModule {}
