@@ -196,6 +196,21 @@ describe('RevenueOverviewService', () => {
     assert.deepEqual(first.paymentsByMode, { upi: 4000 });
   });
 
+  test('a reversed procedure never reaches the AI explanation, and its amounts agree with the bill', async () => {
+    const b = await bill({ totals: { charges: 6000, discounts: 0, payments: 0, refunds: 0, balance: 6000 } });
+    await line(b, { code: 'bed:icu', category: 'bed', unitPrice: 6000, amount: 6000 });
+    // What CorrectionsService leaves after a reversal: the original marked reversed and a negative credit line in its category.
+    await line(b, { code: 'proc:coronary-angiography', category: 'procedure', unitPrice: 6000, amount: 6000, reversed: true });
+    await line(b, { code: 'correction:reversal', name: 'Reversal: Procedure', category: 'procedure', unitPrice: -6000, amount: -6000 });
+    const { p, calls } = stubProvider('claude');
+    await build(aiService(p)).explain(String(b._id));
+    const input = calls[0].input as any;
+    assert.deepEqual(input.procedures, []);
+    assert.ok(!JSON.stringify(input).includes('Coronary angiography'));
+    assert.equal(Object.values(input.categoryTotals as Record<string, number>).reduce((a, v) => a + v, 0), input.totals.charges);
+    assert.equal(input.categoryTotals.procedure, 0);
+  });
+
   test('the leak check catches each pattern, and a leaking answer is refused', async () => {
     for (const bad of ['BL-0042 owes', 'receipt RC-0007', 'RF-0003 paid', 'ER-0012 arrived', 'LR-0004', 'MO-0009', 'MHK202600970', 'call 9100000070', '507f1f77bcf86cd799439011', 'PR-0001', 'CO-0002', 'CASE-12', 'Dr. Arun']) {
       assert.ok(leaks(bad), bad);

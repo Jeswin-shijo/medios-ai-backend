@@ -292,7 +292,7 @@ export class RevenueOverviewService {
       if (l.amount > 0 && !l.reversed) bump(lineCountsByCategory, l.category);
       if (l.needsPrice && !l.reversed) needsPriceLines++;
       const label = l.code.startsWith('proc:') ? procedureByKey(l.code.slice(5))?.name : undefined;
-      if (label) procedures.set(label, (procedures.get(label) ?? 0) + l.amount);
+      if (label && !l.reversed) procedures.set(label, (procedures.get(label) ?? 0) + l.amount);
     }
     const paymentsByMode: Record<string, number> = {};
     for (const p of payments) bump(paymentsByMode, p.mode, p.amount);
