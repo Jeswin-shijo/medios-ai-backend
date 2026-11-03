@@ -89,6 +89,15 @@ export interface RevenueOverview {
   recent: RecentPaymentRow[];
 }
 
+/** The clinic day's [from, to) window: the one boundary the overview, the payments list and the Dashboard share (R34, R35). */
+export function clinicDayWindow(date: string): { from: Date; to: Date } {
+  const from = parseIsoDay(date);
+  from.setHours(0, 0, 0, 0);
+  const to = new Date(from);
+  to.setDate(to.getDate() + 1);
+  return { from, to };
+}
+
 const OPEN_BILL = { $or: [{ state: 'open' }, { state: 'final', 'totals.balance': { $ne: 0 } }] };
 const bump = (o: Record<string, number>, key: string, by = 1) => {
   o[key] = (o[key] ?? 0) + by;
@@ -191,11 +200,7 @@ export class RevenueOverviewService {
   }
 
   private window(date: string): { from: Date; to: Date } {
-    const from = parseIsoDay(date);
-    from.setHours(0, 0, 0, 0);
-    const to = new Date(from);
-    to.setDate(to.getDate() + 1);
-    return { from, to };
+    return clinicDayWindow(date);
   }
 
   /** Payments stamped on the clinic day that were not cancelled. Refunds paid are not subtracted (R34). */

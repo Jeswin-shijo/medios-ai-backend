@@ -1,12 +1,14 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { clinicNow } from '../../common/utils/clinic-time';
+import { clinicNow, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { UserRole } from '../users/schemas/user.schema';
 import { FinalBillService } from './revenue-final.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { clinicDayWindow } from './revenue-overview.service';
+import { Bill, BillDocument } from './schemas/bill.schema';
 import { RevenueSettingsService } from './revenue-settings.service';
 import { Payment, PaymentDocument, PaymentKind, PAYMENT_KINDS } from './schemas/payment.schema';
 
@@ -111,6 +113,37 @@ export class PaymentsService {
       throw e;
     }
     return claimed;
+  }
+
+  /** The clinic day's payments, newest first (R35). */
+  async list(filter: { day?: string } = {}) {
+    const day = filter.day ?? isoDate(clinicNow());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || isoDate(parseIsoDay(day)) !== day) throw new BadRequestException('day must be a date as YYYY-MM-DD');
+    const { from, to } = clinicDayWindow(day);
+    const rows = await this.payments.find({ at: { $gte: from, $lt: to } }).sort({ at: -1, _id: -1 }).lean().exec();
+    const billModel = this.payments.db.model<BillDocument>(Bill.name);
+    const found = await billModel.find({ _id: { $in: [...new Set(rows.map((r) => String(r.bill)))] } }).select('number kind patientName patientUhid').lean().exec();
+    const byId = new Map(found.map((b) => [String(b._id), b]));
+    return rows.map((p) => {
+      const b = byId.get(String(p.bill));
+      return {
+        id: String(p._id),
+        receiptNumber: p.receiptNumber,
+        billId: String(p.bill),
+        billNumber: b?.number ?? '',
+        billKind: b?.kind ?? '',
+        patientName: b?.patientName ?? '',
+        patientUhid: b?.patientUhid ?? '',
+        amount: p.amount,
+        mode: p.mode,
+        kind: p.kind,
+        reference: p.reference,
+        receivedBy: p.by?.name ?? '',
+        at: p.at,
+        cancelled: !!p.cancelled,
+        cancelledReason: p.cancelled?.reason ?? null,
+      };
+    });
   }
 
   /** What the receipt prints. */

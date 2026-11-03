@@ -9,6 +9,8 @@ import { ImagingStudy, ImagingStudySchema } from '../imaging/schemas/imaging.sch
 import { BillInvoice, BillInvoiceSchema } from '../billing/schemas/bill.schema';
 import { Consultation, ConsultationSchema } from '../consultations/schemas/consultation.schema';
 import { TaskAlertItem, TaskAlertItemSchema } from '../tasks-alerts/schemas/task-alert.schema';
+import { Bill, BillSchema } from '../revenue/schemas/bill.schema';
+import { Payment, PaymentSchema } from '../revenue/schemas/payment.schema';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { TaskAlertItem, TaskAlertItemSchema } from '../tasks-alerts/schemas/task
       { name: BillInvoice.name, schema: BillInvoiceSchema },
       { name: Consultation.name, schema: ConsultationSchema },
       { name: TaskAlertItem.name, schema: TaskAlertItemSchema },
+      { name: Payment.name, schema: PaymentSchema },
+      { name: Bill.name, schema: BillSchema },
     ]),
   ],
   controllers: [DashboardController],

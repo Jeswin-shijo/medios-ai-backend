@@ -8,6 +8,8 @@ import { ImagingStudy, ImagingStudyDocument } from '../imaging/schemas/imaging.s
 import { BillInvoice, BillInvoiceDocument } from '../billing/schemas/bill.schema';
 import { Consultation, ConsultationDocument } from '../consultations/schemas/consultation.schema';
 import { TaskAlertItem, TaskAlertDocument } from '../tasks-alerts/schemas/task-alert.schema';
+import { Payment, PaymentDocument } from '../revenue/schemas/payment.schema';
+import { Bill, BillDocument } from '../revenue/schemas/bill.schema';
 import { clockMinutes, displayDate, isoDate } from '../../common/utils/clinic-time';
 
 const countBy = (values: string[]) =>
@@ -25,6 +27,8 @@ export class DashboardService {
     @InjectModel(BillInvoice.name) private billModel: Model<BillInvoiceDocument>,
     @InjectModel(Consultation.name) private consultationModel: Model<ConsultationDocument>,
     @InjectModel(TaskAlertItem.name) private taskModel: Model<TaskAlertDocument>,
+    @InjectModel(Payment.name) private paymentModel: Model<PaymentDocument>,
+    @InjectModel(Bill.name) private revenueBillModel: Model<BillDocument>,
   ) {}
 
   /**
@@ -46,6 +50,8 @@ export class DashboardService {
       totalImaging,
       pendingImaging,
       bills,
+      revenuePayments,
+      revenueBillsOpened,
       criticalAlerts,
       recentPatients,
     ] = await Promise.all([
@@ -58,6 +64,9 @@ export class DashboardService {
       this.imagingModel.countDocuments().exec(),
       this.imagingModel.countDocuments({ status: 'Pending' }).exec(),
       this.billModel.find({ billDate: displayDay }).exec(),
+      // Revenue Agent: today's payments that were not cancelled, and the bills opened today.
+      this.paymentModel.find({ at: { $gte: dayStart, $lt: dayEnd }, cancelled: { $exists: false } }).select('amount').lean().exec(),
+      this.revenueBillModel.countDocuments({ openedAt: { $gte: dayStart, $lt: dayEnd } }).exec(),
       this.taskModel
         .find({ priority: 'High', status: { $ne: 'Completed' } })
         .sort({ createdAt: -1 })
@@ -81,8 +90,9 @@ export class DashboardService {
       labReports: { total: totalLabs, pending: pendingLabs },
       imaging: { total: totalImaging, pending: pendingImaging },
       billing: {
-        revenue: bills.reduce((acc, b) => acc + (b.paidAmount || 0), 0),
-        invoices: bills.length,
+        // Revenue payments of the day, plus the legacy invoices paid that day.
+        revenue: revenuePayments.reduce((acc, p) => acc + (p.amount || 0), 0) + bills.reduce((acc, b) => acc + (b.paidAmount || 0), 0),
+        invoices: revenueBillsOpened + bills.length,
       },
       schedule: schedule.map((a) => ({
         id: String(a._id),

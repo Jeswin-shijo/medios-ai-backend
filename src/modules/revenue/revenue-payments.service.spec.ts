@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
+import { BadRequestException } from '@nestjs/common';
 import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AgentRegistry } from '../coordinator/agent-registry';
@@ -135,5 +136,27 @@ describe('PaymentsService', () => {
     assert.equal(r.balance, 3500);
     assert.equal(r.cancelled, null);
     await assert.rejects(svc.receipt(String(new Types.ObjectId())), /not found/i);
+  });
+
+  test('list gives the clinic day\'s payments newest first with the bill and patient, and shows cancelled ones (R35)', async () => {
+    const b = await bill();
+    const first = await svc.record(DESK, String(b._id), { amount: 100, mode: 'cash', kind: 'part' });
+    const second = await svc.record(DESK, String(b._id), { amount: 200, mode: 'upi', kind: 'deposit' });
+    await svc.cancel(ADMIN, String(first._id), 'Wrong amount');
+    await m.Payment.create({ receiptNumber: 'RC-9999', bill: b._id, amount: 50, mode: 'cash', kind: 'part', by: { id: 'x', name: 'x' }, at: new Date(2001, 0, 1) });
+    const rows = await svc.list();
+    assert.deepEqual(rows.map((r) => r.receiptNumber), [second.receiptNumber, first.receiptNumber]);
+    assert.equal(rows[0].amount, 200);
+    assert.equal(rows[0].mode, 'upi');
+    assert.equal(rows[0].kind, 'deposit');
+    assert.equal(rows[0].billNumber, b.number);
+    assert.equal(rows[0].billKind, 'er');
+    assert.equal(rows[0].patientName, b.patientName);
+    assert.equal(rows[0].patientUhid, b.patientUhid);
+    assert.equal(rows[0].cancelled, false);
+    assert.equal(rows[1].cancelled, true);
+    assert.equal(rows[1].cancelledReason, 'Wrong amount');
+    assert.equal((await svc.list({ day: '2001-01-01' })).length, 1);
+    await assert.rejects(() => svc.list({ day: '2001-02-31' }), BadRequestException);
   });
 });

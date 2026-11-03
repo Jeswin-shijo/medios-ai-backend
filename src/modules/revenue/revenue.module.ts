@@ -24,6 +24,8 @@ import { RevenueReconcileService } from './revenue-reconcile.service';
 import { AiModule } from '../ai/ai.module';
 import { RevenueAiService } from './revenue-ai';
 import { RevenueOverviewService } from './revenue-overview.service';
+import { RevenueController } from './revenue.controller';
+import { RevenueScheduler } from './revenue.scheduler';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { OpdModule } from '../opd/opd.module';
 import { Appointment, AppointmentSchema } from '../appointments/schemas/appointment.schema';
@@ -47,7 +49,6 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
 
 /**
  * The Revenue agent. It reads other agents' records read-only through their models and never imports their services.
- * Later tasks add the bills, the controller and the scheduler here.
  */
 @Module({
   imports: [
@@ -83,7 +84,8 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     OpdModule,
     AiModule,
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService],
+  controllers: [RevenueController],
+  providers: [RevenueScheduler, PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService],
   exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService],
 })
 export class RevenueModule {}
