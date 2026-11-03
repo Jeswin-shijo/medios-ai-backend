@@ -1,6 +1,7 @@
 import 'reflect-metadata';
-import { describe, test } from 'node:test';
+import { before, describe, test } from 'node:test';
 import * as assert from 'node:assert/strict';
+import { Logger } from '@nestjs/common';
 import { RevenueScheduler } from './revenue.scheduler';
 
 const gate = () => {
@@ -10,6 +11,8 @@ const gate = () => {
 };
 
 describe('RevenueScheduler', () => {
+  // The deliberate failures log errors; keep the output clean.
+  before(() => Logger.overrideLogger(false));
   test('a minute pass is skipped while the previous one is still running', async () => {
     const g = gate();
     let calls = 0;

@@ -8,6 +8,7 @@ import { ImagingStudy, ImagingStudyDocument } from '../imaging/schemas/imaging.s
 import { BillInvoice, BillInvoiceDocument } from '../billing/schemas/bill.schema';
 import { Consultation, ConsultationDocument } from '../consultations/schemas/consultation.schema';
 import { TaskAlertItem, TaskAlertDocument } from '../tasks-alerts/schemas/task-alert.schema';
+import { UserRole } from '../users/schemas/user.schema';
 import { Payment, PaymentDocument } from '../revenue/schemas/payment.schema';
 import { Bill, BillDocument } from '../revenue/schemas/bill.schema';
 import { clockMinutes, displayDate, isoDate } from '../../common/utils/clinic-time';
@@ -35,7 +36,7 @@ export class DashboardService {
    * Everything the dashboard shows for one day, computed from the records. Numbers
    * only; labels, colours and formatting belong to the client.
    */
-  async getDashboardStats(day: Date) {
+  async getDashboardStats(day: Date, role?: UserRole) {
     const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate());
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const displayDay = displayDate(day);
@@ -89,11 +90,12 @@ export class DashboardService {
       },
       labReports: { total: totalLabs, pending: pendingLabs },
       imaging: { total: totalImaging, pending: pendingImaging },
-      billing: {
+      // R37: the billing numbers are a Revenue read, for the desk and admins only.
+      billing: role === UserRole.ADMIN || role === UserRole.STAFF ? {
         // Revenue payments of the day, plus the legacy invoices paid that day.
         revenue: revenuePayments.reduce((acc, p) => acc + (p.amount || 0), 0) + bills.reduce((acc, b) => acc + (b.paidAmount || 0), 0),
         invoices: revenueBillsOpened + bills.length,
-      },
+      } : null,
       schedule: schedule.map((a) => ({
         id: String(a._id),
         uhid: a.uhid,

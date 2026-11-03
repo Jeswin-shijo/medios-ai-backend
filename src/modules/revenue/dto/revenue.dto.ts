@@ -24,7 +24,7 @@ function RealDay() {
     });
 }
 
-export class IdParam {
+export class RevenueIdParam {
   @IsMongoId() id: string;
 }
 
@@ -34,11 +34,11 @@ export class BillIdParam {
 
 // ---------- queries ----------
 
-export class OverviewQueryDto {
+export class RevenueOverviewQueryDto {
   @IsOptional() @RealDay() day?: string;
 }
 
-export class SnapshotQueryDto {
+export class RevenueSnapshotQueryDto {
   @IsOptional() @IsIn(['24h', '7d']) range?: string;
 }
 
@@ -60,7 +60,7 @@ export class PriceListQueryDto {
 // ---------- bodies ----------
 
 /** A reason, 1 to 300 characters after trimming. */
-export class ReasonDto {
+export class CancelPaymentDto {
   @Transform(trim) @IsString() @MinLength(1) @MaxLength(300) reason: string;
 }
 

@@ -6,6 +6,7 @@ import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test
 import { BillInvoice, BillInvoiceSchema } from '../billing/schemas/bill.schema';
 import { Consultation, ConsultationSchema } from '../consultations/schemas/consultation.schema';
 import { ImagingStudy, ImagingStudySchema } from '../imaging/schemas/imaging.schema';
+import { UserRole } from '../users/schemas/user.schema';
 import { DashboardService } from './dashboard.service';
 
 const reg = (c: any, schema: any) => (mongoose.models[c.name] ?? mongoose.model(c.name, schema)) as mongoose.Model<any>;
@@ -45,7 +46,7 @@ describe('DashboardService billing numbers', () => {
       { billDate: displayDate(day), paidAmount: 200, totalAmount: 200, status: 'Paid' },
       { billDate: '01 Jan 2020', paidAmount: 777, totalAmount: 777, status: 'Paid' },
     ]);
-    const out = await build().getDashboardStats(day);
+    const out = await build().getDashboardStats(day, UserRole.ADMIN);
     assert.equal(out.billing.revenue, 1700);
   });
 
@@ -54,7 +55,20 @@ describe('DashboardService billing numbers', () => {
     await bill({ kind: 'opd', erVisit: undefined });
     await bill({ openedAt: new Date(2026, 9, 18, 9, 0, 0) });
     await Invoice().collection.insertMany([{ billDate: displayDate(day), paidAmount: 0, totalAmount: 50, status: 'Unpaid' }]);
-    const out = await build().getDashboardStats(day);
+    const out = await build().getDashboardStats(day, UserRole.ADMIN);
     assert.equal(out.billing.invoices, 3);
+  });
+
+  test('billing is shown to admin and staff only; doctor, nurse, pharmacist and lab get null (R37)', async () => {
+    const b = await bill();
+    await pay(b, 400);
+    for (const role of [UserRole.ADMIN, UserRole.STAFF]) {
+      const out = await build().getDashboardStats(day, role);
+      assert.deepEqual(out.billing, { revenue: 400, invoices: 1 }, role);
+    }
+    for (const role of [UserRole.DOCTOR, UserRole.NURSE, UserRole.PHARMACIST, UserRole.LAB]) {
+      const out = await build().getDashboardStats(day, role);
+      assert.equal(out.billing, null, role);
+    }
   });
 });

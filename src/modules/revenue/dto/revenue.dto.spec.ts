@@ -1,9 +1,12 @@
 import 'reflect-metadata';
 import { describe, test } from 'node:test';
 import * as assert from 'node:assert/strict';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import * as revenueDtos from './revenue.dto';
 import {
-  BillsQueryDto, CorrectionDto, EstimateEditDto, MissedChargeDto, PaymentDto, PaymentsQueryDto, PriceItemDto, ReasonDto, RefundPayDto, SnapshotQueryDto,
+  BillsQueryDto, CorrectionDto, EstimateEditDto, MissedChargeDto, PaymentDto, PaymentsQueryDto, PriceItemDto, CancelPaymentDto, RefundPayDto, RevenueSnapshotQueryDto,
 } from './revenue.dto';
 
 const pipe = new ValidationPipe({ whitelist: true, transform: true });
@@ -23,10 +26,10 @@ describe('Revenue DTOs', () => {
     await run(PaymentDto, { ...pay, amount: 1_000_000 });
     for (const kind of ['deposit', 'part', 'settlement']) await run(PaymentDto, { ...pay, kind });
 
-    await run(ReasonDto, { reason: 'x'.repeat(300) });
-    await assert.rejects(() => run(ReasonDto, { reason: '' }), BadRequestException);
-    await assert.rejects(() => run(ReasonDto, { reason: '   ' }), BadRequestException);
-    await assert.rejects(() => run(ReasonDto, { reason: 'x'.repeat(301) }), BadRequestException);
+    await run(CancelPaymentDto, { reason: 'x'.repeat(300) });
+    await assert.rejects(() => run(CancelPaymentDto, { reason: '' }), BadRequestException);
+    await assert.rejects(() => run(CancelPaymentDto, { reason: '   ' }), BadRequestException);
+    await assert.rejects(() => run(CancelPaymentDto, { reason: 'x'.repeat(301) }), BadRequestException);
 
     const disc = { kind: 'discount', percent: 100, reason: 'goodwill' };
     await run(CorrectionDto, disc);
@@ -70,8 +73,24 @@ describe('Revenue DTOs', () => {
     await run(BillsQueryDto, { state: 'final', kind: 'walk-in', q: 'BL-1' }, 'query');
     await assert.rejects(() => run(PaymentsQueryDto, { day: '2026-02-31' }, 'query'), BadRequestException);
     await run(PaymentsQueryDto, { day: '2026-02-20' }, 'query');
-    await assert.rejects(() => run(SnapshotQueryDto, { range: '30d' }, 'query'), BadRequestException);
-    await run(SnapshotQueryDto, { range: '7d' }, 'query');
+    await assert.rejects(() => run(RevenueSnapshotQueryDto, { range: '30d' }, 'query'), BadRequestException);
+    await run(RevenueSnapshotQueryDto, { range: '7d' }, 'query');
     assert.ok(ID);
+  });
+
+  test('no Revenue DTO class shares its name with a class in another module (Swagger needs unique names)', () => {
+    const modules = join(__dirname, '..', '..');
+    const others = new Map<string, string>();
+    const walk = (dir: string) => {
+      for (const f of readdirSync(dir)) {
+        const full = join(dir, f);
+        if (statSync(full).isDirectory()) { if (full !== join(modules, 'revenue')) walk(full); continue; }
+        if (!f.endsWith('.ts') || f.endsWith('.spec.ts')) continue;
+        for (const m of readFileSync(full, 'utf8').matchAll(/export class (\w+)/g)) others.set(m[1], full);
+      }
+    };
+    walk(modules);
+    const clashes = Object.keys(revenueDtos).filter((n) => others.has(n)).map((n) => `${n} (also in ${others.get(n)})`);
+    assert.deepEqual(clashes, []);
   });
 });

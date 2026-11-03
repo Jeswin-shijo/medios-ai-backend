@@ -5,8 +5,8 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { actorOf } from '../beds/actor';
 import { UserRole } from '../users/schemas/user.schema';
 import {
-  BillIdParam, BillsQueryDto, CorrectionDto, EstimateEditDto, IdParam, MissedChargeDto, OverviewQueryDto, PaymentDto, PaymentsQueryDto, PriceItemDto, PriceListQueryDto,
-  ReasonDto, RefundPayDto, SnapshotQueryDto,
+  BillIdParam, BillsQueryDto, CorrectionDto, EstimateEditDto, RevenueIdParam, MissedChargeDto, RevenueOverviewQueryDto, PaymentDto, PaymentsQueryDto, PriceItemDto, PriceListQueryDto,
+  CancelPaymentDto, RefundPayDto, RevenueSnapshotQueryDto,
 } from './dto/revenue.dto';
 import { PriceListService } from './price-list.service';
 import { RevenueBillsService } from './revenue-bills.service';
@@ -54,14 +54,14 @@ export class RevenueController {
   @Get('overview')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Revenue cards, needs-action list, collections by mode and recent payments' })
-  getOverview(@Query() q: OverviewQueryDto) {
+  getOverview(@Query() q: RevenueOverviewQueryDto) {
     return this.overview.overview(q.day);
   }
 
   @Get('snapshots')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Hourly revenue counts for the last 24 hours or 7 days' })
-  snapshots(@Query() q: SnapshotQueryDto) {
+  snapshots(@Query() q: RevenueSnapshotQueryDto) {
     return this.overview.series((q.range as '24h' | '7d') ?? '24h');
   }
 
@@ -91,14 +91,14 @@ export class RevenueController {
   @Get('bills/:id')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'One bill with its lines, payments, refunds, corrections and estimates' })
-  bill(@Param() p: IdParam) {
+  bill(@Param() p: RevenueIdParam) {
     return this.billsService.view(p.id);
   }
 
   @Post('bills/:id/charges')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Add a charge the desk forgot to bill' })
-  addCharge(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: MissedChargeDto) {
+  addCharge(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: MissedChargeDto) {
     return this.corrections.addMissed(actorOf(user), p.id, {
       code: dto.code,
       name: dto.name,
@@ -112,35 +112,35 @@ export class RevenueController {
   @Post('bills/:id/payments')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Record a payment; the receipt number is RC-0001 style' })
-  recordPayment(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: PaymentDto) {
+  recordPayment(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: PaymentDto) {
     return this.paymentsService.record(actorOf(user), p.id, { amount: dto.amount, mode: dto.mode as 'cash' | 'upi' | 'card', reference: dto.reference, kind: dto.kind as PaymentKind });
   }
 
   @Post('bills/:id/final/request')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Ask for the final bill of an ER or admission bill' })
-  async requestFinal(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  async requestFinal(@CurrentUser() user: unknown, @Param() p: RevenueIdParam) {
     return { requested: await this.final.request(actorOf(user), p.id) };
   }
 
   @Post('bills/:id/final/prepare')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Prepare the final bill' })
-  prepareFinal(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  prepareFinal(@CurrentUser() user: unknown, @Param() p: RevenueIdParam) {
     return this.final.prepare(actorOf(user), p.id);
   }
 
   @Post('bills/:id/settle')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Settle a bill whose balance is zero' })
-  settle(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  settle(@CurrentUser() user: unknown, @Param() p: RevenueIdParam) {
     return this.final.settle(actorOf(user), p.id);
   }
 
   @Post('bills/:id/corrections')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Ask for a change, reversal, discount or write-off (an admin\'s own request applies at once)' })
-  requestCorrection(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: CorrectionDto) {
+  requestCorrection(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: CorrectionDto) {
     return this.corrections.request(actorOf(user), {
       billId: p.id,
       lineId: dto.lineId,
@@ -156,7 +156,7 @@ export class RevenueController {
   @Post('bills/:id/refund')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Ask to refund what the final bill owes' })
-  requestRefund(@CurrentUser() user: unknown, @Param() p: IdParam) {
+  requestRefund(@CurrentUser() user: unknown, @Param() p: RevenueIdParam) {
     return this.refunds.request(actorOf(user), p.id);
   }
 
@@ -172,7 +172,7 @@ export class RevenueController {
   @Put('estimates/:id')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Change the days or extra lines of an estimate' })
-  editEstimate(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: EstimateEditDto) {
+  editEstimate(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: EstimateEditDto) {
     return this.estimates.edit(actorOf(user), p.id, { days: dto.days, extra: dto.extra?.map((l) => ({ name: l.name, amount: l.amount })) });
   }
 
@@ -188,21 +188,21 @@ export class RevenueController {
   @Post('payments/:id/cancel')
   @Roles(...REV_ADMIN)
   @ApiOperation({ summary: 'Cancel a payment (admin)' })
-  cancelPayment(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: ReasonDto) {
+  cancelPayment(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: CancelPaymentDto) {
     return this.paymentsService.cancel(actorOf(user), p.id, dto.reason);
   }
 
   @Get('payments/:id/receipt')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'What the receipt prints' })
-  receipt(@Param() p: IdParam) {
+  receipt(@Param() p: RevenueIdParam) {
     return this.paymentsService.receipt(p.id);
   }
 
   @Post('refunds/:id/pay')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'Pay an approved refund' })
-  payRefund(@CurrentUser() user: unknown, @Param() p: IdParam, @Body() dto: RefundPayDto) {
+  payRefund(@CurrentUser() user: unknown, @Param() p: RevenueIdParam, @Body() dto: RefundPayDto) {
     return this.refunds.pay(actorOf(user), p.id, { mode: dto.mode, reference: dto.reference });
   }
 
@@ -241,7 +241,7 @@ export class RevenueController {
   @Get('patients/:id/total')
   @Roles(...REV_TOTALS)
   @ApiOperation({ summary: 'A patient\'s running total and what they have paid' })
-  patientTotal(@Param() p: IdParam) {
+  patientTotal(@Param() p: RevenueIdParam) {
     return this.billsService.patientTotal(p.id);
   }
 }
