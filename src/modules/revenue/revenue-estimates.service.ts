@@ -119,7 +119,8 @@ export class RevenueEstimatesService {
     const changed = !existing || existing.low !== built.low || existing.high !== built.high;
     let doc: EstimateDocument;
     if (existing) {
-      doc = (await this.estimates.findByIdAndUpdate(existing._id, { $set: set }, { new: true }).exec())!;
+      // R23: a new range is a new state, so its message is owed until it is sent.
+      doc = (await this.estimates.findByIdAndUpdate(existing._id, changed ? { $set: set, $unset: { announcedAt: 1 } } : { $set: set }, { new: true }).exec())!;
     } else {
       try {
         doc = await this.estimates.create({ bill: bill._id, ...set, extra: [], by: BY });
@@ -132,7 +133,15 @@ export class RevenueEstimatesService {
     return doc.toObject();
   }
 
-  private async announce(bill: BillDocument, estimate: EstimateDocument) {
+  /** The reconcile pass: sends the message of an estimate with no announcedAt. Never throws; true when it sent. */
+  async reannounce(estimateId: string): Promise<boolean> {
+    const estimate = isValidObjectId(estimateId) ? await this.estimates.findById(estimateId).exec() : null;
+    const bill = estimate ? await this.billModel.findById(estimate.bill).exec() : null;
+    if (!estimate || !bill) return false;
+    return this.announce(bill, estimate);
+  }
+
+  private async announce(bill: BillDocument, estimate: EstimateDocument): Promise<boolean> {
     try {
       await this.registration.send(
         'revenue.estimate-ready',
@@ -141,8 +150,10 @@ export class RevenueEstimatesService {
         { text: `Estimate ready, ${this.rupees(estimate.low)} to ${this.rupees(estimate.high)}`, dedupeKey: `estimate:${String(bill._id)}:${estimate.low}:${estimate.high}` },
       );
       await this.estimates.updateOne({ _id: estimate._id }, { $set: { announcedAt: new Date() } }).exec();
+      return true;
     } catch (e) {
       this.logger.warn(`Estimate for ${bill.number} not announced (${(e as Error).message})`);
+      return false;
     }
   }
 
@@ -182,6 +193,7 @@ export class RevenueEstimatesService {
             daysEdited: input.days !== undefined ? true : current.daysEdited, bookings: bookings.map((b) => String(b._id)),
             by: { id: actor.id, name: actor.name }, at: clinicNow(),
           },
+          $unset: { announcedAt: 1 },
         },
         { new: true },
       )

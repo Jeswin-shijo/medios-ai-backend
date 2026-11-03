@@ -37,6 +37,7 @@ export class RevenueCaptureService {
   private readonly logger = new Logger(RevenueCaptureService.name);
 
   /** Task 10 subscribes: a charged lab test was cancelled, so a person may want to reverse the charge. */
+  private readonly handlers = new Map<string, (message: Msg) => Promise<void>>();
   readonly onSuggestedReversal: ((e: SuggestedReversal) => void | Promise<void>)[] = [];
 
   constructor(
@@ -53,8 +54,10 @@ export class RevenueCaptureService {
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
   ) {
-    const on = (type: string, fn: (message: Msg) => Promise<void>) =>
+    const on = (type: string, fn: (message: Msg) => Promise<void>) => {
+      this.handlers.set(type, fn);
       registration.capture.set(type, (id) => this.run(type, id, fn));
+    };
     on('er.arrived', (m) => this.erArrived(m));
     on('er.doctor-seen', (m) => this.erDoctorSeen(m));
     on('lab.collected', (m) => this.labCollected(m));
@@ -62,6 +65,20 @@ export class RevenueCaptureService {
     on('pharmacy.issued', (m) => this.pharmacyIssued(m));
     on('scheduling.procedure-done', (m) => this.procedureDone(m));
     on('scheduling.consult-seen', (m) => this.consultSeen(m));
+  }
+
+  /**
+   * Runs a handler for a record whose message was never handled (the reconcile pass), as if the message had arrived. Safe to
+   * repeat: every handler checks the charge source first. Nothing escapes.
+   */
+  async replay(type: string, message: Msg): Promise<void> {
+    const fn = this.handlers.get(type);
+    if (!fn) return;
+    try {
+      await fn(message);
+    } catch (e) {
+      this.logger.warn(`${type}: no charge made on replay (${(e as Error).message})`);
+    }
   }
 
   /** Loads the message and runs the handler. Nothing escapes. */
@@ -174,11 +191,15 @@ export class RevenueCaptureService {
     if (!requestId || !test) return;
     const charged = await this.chargeLines.findOne({ 'source.type': 'lab', 'source.ref': `${requestId}:${test}` }).lean().exec();
     if (!charged) return;
-    const event: SuggestedReversal = {
+    await this.suggestReversal({
       billId: String(charged.bill),
       lineId: String(charged._id),
       reason: `Lab test ${test} was cancelled after it was charged`,
-    };
+    });
+  }
+
+  /** Tells the listeners to suggest a reversal. Each listener is idempotent per charge line (R12/R19). Nothing escapes. */
+  async suggestReversal(event: SuggestedReversal): Promise<void> {
     for (const fn of this.onSuggestedReversal) {
       try {
         await fn(event);

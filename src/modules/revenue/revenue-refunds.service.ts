@@ -126,6 +126,33 @@ export class RefundsService {
     }
   }
 
+  private taskFields(r: RefundDocument, bill: { number: string; patientName: string; patientUhid: string }) {
+    return {
+      title: `Pay refund ${r.number}: ${formatRupees(r.amount)}`,
+      subtitle: `Bill ${bill.number}`,
+      patientName: bill.patientName,
+      uhid: bill.patientUhid,
+      type: 'System',
+      category: 'System',
+      priority: 'Medium',
+      status: 'Pending',
+    };
+  }
+
+  /** The reconcile pass: writes the task of an approved, announced refund when it is missing. Never reopens one. Never throws; true when it wrote one. */
+  async ensureTask(refundId: string): Promise<boolean> {
+    try {
+      const r = isValidObjectId(refundId) ? await this.refunds.findById(refundId).exec() : null;
+      if (!r || r.state !== 'approved' || !r.announcedAt) return false;
+      const bill = await this.bills.get(String(r.bill));
+      const res = await this.alerts.updateOne({ link: link(r._id) }, { $setOnInsert: { ...this.taskFields(r, bill), link: link(r._id) } }, { upsert: true }).exec();
+      return !!res.upsertedCount;
+    } catch (e) {
+      this.logger.warn(`Refund ${refundId}: task not restored (${(e as Error).message})`);
+      return false;
+    }
+  }
+
   private async announce(r: RefundDocument): Promise<RefundDocument> {
     const bill = await this.bills.get(String(r.bill));
     const cfg = await this.settings.get();
@@ -137,21 +164,64 @@ export class RefundsService {
       { text: `Refund ${r.number} to pay`, amount: r.amount, dedupeKey: `refund-due:${String(r._id)}` },
     );
     try {
-      await this.alerts.create({
-        title: `Pay refund ${r.number}: ${formatRupees(r.amount)}`,
-        subtitle: `Bill ${bill.number}`,
-        patientName: bill.patientName,
-        uhid: bill.patientUhid,
-        type: 'System',
-        category: 'System',
-        priority: 'Medium',
-        status: 'Pending',
-        link: link(r._id),
-      });
+      await this.alerts.create({ ...this.taskFields(r, bill), link: link(r._id) });
     } catch (e) {
       if ((e as { code?: number }).code !== 11000) throw e;
     }
     return (await this.refunds.findOneAndUpdate({ _id: r._id }, { $set: { announcedAt: new Date(), dueAt } }, { new: true }).exec()) ?? r;
+  }
+
+  /**
+   * Sends the message for a refund that has ended: `revenue.refund-paid` (paid) or `revenue.refund-void` (void), completes its
+   * task, and sets announcedAt only when the send went. Never throws; true when it sent.
+   */
+  private async announceEnd(refundId: string): Promise<boolean> {
+    try {
+      const r = await this.refunds.findById(refundId).exec();
+      if (!r || (r.state !== 'paid' && r.state !== 'void')) return false;
+      const bill = await this.bills.get(String(r.bill));
+      if (r.state === 'paid') {
+        const amount = r.paid?.amount ?? r.amount;
+        await this.registration.send(
+          'revenue.refund-paid',
+          bill,
+          { refundId: String(r._id), refundNumber: r.number, billNumber: bill.number },
+          { text: `Refund ${r.number} paid by ${r.paid?.mode ?? 'cash'}`, amount, dedupeKey: `refund-paid:${String(r._id)}` },
+        );
+      } else {
+        await this.registration.send(
+          'revenue.refund-void',
+          bill,
+          { refundId: String(r._id), refundNumber: r.number, billNumber: bill.number },
+          { text: `Refund ${r.number} is no longer owed`, dedupeKey: `refund-void:${String(r._id)}` },
+        );
+      }
+      await this.alerts.updateOne({ link: link(r._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
+      await this.refunds.updateOne({ _id: r._id, state: r.state }, { $set: { announcedAt: new Date() } }).exec();
+      return true;
+    } catch (e) {
+      this.logger.warn(`Refund ${refundId}: Coordinator message not sent; the reconcile pass will send it (${(e as Error).message})`);
+      return false;
+    }
+  }
+
+  /**
+   * The reconcile pass: sends what a refund's current state owes the Coordinator, when it has no announcedAt. An approved refund
+   * gets `revenue.refund-due` and its task; a paid or void one gets its end message. Never throws; true when it sent.
+   */
+  async reannounce(refundId: string): Promise<boolean> {
+    try {
+      const r = isValidObjectId(refundId) ? await this.refunds.findById(refundId).exec() : null;
+      if (!r || r.announcedAt) return false;
+      if (r.state === 'approved') {
+        await this.announce(r);
+        return true;
+      }
+      return await this.announceEnd(refundId);
+    } catch (e) {
+      this.logger.warn(`Refund ${refundId}: not re-announced (${(e as Error).message})`);
+      return false;
+    }
   }
 
   /** R27: a refund that leaves the balance at 0 settles the bill through the guarded settle. A failure is logged, not thrown. */
@@ -166,19 +236,10 @@ export class RefundsService {
 
   /** The bill owes the patient nothing any more: the refund is void, its task completes and its clock stops (R25). */
   private async voidRefund(found: RefundDocument, bill: { _id: unknown; number: string; case?: unknown }): Promise<RefundDocument> {
-    const v = await this.refunds.findOneAndUpdate({ _id: found._id, state: 'approved' }, { $set: { state: 'void', waiting: false, voidReason: 'Nothing left to refund' } }, { new: true }).exec();
+    const v = await this.refunds.findOneAndUpdate({ _id: found._id, state: 'approved' }, { $set: { state: 'void', waiting: false, voidReason: 'Nothing left to refund' }, $unset: { announcedAt: 1 } }, { new: true }).exec();
     if (!v) throw new ConflictException('This refund is no longer waiting');
-    try {
-      await this.registration.send(
-        'revenue.refund-void',
-        bill,
-        { refundId: String(v._id), refundNumber: v.number, billNumber: bill.number },
-        { text: `Refund ${v.number} is no longer owed`, dedupeKey: `refund-void:${String(v._id)}` },
-      );
-      await this.alerts.updateOne({ link: link(v._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
-    } catch (e) {
-      this.logger.warn(`Refund ${v.number} voided, but its message or task failed (${(e as Error).message})`);
-    }
+    // R23: the void message is owed until it is sent; the reconcile pass re-sends it (that is what stops the clock).
+    await this.announceEnd(String(v._id));
     await this.settleIfZero(String(v.bill));
     return v;
   }
@@ -202,7 +263,7 @@ export class RefundsService {
     const paid = await this.refunds
       .findOneAndUpdate(
         { _id: found._id, state: 'approved' },
-        { $set: { state: 'paid', waiting: false, paid: { at: clinicNow(), by: { id: actor.id, name: actor.name }, amount, mode: input.mode, reference: (input.reference ?? '').trim().slice(0, 80) } } },
+        { $set: { state: 'paid', waiting: false, paid: { at: clinicNow(), by: { id: actor.id, name: actor.name }, amount, mode: input.mode, reference: (input.reference ?? '').trim().slice(0, 80) } }, $unset: { announcedAt: 1 } },
         { new: true },
       )
       .exec();
@@ -210,21 +271,11 @@ export class RefundsService {
     try {
       await this.bills.adjust(String(bill._id), { refunds: amount }, { onlyActive: true });
     } catch (e) {
-      await this.refunds.updateOne({ _id: paid._id }, { $set: { state: 'approved', waiting: true }, $unset: { paid: 1 } }).exec();
+      await this.refunds.updateOne({ _id: paid._id }, { $set: { state: 'approved', waiting: true, ...(found.announcedAt ? { announcedAt: found.announcedAt } : {}) }, $unset: { paid: 1 } }).exec();
       throw e;
     }
-    try {
-      await this.registration.send(
-        'revenue.refund-paid',
-        bill,
-        { refundId: String(paid._id), refundNumber: paid.number, billNumber: bill.number },
-        { text: `Refund ${paid.number} paid by ${input.mode}`, amount, dedupeKey: `refund-paid:${String(paid._id)}` },
-      );
-      await this.alerts.updateOne({ link: link(paid._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
-    } catch (e) {
-      // The money is recorded; the reconcile pass (Task 11) tells the Coordinator again.
-      this.logger.warn(`Refund ${paid.number} paid, but its message or task failed (${(e as Error).message})`);
-    }
+    // The money is recorded; if the message fails, the reconcile pass tells the Coordinator again.
+    await this.announceEnd(String(paid._id));
     await this.settleIfZero(String(bill._id));
     return paid;
   }

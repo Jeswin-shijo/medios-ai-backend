@@ -33,6 +33,8 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : nul
 export class RevenueBedDaysService {
   private readonly logger = new Logger(RevenueBedDaysService.name);
 
+  private readonly warnedNoBed = new Set<string>();
+
   /** The clinic clock; a spec replaces it. */
   clock: () => Date = () => clinicNow();
 
@@ -234,7 +236,11 @@ export class RevenueBedDaysService {
         const bedAtStart = transfers.filter((t) => new Date(t.at).getTime() <= starts[k]).pop()?.toBed ?? firstBed;
         const wardId = wardOfBed.get(String(bedAtStart));
         if (!wardId) {
-          this.logger.warn(`Admission ${admissionId} day ${k + 1}: bed ${String(bedAtStart)} not found; will retry`);
+          // Once per admission per process: the tick retries every minute.
+          if (!this.warnedNoBed.has(admissionId)) {
+            this.warnedNoBed.add(admissionId);
+            this.logger.warn(`Admission ${admissionId} day ${k + 1}: bed ${String(bedAtStart)} not found; will retry`);
+          }
           continue;
         }
         let rate = rates.get(wardId);

@@ -169,17 +169,7 @@ export class RevenueDepositsService {
     }
     const existing = await this.alerts.findOne({ link }).lean().exec();
     if (opts.onlyIfOpen && (!existing || existing.status === 'Completed')) return null;
-    const subtitle = (await this.fromEr(bill)) ? `${due.reason ? `${due.reason} · ` : ''}${AFTER_PLAN}` : due.reason;
-    const fields = {
-      title: `Collect advance ${formatRupees(remaining)}: ${bill.number}`,
-      subtitle,
-      patientName: bill.patientName,
-      uhid: bill.patientUhid,
-      type: 'System',
-      category: 'System',
-      priority: 'Medium',
-      status: 'Pending',
-    };
+    const fields = await this.depositFields(bill, due.reason, remaining);
     let announce = false;
     if (!existing) {
       try {
@@ -197,14 +187,123 @@ export class RevenueDepositsService {
       announce = existing.title !== fields.title;
     }
     if (announce) {
-      await this.registration.send(
-        'revenue.deposit-due',
-        bill,
-        { billId: String(bill._id), billNumber: bill.number, amount: remaining },
-        { text: 'Advance due', amount: remaining, dedupeKey: `deposit:${String(bill._id)}:${remaining}` },
-      );
+      // The ask is written before the send so a failed send leaves it for the reconcile pass (the task is already written).
+      await this.billModel.updateOne({ _id: bill._id }, { $set: { depositAsk: { amount: remaining } } }).exec();
+      await this.sendDepositDue(bill, remaining);
     }
     return remaining;
+  }
+
+  private async depositFields(bill: BillDocument, reason: string, remaining: number) {
+    const subtitle = (await this.fromEr(bill)) ? `${reason ? `${reason} · ` : ''}${AFTER_PLAN}` : reason;
+    return {
+      title: `Collect advance ${formatRupees(remaining)}: ${bill.number}`,
+      subtitle,
+      patientName: bill.patientName,
+      uhid: bill.patientUhid,
+      type: 'System',
+      category: 'System',
+      priority: 'Medium',
+      status: 'Pending',
+    };
+  }
+
+  /** Sends `revenue.deposit-due` and marks the ask announced. Throws when the send fails (the ask stays unannounced). */
+  private async sendDepositDue(bill: BillDocument, amount: number): Promise<void> {
+    await this.registration.send(
+      'revenue.deposit-due',
+      bill,
+      { billId: String(bill._id), billNumber: bill.number, amount },
+      { text: 'Advance due', amount, dedupeKey: `deposit:${String(bill._id)}:${amount}` },
+    );
+    await this.billModel.updateOne({ _id: bill._id, 'depositAsk.amount': amount }, { $set: { 'depositAsk.announcedAt': new Date() } }).exec();
+  }
+
+  /**
+   * The reconcile pass: writes the deposit task when it is missing and an advance is due. Never reopens a task that exists,
+   * completed or not. A task it writes starts an ask that `announceAsks` sends. Returns true when it wrote one.
+   */
+  async ensureDepositTask(billId: string): Promise<boolean> {
+    if (!isValidObjectId(billId)) return false;
+    const bill = await this.billModel.findById(billId).exec();
+    if (!bill || !ACTIVE_BILL_STATES.includes(bill.state)) return false;
+    const due = await this.dueFor(bill);
+    if (!due) return false;
+    const remaining = due.amount - (bill.totals?.payments ?? 0);
+    if (remaining <= 0) return false;
+    const link = depositLink(bill._id);
+    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.depositFields(bill, due.reason, remaining)), link } }, { upsert: true }).exec();
+    if (!r.upsertedCount) return false;
+    await this.billModel.updateOne({ _id: bill._id }, { $set: { depositAsk: { amount: remaining } } }).exec();
+    return true;
+  }
+
+  /** The reconcile pass: writes the top-up task when it is needed and missing. Never reopens one that exists. True when it wrote one. */
+  async ensureTopUpTask(billId: string): Promise<boolean> {
+    if (!isValidObjectId(billId)) return false;
+    const bill = await this.billModel.findById(billId).exec();
+    if (!bill || bill.kind !== 'admission' || !ACTIVE_BILL_STATES.includes(bill.state)) return false;
+    if (!(await this.rules.isOn(RULE))) return false;
+    const plan = await this.topUpPlan(bill);
+    if (!plan.needed || !(plan.amount > 0)) return false;
+    const link = topupLink(bill._id);
+    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.topUpFields(bill, plan.amount)), link } }, { upsert: true }).exec();
+    if (!r.upsertedCount) return false;
+    const cfg = await this.settings.get();
+    await this.billModel.updateOne({ _id: bill._id }, { $set: { topupAsk: { amount: plan.amount, dueAt: new Date(Date.now() + cfg.clocks.topup * 60_000) } } }).exec();
+    return true;
+  }
+
+  /**
+   * The reconcile pass: sends the deposit-due, topup-due and topup-met messages that a failed send left unsent. An ask whose
+   * task is already completed is just marked (nothing is owed any more). Never throws; returns how many were sent.
+   */
+  async announceAsks(billId: string): Promise<number> {
+    let n = 0;
+    try {
+      const bill = isValidObjectId(billId) ? await this.billModel.findById(billId).exec() : null;
+      if (!bill) return 0;
+      const open = async (link: string) => {
+        const t = await this.alerts.findOne({ link }).select('status').lean().exec();
+        return t ? (t.status === 'Completed' ? 'done' : 'open') : 'none';
+      };
+      const dep = bill.depositAsk;
+      if (dep && !dep.announcedAt && typeof dep.amount === 'number') {
+        const state = await open(depositLink(bill._id));
+        if (state === 'open') {
+          await this.sendDepositDue(bill, dep.amount);
+          n++;
+        } else if (state === 'done') {
+          await this.billModel.updateOne({ _id: bill._id, 'depositAsk.amount': dep.amount }, { $set: { 'depositAsk.announcedAt': new Date() } }).exec();
+        }
+      }
+      const top = bill.topupAsk;
+      if (top?.metAt && !top.metAnnouncedAt) {
+        await this.sendTopUpMet(bill);
+        n++;
+      } else if (top && !top.announcedAt && !top.metAt && typeof top.amount === 'number') {
+        const state = await open(topupLink(bill._id));
+        if (state === 'open') {
+          await this.sendTopUpDue(bill, top.amount, new Date(top.dueAt ?? Date.now()));
+          n++;
+        } else if (state === 'done') {
+          await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.announcedAt': new Date() } }).exec();
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`Asks of bill ${billId} not re-sent (${(e as Error).message})`);
+    }
+    return n;
+  }
+
+  private async sendTopUpDue(bill: BillDocument, amount: number, dueAt: Date): Promise<void> {
+    await this.registration.send('revenue.topup-due', bill, { billId: String(bill._id), billNumber: bill.number, amount, dueAt }, { text: 'Top-up due', amount });
+    await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.announcedAt': new Date() } }).exec();
+  }
+
+  private async sendTopUpMet(bill: BillDocument): Promise<void> {
+    await this.registration.send('revenue.topup-met', bill, { billId: String(bill._id), billNumber: bill.number }, { text: 'Top-up met' });
+    await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.metAnnouncedAt': new Date() } }).exec();
   }
 
   private async complete(link: string): Promise<boolean> {
@@ -232,35 +331,18 @@ export class RevenueDepositsService {
     const bill = await this.billModel.findById(billId).exec();
     if (!bill || bill.kind !== 'admission' || !ACTIVE_BILL_STATES.includes(bill.state)) return null;
     if (!(await this.rules.isOn(RULE))) return null;
-    const cfg = await this.settings.get();
-    const t = bill.totals;
-    const payments = t?.payments ?? 0;
-    const owed = (t?.charges ?? 0) - (t?.discounts ?? 0);
-    const needed = payments > 0 && owed >= (cfg.topupThreshold / 100) * payments;
     const link = topupLink(bill._id);
-    if (!needed) {
+    const plan = await this.topUpPlan(bill);
+    if (!plan.needed) {
       if (!(await this.complete(link))) return null;
-      await this.registration.send(
-        'revenue.topup-met',
-        bill,
-        { billId: String(bill._id), billNumber: bill.number },
-        { text: 'Top-up met' },
-      );
+      // The met mark is written before the send, so a failed send is left for the reconcile pass.
+      await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.metAt': new Date() }, $unset: { 'topupAsk.metAnnouncedAt': 1 } }).exec();
+      await this.sendTopUpMet(bill);
       return 'met';
     }
-    const group = bill.wardType ? wardGroupOf(bill.wardType) : null;
-    const amount = (group ? cfg.deposits[group] : 0) + Math.max(0, owed - payments);
+    const { amount } = plan;
     if (!(amount > 0)) return null;
-    const fields = {
-      title: `Ask for a top-up ${formatRupees(amount)}: ${bill.number}`,
-      subtitle: await this.wardNameOf(bill),
-      patientName: bill.patientName,
-      uhid: bill.patientUhid,
-      type: 'System',
-      category: 'System',
-      priority: 'Medium',
-      status: 'Pending',
-    };
+    const fields = await this.topUpFields(bill, amount);
     const existing = await this.alerts.findOne({ link }).lean().exec();
     let raised = false;
     if (!existing) {
@@ -275,14 +357,35 @@ export class RevenueDepositsService {
     }
     if (!raised) return null;
     // Clocks run on real time; the bill's own times are on the clinic clock.
+    const cfg = await this.settings.get();
     const dueAt = new Date(Date.now() + cfg.clocks.topup * 60_000);
-    await this.registration.send(
-      'revenue.topup-due',
-      bill,
-      { billId: String(bill._id), billNumber: bill.number, amount, dueAt },
-      { text: 'Top-up due', amount },
-    );
+    await this.billModel.updateOne({ _id: bill._id }, { $set: { topupAsk: { amount, dueAt } } }).exec();
+    await this.sendTopUpDue(bill, amount, dueAt);
     return 'raised';
+  }
+
+  /** Whether an admission bill needs a top-up now, and how much (the ward's deposit, or what keeps payments ahead of charges, whichever is larger). */
+  private async topUpPlan(bill: BillDocument): Promise<{ needed: boolean; amount: number }> {
+    const cfg = await this.settings.get();
+    const t = bill.totals;
+    const payments = t?.payments ?? 0;
+    const owed = (t?.charges ?? 0) - (t?.discounts ?? 0);
+    if (!(payments > 0 && owed >= (cfg.topupThreshold / 100) * payments)) return { needed: false, amount: 0 };
+    const group = bill.wardType ? wardGroupOf(bill.wardType) : null;
+    return { needed: true, amount: (group ? cfg.deposits[group] : 0) + Math.max(0, owed - payments) };
+  }
+
+  private async topUpFields(bill: BillDocument, amount: number) {
+    return {
+      title: `Ask for a top-up ${formatRupees(amount)}: ${bill.number}`,
+      subtitle: await this.wardNameOf(bill),
+      patientName: bill.patientName,
+      uhid: bill.patientUhid,
+      type: 'System',
+      category: 'System',
+      priority: 'Medium',
+      status: 'Pending',
+    };
   }
 
   /** The bills service tells us after every charge and payment. Never throws. */

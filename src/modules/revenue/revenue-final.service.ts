@@ -97,22 +97,93 @@ export class FinalBillService {
       { text: 'Final bill to prepare', dedupeKey: `final:${String(bill._id)}` },
     );
     try {
-      await this.alerts.create({
-        title: `Prepare final bill: ${bill.number}`,
-        subtitle: bill.kind === 'er' ? 'The ER visit has ended' : 'The patient has been discharged',
-        patientName: bill.patientName,
-        uhid: bill.patientUhid,
-        type: 'System',
-        category: 'System',
-        priority: 'Medium',
-        status: 'Pending',
-        link,
-      });
+      await this.alerts.create({ ...this.finalTaskFields(bill), link });
     } catch (e) {
       if ((e as { code?: number }).code !== 11000) throw e;
       return false;
     }
+    // The message and the task both went: the reconcile pass has nothing to re-send for this state.
+    await this.billModel.updateOne({ _id: bill._id, state: 'open' }, { $set: { announcedAt: new Date() } }).exec();
     return true;
+  }
+
+  private finalTaskFields(bill: BillDocument) {
+    return {
+      title: `Prepare final bill: ${bill.number}`,
+      subtitle: bill.kind === 'er' ? 'The ER visit has ended' : 'The patient has been discharged',
+      patientName: bill.patientName,
+      uhid: bill.patientUhid,
+      type: 'System',
+      category: 'System',
+      priority: 'Medium',
+      status: 'Pending',
+    };
+  }
+
+  /**
+   * The reconcile pass: writes the `:final` task of an open ER or admission bill whose final bill was asked for (announcedAt is
+   * set only after the request) when the task is missing. Never reopens one that exists. Never throws; true when it wrote one.
+   */
+  async ensureFinalTask(billId: string): Promise<boolean> {
+    try {
+      const bill = isValidObjectId(billId) ? await this.billModel.findById(billId).exec() : null;
+      if (!bill || bill.state !== 'open' || !bill.announcedAt || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
+      const link = finalLink(bill._id);
+      const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...this.finalTaskFields(bill), link } }, { upsert: true }).exec();
+      return !!r.upsertedCount;
+    } catch (e) {
+      this.logger.warn(`Final-bill task of ${billId} not restored (${(e as Error).message})`);
+      return false;
+    }
+  }
+
+  /**
+   * Sends the message for the bill's current state, after the state is written: `revenue.final-requested` (an open ER or
+   * admission bill whose `:final` task is open), `revenue.bill-final` (final) or `revenue.bill-settled` (settled). Each send is
+   * deduped; announcedAt is set only when it went. The reconcile pass calls this for a bill with no announcedAt. Never throws.
+   * Returns true when it sent.
+   */
+  async announce(billId: string): Promise<boolean> {
+    try {
+      const bill = isValidObjectId(billId) ? await this.billModel.findById(billId).exec() : null;
+      if (!bill) return false;
+      const state = bill.state;
+      if (state === 'open') {
+        if (bill.kind !== 'er' && bill.kind !== 'admission') return false;
+        const task = await this.alerts.findOne({ link: finalLink(bill._id) }).lean<{ status: string; createdAt?: Date }>().exec();
+        if (!task || task.status === 'Completed') return false;
+        const cfg = await this.settings.get();
+        // The clock runs from when the task was written; the real dueAt of the first send is not kept.
+        const dueAt = new Date(new Date(task.createdAt ?? Date.now()).getTime() + cfg.clocks.final * 60_000);
+        await this.registration.send(
+          'revenue.final-requested',
+          bill,
+          { billId: String(bill._id), billNumber: bill.number, dueAt },
+          { text: 'Final bill to prepare', dedupeKey: `final:${String(bill._id)}` },
+        );
+      } else if (state === 'final') {
+        const balance = bill.totals?.balance ?? 0;
+        await this.registration.send(
+          'revenue.bill-final',
+          bill,
+          { billId: String(bill._id), billNumber: bill.number, balance },
+          { text: balance < 0 ? 'Final bill ready, refund owed' : 'Final bill ready', amount: Math.abs(balance), dedupeKey: `final-ready:${String(bill._id)}:${balance}` },
+        );
+      } else {
+        const total = (bill.totals?.charges ?? 0) - (bill.totals?.discounts ?? 0);
+        await this.registration.send(
+          'revenue.bill-settled',
+          bill,
+          { billId: String(bill._id), billNumber: bill.number, total },
+          { text: 'Bill settled', amount: total, dedupeKey: `settled:${String(bill._id)}` },
+        );
+      }
+      await this.billModel.updateOne({ _id: bill._id, state }, { $set: { announcedAt: new Date() } }).exec();
+      return true;
+    } catch (e) {
+      this.logger.warn(`Bill ${billId}: Coordinator message not sent; the reconcile pass will send it (${(e as Error).message})`);
+      return false;
+    }
   }
 
   /** Things the desk should look at before the bill goes out. Nothing here stops the bill. */
@@ -147,18 +218,13 @@ export class FinalBillService {
   async prepare(_actor: Actor, billId: string) {
     const first = await this.bills.get(billId);
     if (first.state === 'settled') throw new ConflictException('This bill is settled');
-    await this.billModel.updateOne({ _id: first._id, state: 'open' }, { $set: { state: 'final', finalAt: clinicNow() } }).exec();
+    await this.billModel.updateOne({ _id: first._id, state: 'open' }, { $set: { state: 'final', finalAt: clinicNow() }, $unset: { announcedAt: 1 } }).exec();
     const bill = await this.billModel.findById(first._id).exec();
     if (!bill) throw new NotFoundException('Bill not found');
     if (bill.state === 'settled') throw new ConflictException('This bill is settled');
     const warnings = await this.warningsFor(bill);
-    const balance = bill.totals?.balance ?? 0;
-    await this.registration.send(
-      'revenue.bill-final',
-      bill,
-      { billId: String(bill._id), billNumber: bill.number, balance },
-      { text: balance < 0 ? 'Final bill ready, refund owed' : 'Final bill ready', amount: Math.abs(balance), dedupeKey: `final-ready:${String(bill._id)}:${balance}` },
-    );
+    // R23: a failed send is healed by the reconcile pass (the bill has no announcedAt), so the desk is not stopped by it.
+    await this.announce(String(bill._id));
     await this.alerts.updateOne({ link: finalLink(bill._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
     return { warnings, view: await this.bills.view(billId) };
   }
@@ -181,7 +247,7 @@ export class FinalBillService {
           // R21: an ER or admission bill settles only once final; OPD and walk-in bills from open or final.
           $or: [{ kind: { $in: ['opd', 'walk-in'] }, state: { $in: ACTIVE_BILL_STATES } }, { kind: { $in: ['er', 'admission'] }, state: 'final' }],
         },
-        { $set: { state: 'settled', settledAt: clinicNow() } },
+        { $set: { state: 'settled', settledAt: clinicNow() }, $unset: { announcedAt: 1 } },
         { new: true },
       )
       .exec();
@@ -199,16 +265,11 @@ export class FinalBillService {
     }
     try {
       await this.alerts.updateMany({ link: new RegExp(`^revenue-bill:${String(bill._id)}:`), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
-      await this.registration.send(
-        'revenue.bill-settled',
-        bill,
-        { billId: String(bill._id), billNumber: bill.number, total: (bill.totals?.charges ?? 0) - (bill.totals?.discounts ?? 0) },
-        { text: 'Bill settled', amount: (bill.totals?.charges ?? 0) - (bill.totals?.discounts ?? 0), dedupeKey: `settled:${String(bill._id)}` },
-      );
     } catch (e) {
-      // The bill is settled; the reconcile pass (Task 11) tells the Coordinator again.
-      this.logger.warn(`Bill ${bill.number} settled, but its tasks or message failed (${(e as Error).message})`);
+      this.logger.warn(`Bill ${bill.number} settled, but its tasks were not completed (${(e as Error).message})`);
     }
+    // The bill is settled; if the message fails, the reconcile pass tells the Coordinator again.
+    await this.announce(String(bill._id));
     return bill;
   }
 

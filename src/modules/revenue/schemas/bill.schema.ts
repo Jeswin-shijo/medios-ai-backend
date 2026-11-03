@@ -76,9 +76,20 @@ export class Bill {
   @Prop({ type: BillTotalsSchema, default: () => ({}) })
   totals: BillTotals;
 
-  /** Set once the bill's Coordinator messages are sent; Task 11 re-sends when missing. */
+  /**
+   * Set once the Coordinator message for the bill's current state is sent (final-requested while open with the `:final` task,
+   * bill-final, bill-settled). Every state change unsets it (R23); the reconcile pass re-sends when it is missing.
+   */
   @Prop({ type: Date })
   announcedAt?: Date;
+
+  /** The advance last asked for. announcedAt is set once `revenue.deposit-due` is sent; the reconcile pass re-sends when it is missing. */
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  depositAsk?: { amount: number; announcedAt?: Date };
+
+  /** The top-up last asked for, and (metAt) when it was met. Each has its own announcedAt; the reconcile pass re-sends the missing ones. */
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  topupAsk?: { amount?: number; dueAt?: Date; announcedAt?: Date; metAt?: Date; metAnnouncedAt?: Date };
 }
 
 export const BillSchema = SchemaFactory.createForClass(Bill);

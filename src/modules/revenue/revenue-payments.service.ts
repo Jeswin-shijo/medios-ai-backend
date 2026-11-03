@@ -52,29 +52,41 @@ export class PaymentsService {
       by: { id: actor.id, name: actor.name },
       at: clinicNow(),
     });
-    let updated;
     try {
       // Guarded: a bill that settled a moment ago takes no payment, and the receipt is removed again.
-      updated = await this.bills.adjust(String(bill._id), { payments: amount }, { onlyActive: true });
+      await this.bills.adjust(String(bill._id), { payments: amount }, { onlyActive: true });
     } catch (e) {
       await this.payments.deleteOne({ _id: payment._id }).exec();
       throw e;
     }
-    try {
-      await this.registration.send(
-        'revenue.payment',
-        updated,
-        { billId: String(bill._id), billNumber: bill.number, receiptNumber: payment.receiptNumber, amount, mode },
-        { text: `Payment ${payment.receiptNumber} received by ${mode}`, amount, dedupeKey: `payment:${String(payment._id)}` },
-      );
-      await this.payments.updateOne({ _id: payment._id }, { $set: { announcedAt: new Date() } }).exec();
-    } catch (e) {
-      // The money is recorded; the reconcile pass (Task 11) re-sends the message.
-      this.logger.warn(`Payment ${payment.receiptNumber}: Coordinator message not sent (${(e as Error).message})`);
-    }
+    // The money is recorded; if the message fails, the reconcile pass re-sends it.
+    await this.announce(String(payment._id));
     // R18: a payment that brings an OPD bill to 0 after the visit ended settles it.
     await this.final.autoSettleOpd(String(bill._id));
     return payment;
+  }
+
+  /**
+   * Sends `revenue.payment` for a payment and sets its announcedAt only when the send went. A cancelled payment is not
+   * announced. The reconcile pass calls this for a payment with no announcedAt. Never throws; true when it sent.
+   */
+  async announce(paymentId: string): Promise<boolean> {
+    try {
+      const payment = isValidObjectId(paymentId) ? await this.payments.findById(paymentId).exec() : null;
+      if (!payment || payment.cancelled) return false;
+      const bill = await this.bills.get(String(payment.bill));
+      await this.registration.send(
+        'revenue.payment',
+        bill,
+        { billId: String(bill._id), billNumber: bill.number, receiptNumber: payment.receiptNumber, amount: payment.amount, mode: payment.mode },
+        { text: `Payment ${payment.receiptNumber} received by ${payment.mode}`, amount: payment.amount, dedupeKey: `payment:${String(payment._id)}` },
+      );
+      await this.payments.updateOne({ _id: payment._id }, { $set: { announcedAt: new Date() } }).exec();
+      return true;
+    } catch (e) {
+      this.logger.warn(`Payment ${paymentId}: Coordinator message not sent (${(e as Error).message})`);
+      return false;
+    }
   }
 
   /** Admin only, active bill only (after settling, money back is a refund). Keeps the payment and says who, when and why. */
