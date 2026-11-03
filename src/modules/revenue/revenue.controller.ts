@@ -160,6 +160,16 @@ export class RevenueController {
     return this.refunds.request(actorOf(user), p.id);
   }
 
+  // ---------- approvals ----------
+
+  @Get('approvals')
+  @Roles(...REV_DESK)
+  @ApiOperation({ summary: 'Corrections and refunds waiting for an admin, with their bill and line' })
+  async approvals() {
+    const [c, r] = await Promise.all([this.corrections.listPending(), this.refunds.listPending()]);
+    return [...c, ...r].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+  }
+
   // ---------- estimates ----------
 
   @Get('estimates/:billId')

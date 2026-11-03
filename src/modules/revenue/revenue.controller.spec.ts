@@ -33,6 +33,7 @@ const TABLE: Record<string, UserRole[]> = {
   'POST bills/:id/refund': DESK,
   'GET estimates/:billId': DESK,
   'PUT estimates/:id': DESK,
+  'GET approvals': DESK,
   'GET payments': DESK,
   'POST payments/:id/cancel': ADMIN,
   'GET payments/:id/receipt': DESK,
@@ -66,7 +67,7 @@ const allowed = (name: string, role: UserRole) => {
 describe('RevenueController roles', () => {
   test('the controller is mounted at revenue and has exactly the routes of the table', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, RevenueController), 'revenue');
-    assert.equal(Object.keys(TABLE).length, 24);
+    assert.equal(Object.keys(TABLE).length, 25);
     assert.deepEqual(handlers.map((n) => keyOf(proto[n] as object)).sort(), Object.keys(TABLE).sort());
   });
 
@@ -146,5 +147,11 @@ describe('RevenueController roles', () => {
     const p = RevenueScheduler.prototype as unknown as Record<string, unknown>;
     assert.equal(typeof p.onApplicationBootstrap, 'function');
     assert.equal(typeof p.onModuleDestroy, 'function');
+  });
+  test('GET approvals merges the pending corrections and refunds, newest first', async () => {
+    const none = null as never;
+    const c = new RevenueController(none, none, none, none, none, { listPending: async () => [{ recordId: 'c1', requestedAt: '2026-10-20T10:00:00.000Z' }, { recordId: 'c2', requestedAt: '2026-10-20T08:00:00.000Z' }] } as never, { listPending: async () => [{ recordId: 'r1', requestedAt: '2026-10-20T09:00:00.000Z' }] } as never, none, none);
+    const rows = (await c.approvals()) as unknown as { recordId: string }[];
+    assert.deepEqual(rows.map((r) => r.recordId), ['c1', 'r1', 'c2']);
   });
 });

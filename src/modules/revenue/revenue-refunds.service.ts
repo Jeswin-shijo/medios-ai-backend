@@ -10,6 +10,7 @@ import { UserRole } from '../users/schemas/user.schema';
 import { FinalBillService } from './revenue-final.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import type { PendingApprovalRow } from './revenue-approvals';
 import { RevenueSettingsService } from './revenue-settings.service';
 import { Refund, RefundDocument } from './schemas/refund.schema';
 
@@ -34,6 +35,28 @@ export class RefundsService {
     @InjectModel(TaskAlertItem.name) private readonly alerts: Model<TaskAlertDocument>,
   ) {
     registration.onRefundDecision.push((id, decision, actor) => this.decided(id, decision, actor));
+  }
+
+  /** Refunds waiting for an admin, newest first, with their bill (the Approvals tab). */
+  async listPending(): Promise<PendingApprovalRow[]> {
+    const rows = await this.refunds.find({ state: 'requested', approvalId: { $exists: true } }).sort({ createdAt: -1, _id: -1 }).lean().exec();
+    const out: PendingApprovalRow[] = [];
+    for (const r of rows) {
+      const bill = await this.bills.get(String(r.bill)).catch(() => null);
+      if (!bill) continue;
+      out.push({
+        approvalId: String(r.approvalId),
+        type: 'refund',
+        kind: 'refund',
+        recordId: String(r._id),
+        bill: { id: String(bill._id), number: bill.number, kind: bill.kind, patientName: bill.patientName, patientUhid: bill.patientUhid },
+        amount: r.amount,
+        reason: '',
+        requestedBy: r.requestedBy?.name ?? '',
+        requestedAt: new Date((r as unknown as { createdAt: Date }).createdAt).toISOString(),
+      });
+    }
+    return out;
   }
 
   private desk(actor: Actor) {

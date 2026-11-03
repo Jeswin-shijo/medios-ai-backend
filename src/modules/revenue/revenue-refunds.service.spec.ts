@@ -200,4 +200,19 @@ describe('RefundsService', () => {
     assert.equal((await m.TaskAlertItem.findOne({ link: `revenue-refund:${r._id}` }).lean())!.status, 'Completed');
     assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled');
   });
+  test('listPending shows a waiting refund with its bill, and not a paid one', async () => {
+    const b = await owing();
+    const r = await svc.request(DESK, String(b._id));
+    const rows = await svc.listPending();
+    assert.equal(rows.length, 1);
+    assert.deepEqual({ ...rows[0], requestedAt: undefined }, {
+      approvalId: String(r.approvalId), type: 'refund', kind: 'refund', recordId: String(r._id),
+      bill: { id: String(b._id), number: b.number, kind: 'er', patientName: 'Ravi Kumar', patientUhid: 'MHK202600983' },
+      amount: 500, reason: '', requestedBy: 'Front Desk', requestedAt: undefined,
+    });
+    await approvals.act(ADMIN, String(r.approvalId), 'approved');
+    assert.equal((await svc.listPending()).length, 0, 'approved means no longer waiting');
+    await svc.pay(DESK, String(r._id), { mode: 'cash' });
+    assert.equal((await svc.listPending()).length, 0, 'paid is absent');
+  });
 });

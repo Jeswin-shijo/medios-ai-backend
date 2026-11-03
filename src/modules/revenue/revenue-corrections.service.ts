@@ -6,6 +6,7 @@ import { formatRupees } from '../../common/utils/money';
 import type { Actor } from '../beds/actor';
 import { ApprovalsService } from '../coordinator/approvals.service';
 import { UserRole } from '../users/schemas/user.schema';
+import type { PendingApprovalRow } from './revenue-approvals';
 import { PriceListService } from './price-list.service';
 import { PRICE_CATEGORIES, PriceCategory } from './revenue-catalogue';
 import { RevenueBillsService, lineTotals } from './revenue-bills.service';
@@ -225,6 +226,33 @@ export class CorrectionsService {
       throw e;
     }
     return created;
+  }
+
+  /** Corrections waiting for an admin, newest first, with their bill and line (the Approvals tab). */
+  async listPending(): Promise<PendingApprovalRow[]> {
+    const rows = await this.corrections.find({ state: 'pending', approvalId: { $exists: true } }).sort({ createdAt: -1, _id: -1 }).lean().exec();
+    const out: PendingApprovalRow[] = [];
+    for (const c of rows) {
+      const bill = await this.bills.get(String(c.bill)).catch(() => null);
+      if (!bill) continue;
+      const line = c.line ? await this.lines.findById(c.line).lean().exec() : null;
+      out.push({
+        approvalId: String(c.approvalId),
+        type: 'correction',
+        kind: c.kind,
+        recordId: String(c._id),
+        bill: { id: String(bill._id), number: bill.number, kind: bill.kind, patientName: bill.patientName, patientUhid: bill.patientUhid },
+        ...(line ? { line: { id: String(line._id), name: line.name, amount: line.amount } } : {}),
+        ...(c.amount !== undefined ? { amount: c.amount } : {}),
+        ...(c.percent !== undefined ? { percent: c.percent } : {}),
+        ...(c.qty !== undefined ? { qty: c.qty } : {}),
+        ...(c.unitPrice !== undefined ? { unitPrice: c.unitPrice } : {}),
+        reason: c.reason,
+        requestedBy: c.requestedBy.name,
+        requestedAt: new Date((c as unknown as { createdAt: Date }).createdAt).toISOString(),
+      });
+    }
+    return out;
   }
 
   private summaryOf(bill: BillDocument, c: CorrectionDocument): string {

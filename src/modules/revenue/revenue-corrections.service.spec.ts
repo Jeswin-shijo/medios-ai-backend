@@ -281,4 +281,28 @@ describe('CorrectionsService', () => {
     assert.equal((await totals(bill._id)).charges, 5500);
     await assert.rejects(() => svc.addMissed(DESK, String(bill._id), { name: 'x', category: 'other', qty: 1, unitPrice: 5, reason: '' }), /Say why/);
   });
+  test('listPending shows waiting corrections with their bill and line, and leaves out applied and rejected ones', async () => {
+    const { bill, line } = await erBill();
+    const waiting = await svc.request(DESK, { billId: String(bill._id), kind: 'discount', amount: 500, reason: 'Staff concession' });
+    const onLine = await svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 4000, reason: 'Wrong rate' });
+    const done = await svc.request(DESK, { billId: String(bill._id), kind: 'discount', amount: 100, reason: 'Applied one' });
+    const no = await svc.request(DESK, { billId: String(bill._id), kind: 'discount', amount: 200, reason: 'Rejected one' });
+    await decide(done, 'approved');
+    await decide(no, 'rejected');
+    const rows = await svc.listPending();
+    assert.equal(rows.length, 2);
+    const byId = Object.fromEntries(rows.map((r) => [r.recordId, r]));
+    assert.equal(byId[String(waiting._id)].approvalId, String(waiting.approvalId));
+    assert.equal(byId[String(waiting._id)].type, 'correction');
+    assert.equal(byId[String(waiting._id)].kind, 'discount');
+    assert.equal(byId[String(waiting._id)].amount, 500);
+    assert.equal(byId[String(waiting._id)].reason, 'Staff concession');
+    assert.equal(byId[String(waiting._id)].requestedBy, 'Front Desk');
+    assert.equal(byId[String(waiting._id)].bill.number, bill.number);
+    assert.equal(byId[String(waiting._id)].bill.kind, 'er');
+    assert.equal(byId[String(waiting._id)].line, undefined);
+    assert.deepEqual(byId[String(onLine._id)].line, { id: String(line._id), name: 'Procedure', amount: 5000 });
+    assert.equal(byId[String(onLine._id)].unitPrice, 4000);
+    assert.ok(!Number.isNaN(Date.parse(byId[String(waiting._id)].requestedAt)));
+  });
 });
