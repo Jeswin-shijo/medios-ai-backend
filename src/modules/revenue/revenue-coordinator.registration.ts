@@ -29,6 +29,7 @@ export const REVENUE_MESSAGE_TYPES: MessageTypeDef[] = [
   type('revenue.bill-settled', 'The bill is settled', { ...BILL, total: 'number' }),
   type('revenue.refund-due', 'A refund is owed to the patient', { ...REFUND, amount: 'number', dueAt: 'date' }),
   type('revenue.refund-paid', 'A refund was paid', REFUND),
+  type('revenue.refund-void', 'A refund is no longer owed', REFUND),
 ];
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -75,7 +76,7 @@ export const REVENUE_CLOCKS: ClockDef[] = [
     agent: 'revenue',
     label: 'Refund paid',
     startOn: 'revenue.refund-due',
-    stopOn: ['revenue.refund-paid'],
+    stopOn: ['revenue.refund-paid', 'revenue.refund-void'],
     minutes: DEFAULT_CLOCKS.refund,
     ladder: 'revenue',
     dueFrom: dueAt,

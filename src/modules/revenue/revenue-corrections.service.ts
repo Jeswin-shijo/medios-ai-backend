@@ -38,16 +38,6 @@ export interface MissedChargeInput {
 
 const MAX_MONEY = 10_000_000;
 const AGENT: { id: string; name: string } = { id: 'revenue-agent', name: 'Revenue Agent' };
-const sourceOf = (id: unknown) => ({ 'source.type': 'correction', 'source.ref': String(id) });
-const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
-
-interface Computed {
-  /** Signed amount of the line written (negative takes money off). */
-  delta: number;
-  category: LineCategory;
-  name: string;
-  field: 'charges' | 'discounts';
-}
 
 /**
  * Money changes on a bill: missed charges, reversals, price changes, discounts and write-offs. Everything except a missed
@@ -64,7 +54,7 @@ export class CorrectionsService {
     private readonly approvals: ApprovalsService,
     private readonly final: FinalBillService,
     private readonly prices: PriceListService,
-    capture: Pick<RevenueCaptureService, 'onSuggestedReversal'>,
+    capture: RevenueCaptureService,
     @InjectModel(Correction.name) private readonly corrections: Model<CorrectionDocument>,
     @InjectModel(ChargeLine.name) private readonly lines: Model<ChargeLineDocument>,
   ) {
@@ -141,7 +131,7 @@ export class CorrectionsService {
       const line = await this.lines.findOne({ _id: lineId, bill: bill._id }).lean().exec();
       if (!line) throw new NotFoundException('Charge line not found on this bill');
       if (line.source.type === 'correction') throw new BadRequestException('A correction line cannot be corrected');
-      if (line.reversed && input.kind !== 'discount') {
+      if (line.reversed) {
         if (agent) return null;
         throw new ConflictException('This line is already reversed');
       }
@@ -213,7 +203,13 @@ export class CorrectionsService {
       throw new ConflictException('This bill is settled');
     }
     if (!agent && actor.role === UserRole.ADMIN) {
-      return this.apply(String(created._id), actor);
+      try {
+        return await this.apply(String(created._id), actor);
+      } catch (e) {
+        // Rolled back to pending with no approval to reopen: withdraw it so it cannot hold the bill.
+        await this.corrections.deleteOne({ _id: created._id, state: 'pending' }).exec();
+        throw e;
+      }
     }
     try {
       const approval = await this.approvals.request({
@@ -250,9 +246,10 @@ export class CorrectionsService {
   }
 
   /**
-   * Applies an approved correction exactly once. The claim (`pending` to `approved`) is one guarded write; the credit line
-   * is unique per correction, and only its creator moves the totals, so a retry after a throw finishes the rest without
-   * moving the money again. A bill that settled meanwhile voids the correction (no throw, so the approval does not reopen).
+   * Applies an approved correction exactly once. The claim (`pending` to `approved`) is one guarded write; each line is unique
+   * per correction and only the call that wrote them moves the totals. If anything after the claim throws, the claim is rolled
+   * back (lines removed, totals put back, state `pending` again) before rethrowing, so the reopened approval can be approved
+   * again or rejected and nothing is left holding the bill (R24). A bill that settled meanwhile voids the correction (no throw).
    */
   async apply(correctionId: string, actor?: Actor): Promise<CorrectionDocument> {
     if (!isValidObjectId(correctionId)) throw new NotFoundException('Correction not found');
@@ -266,41 +263,72 @@ export class CorrectionsService {
       if (found.state !== 'approved' || found.appliedAt) return found;
       c = found;
     }
+    try {
+      return await this.finish(c);
+    } catch (e) {
+      await this.rollback(c);
+      throw e;
+    }
+  }
+
+  private linesOf(c: CorrectionDocument) {
+    return this.lines.find({ 'source.type': 'correction', 'source.ref': { $regex: `^${String(c._id)}(:|$)` } }).exec();
+  }
+
+  /** What a set of correction lines does to the totals: discount and write-off lines move discounts, the rest move charges. */
+  private totalsOf(lines: { category: string; amount: number }[]): { charges: number; discounts: number } {
+    let charges = 0;
+    let discounts = 0;
+    for (const l of lines) {
+      if (l.category === 'discount' || l.category === 'write-off') discounts -= l.amount;
+      else charges += l.amount;
+    }
+    return { charges, discounts };
+  }
+
+  private async finish(c: CorrectionDocument): Promise<CorrectionDocument> {
     const billId = String(c.bill);
-    let line = await this.lines.findOne(sourceOf(c._id)).exec();
-    let delta = line?.amount ?? 0;
-    let field: 'charges' | 'discounts' = 'charges';
     let after: BillDocument | null = null;
-    if (!line) {
+    let delta = 0;
+    const existing = await this.linesOf(c);
+    if (existing.length) {
+      delta = existing.find((l) => l.source.ref === String(c._id))?.amount ?? 0;
+    } else {
       const bill = await this.bills.get(billId);
       const computed = bill.state === 'settled' ? 'This bill is settled' : await this.compute(c, bill);
       if (typeof computed === 'string') return this.void(c, computed);
-      ({ delta, field } = computed);
-      let made = false;
+      delta = computed[0].amount;
+      const made: ChargeLineDocument[] = [];
+      let raced = false;
       try {
-        line = await this.lines.create({
-          bill: c.bill,
-          code: `correction:${c.kind}`,
-          name: computed.name,
-          category: computed.category,
-          qty: 1,
-          unitPrice: delta,
-          amount: delta,
-          source: { type: 'correction', ref: String(c._id) },
-          chargedAt: clinicNow(),
-          by: c.decidedBy ?? c.requestedBy,
-          reason: c.reason,
-        });
-        made = true;
+        for (const l of computed) {
+          made.push(
+            await this.lines.create({
+              bill: c.bill,
+              code: `correction:${c.kind}`,
+              name: l.name,
+              category: l.category,
+              qty: 1,
+              unitPrice: l.amount,
+              amount: l.amount,
+              source: { type: 'correction', ref: l.ref },
+              chargedAt: clinicNow(),
+              by: c.decidedBy ?? c.requestedBy,
+              reason: c.reason,
+            }),
+          );
+        }
       } catch (e) {
         // Another pass wrote the line first: it moves the totals; this one only finishes.
+        await this.lines.deleteMany({ _id: { $in: made.map((l) => l._id) } }).exec();
         if ((e as { code?: number }).code !== 11000) throw e;
+        raced = true;
       }
-      if (made && line) {
+      if (!raced) {
         try {
-          after = await this.bills.adjust(billId, field === 'charges' ? { charges: delta } : { discounts: -delta }, { onlyActive: true });
+          after = await this.bills.adjust(billId, this.totalsOf(computed), { onlyActive: true });
         } catch (e) {
-          await this.lines.deleteOne({ _id: line._id }).exec();
+          await this.lines.deleteMany({ _id: { $in: made.map((l) => l._id) } }).exec();
           if (e instanceof ConflictException) return this.void(c, 'The bill was settled before this could be applied');
           throw e;
         }
@@ -324,44 +352,80 @@ export class CorrectionsService {
     return done ?? c;
   }
 
+  /** Undoes a failed apply, best effort: totals put back, lines removed, link cleared, state `pending` again. */
+  private async rollback(c: CorrectionDocument): Promise<void> {
+    const step = async (what: string, fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+      } catch (e) {
+        this.logger.warn(`Correction ${String(c._id)} rollback (${what}) failed: ${(e as Error).message}`);
+      }
+    };
+    const written = await this.linesOf(c).catch(() => [] as ChargeLineDocument[]);
+    if (written.length) {
+      const t = this.totalsOf(written);
+      await step('totals', () => this.bills.adjust(String(c.bill), { charges: -t.charges, discounts: -t.discounts }));
+      await step('lines', () => this.lines.deleteMany({ _id: { $in: written.map((l) => l._id) } }).exec());
+    }
+    if (c.line) await step('link', () => this.lines.updateOne({ _id: c.line }, { $pull: { corrections: c._id }, ...(c.kind === 'reversal' ? { $set: { reversed: false } } : {}) }).exec());
+    await step('state', () => this.corrections.updateOne({ _id: c._id, state: 'approved', appliedAt: null }, { $set: { state: 'pending' }, $unset: { decidedBy: 1 } }).exec());
+  }
+
   private async void(c: CorrectionDocument, why: string): Promise<CorrectionDocument> {
     const v = await this.corrections.findOneAndUpdate({ _id: c._id, state: 'approved', appliedAt: null }, { $set: { state: 'void', voidReason: why } }, { new: true }).exec();
     return v ?? c;
   }
 
-  /** What the credit or adjustment line should be, from the money as it is now; a string means "cannot apply" (the reason). */
-  private async compute(c: CorrectionDocument, bill: BillDocument): Promise<Computed | string> {
+  /** The lines to write, from the money as it is now; a string means "cannot apply" (the reason). The first line is the main one. */
+  private async compute(c: CorrectionDocument, bill: BillDocument): Promise<{ ref: string; amount: number; category: LineCategory; name: string }[] | string> {
+    const ref = String(c._id);
     let line: ChargeLineDocument | null = null;
     let charge = 0;
     let discounted = 0;
+    let qty = 0;
+    let price = 0;
     if (c.line) {
       line = await this.lines.findById(c.line).exec();
       if (!line) return 'The charge line is gone';
-      const prior = await this.corrections.find({ line: c.line, state: 'approved', appliedAt: { $ne: null }, _id: { $ne: c._id } }).lean().exec();
-      charge = line.amount + sum(prior.filter((p) => p.kind === 'change' || p.kind === 'reversal').map((p) => p.delta ?? 0));
-      discounted = sum(prior.filter((p) => p.kind === 'discount').map((p) => -(p.delta ?? 0)));
+      const prior = await this.corrections.find({ line: c.line, state: 'approved', appliedAt: { $ne: null }, _id: { $ne: c._id } }).sort({ _id: 1 }).lean().exec();
+      charge = line.amount;
+      qty = line.qty;
+      price = line.unitPrice;
+      for (const p of prior) {
+        if (p.kind === 'change') {
+          charge += p.delta ?? 0;
+          qty = p.qty ?? qty;
+          price = p.unitPrice ?? price;
+        } else if (p.kind === 'reversal') charge += p.delta ?? 0;
+        else if (p.kind === 'discount') discounted += -(p.delta ?? 0);
+      }
     }
     switch (c.kind) {
-      case 'reversal':
+      case 'reversal': {
         if (line!.reversed || charge <= 0) return 'The charge is already reversed';
-        return { delta: -charge, category: line!.category, name: `Reversal: ${line!.name}`.slice(0, 120), field: 'charges' };
+        const out = [{ ref, amount: -charge, category: line!.category, name: `Reversal: ${line!.name}`.slice(0, 120) }];
+        // R26: the line's own discounts go with it, so it nets to 0 in both charges and discounts.
+        if (discounted > 0) out.push({ ref: `${ref}:discount`, amount: discounted, category: 'discount', name: `Discount cancelled: ${line!.name}`.slice(0, 120) });
+        return out;
+      }
       case 'change': {
-        const now = (c.qty ?? line!.qty) * (c.unitPrice ?? line!.unitPrice);
         if (line!.reversed) return 'The charge is already reversed';
+        const now = (c.qty ?? qty) * (c.unitPrice ?? price);
         if (now === charge) return 'The new amount is the same as the old one';
-        return { delta: now - charge, category: line!.category, name: `Correction: ${line!.name}`.slice(0, 120), field: 'charges' };
+        return [{ ref, amount: now - charge, category: line!.category, name: `Correction: ${line!.name}`.slice(0, 120) }];
       }
       case 'discount': {
+        if (line?.reversed) return 'The charge is already reversed';
         const base = line ? charge - discounted : (bill.totals?.charges ?? 0) - (bill.totals?.discounts ?? 0);
         const amount = c.amount ?? Math.round((base * (c.percent ?? 0)) / 100);
         if (amount < 1 || amount > base) return 'The discount is more than what is left to charge';
-        return { delta: -amount, category: 'discount', name: line ? `Discount: ${line.name}`.slice(0, 120) : 'Discount', field: 'discounts' };
+        return [{ ref, amount: -amount, category: 'discount', name: line ? `Discount: ${line.name}`.slice(0, 120) : 'Discount' }];
       }
       default: {
         // A write-off is of the unpaid balance (R22): never more than it is now.
         const balance = bill.totals?.balance ?? 0;
         if (balance <= 0) return 'Nothing is left to write off';
-        return { delta: -Math.min(c.amount ?? 0, balance), category: 'write-off', name: 'Write-off', field: 'discounts' };
+        return [{ ref, amount: -Math.min(c.amount ?? 0, balance), category: 'write-off', name: 'Write-off' }];
       }
     }
   }

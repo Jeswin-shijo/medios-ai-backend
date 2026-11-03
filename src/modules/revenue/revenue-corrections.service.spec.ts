@@ -158,6 +158,53 @@ describe('CorrectionsService', () => {
     await assert.rejects(() => svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'reversal', reason: 'Twice' }), /already reversed/);
   });
 
+  test('a throw after the claim rolls it back, so the approval can be rejected and settling is not blocked', async () => {
+    const { bill, line } = await erBill({ final: true });
+    await bills.adjust(String(bill._id), { payments: 5000 });
+    const c = await svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'discount', amount: 100, reason: 'x' });
+    const realUpdate = m.ChargeLine.updateOne.bind(m.ChargeLine);
+    let boom = true;
+    (m.ChargeLine as any).updateOne = (...a: any[]) => {
+      if (boom) {
+        boom = false;
+        throw new Error('link failed');
+      }
+      return (realUpdate as any)(...a);
+    };
+    try {
+      await assert.rejects(() => decide(c, 'approved'), /link failed/);
+    } finally {
+      (m.ChargeLine as any).updateOne = realUpdate;
+    }
+    assert.equal((await m.Correction.findById(c._id).lean())!.state, 'pending');
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.type': 'correction' }), 0, 'the written line is removed');
+    assert.equal((await totals(bill._id)).discounts, 0, 'the totals are put back');
+    await decide(c, 'rejected');
+    assert.equal((await m.Correction.findById(c._id).lean())!.state, 'rejected');
+    const settled = await final.settle(ADMIN, String(bill._id));
+    assert.equal(settled.state, 'settled');
+  });
+
+  test('a reversal also takes back the line\'s own discount, so the refund is what was really paid', async () => {
+    const { bill, line } = await erBill({ final: true });
+    await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'discount', amount: 1000, reason: 'Concession' });
+    await bills.adjust(String(bill._id), { payments: 4000 });
+    assert.equal((await totals(bill._id)).balance, 0);
+    await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'reversal', reason: 'Not given' });
+    assert.deepEqual(await totals(bill._id), { charges: 0, discounts: 0, payments: 4000, refunds: 0, balance: -4000 });
+    const sum = await m.ChargeLine.aggregate([{ $match: { bill: bill._id } }, { $group: { _id: '$category', t: { $sum: '$amount' } } }]);
+    assert.equal(sum.reduce((a: number, r: any) => a + (r._id === 'discount' ? -r.t : 0), 0), 0, 'discount lines net to 0');
+    await assert.rejects(() => svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'discount', amount: 10, reason: 'x' }), /already reversed/);
+  });
+
+  test('two changes in a row use the line as it is now', async () => {
+    const { bill, line } = await erBill();
+    await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'change', qty: 2, reason: 'Two given' });
+    assert.equal((await totals(bill._id)).charges, 10000);
+    await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 4000, reason: 'Wrong price' });
+    assert.equal((await totals(bill._id)).charges, 8000);
+  });
+
   test('a change moves the charge by the difference', async () => {
     const { bill, line } = await erBill();
     const c = await svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'change', qty: 2, unitPrice: 4000, reason: 'Wrong quantity' });

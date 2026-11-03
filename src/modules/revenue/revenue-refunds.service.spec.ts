@@ -27,6 +27,7 @@ describe('RefundsService', () => {
   let bills: RevenueBillsService;
   let final: FinalBillService;
   let svc: RefundsService;
+  let reg: RevenueCoordinatorRegistration;
   let patient: any;
 
   /** A final ER bill: 3000 charged, 3500 paid, so 500 is owed back. */
@@ -56,10 +57,10 @@ describe('RefundsService', () => {
     new ClocksService(m.Clock, registry, messages, escalations);
     approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, events);
     const settings = new RevenueSettingsService(new SettingsService(m.HospitalSettings));
-    const reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
+    reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
     bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
     final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
-    svc = new RefundsService(reg, settings, bills, approvals, m.Refund, m.TaskAlertItem);
+    svc = new RefundsService(reg, settings, bills, approvals, final, m.Refund, m.TaskAlertItem);
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600983', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000083' });
   });
@@ -94,8 +95,8 @@ describe('RefundsService', () => {
     assert.equal((await m.Clock.find({ def: 'revenue-refund', state: 'running' }).lean()).length, 0);
     await assert.rejects(() => svc.pay(DESK, String(r._id), { mode: 'cash' }), /already paid|not waiting/);
     assert.deepEqual(await totals(b._id), { charges: 3000, discounts: 0, payments: 3500, refunds: 500, balance: 0 });
-    const settled = await final.settle(ADMIN, String(b._id));
-    assert.equal(settled.state, 'settled');
+    // R27: paying the refund brings the balance to 0 and settles the bill.
+    assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled');
   });
 
   test('a refund is only for a final bill that owes money, and only one at a time', async () => {
@@ -153,5 +154,50 @@ describe('RefundsService', () => {
     const rec = await svc.receipt(String(r._id));
     assert.equal(rec.refundNumber, 'RF-0001');
     assert.equal(rec.amount, 500);
+  });
+
+  test('a throw while approving rolls the claim back, so the approval can be rejected and the refund cannot be paid', async () => {
+    const b = await owing();
+    const r = await svc.request(DESK, String(b._id));
+    const real = reg.send.bind(reg);
+    let boom = true;
+    (reg as any).send = async (...a: any[]) => {
+      if (boom) {
+        boom = false;
+        throw new Error('bus down');
+      }
+      return (real as any)(...a);
+    };
+    await assert.rejects(() => approvals.act(ADMIN, String(r.approvalId), 'approved'), /bus down/);
+    assert.equal((await m.Refund.findById(r._id).lean())!.state, 'requested');
+    await approvals.act(ADMIN, String(r.approvalId), 'rejected');
+    const after = await m.Refund.findById(r._id).lean();
+    assert.equal(after!.state, 'rejected');
+    await assert.rejects(() => svc.pay(DESK, String(r._id), { mode: 'cash' }), /not been approved/);
+  });
+
+  test('a late charge that shrinks what is owed makes the refund pay the smaller amount, and the bill settles', async () => {
+    const b = await owing();
+    const r = await svc.request(ADMIN, String(b._id));
+    await bills.adjust(String(b._id), { charges: 200 });
+    const paid = await svc.pay(DESK, String(r._id), { mode: 'cash' });
+    assert.equal(paid.state, 'paid');
+    assert.equal(paid.paid!.amount, 300);
+    assert.deepEqual(await totals(b._id), { charges: 3200, discounts: 0, payments: 3500, refunds: 300, balance: 0 });
+    assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled');
+  });
+
+  test('when nothing is owed any more the refund is void, its clock stops and the bill settles', async () => {
+    const b = await owing();
+    const r = await svc.request(ADMIN, String(b._id));
+    assert.equal((await m.Clock.find({ def: 'revenue-refund', state: 'running' }).lean()).length, 1);
+    await bills.adjust(String(b._id), { charges: 500 });
+    const v = await svc.pay(DESK, String(r._id), { mode: 'cash' });
+    assert.equal(v.state, 'void');
+    assert.deepEqual(await totals(b._id), { charges: 3500, discounts: 0, payments: 3500, refunds: 0, balance: 0 });
+    assert.equal(await m.AgentMessage.countDocuments({ type: 'revenue.refund-void' }), 1);
+    assert.equal((await m.Clock.find({ def: 'revenue-refund', state: 'running' }).lean()).length, 0);
+    assert.equal((await m.TaskAlertItem.findOne({ link: `revenue-refund:${r._id}` }).lean())!.status, 'Completed');
+    assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled');
   });
 });

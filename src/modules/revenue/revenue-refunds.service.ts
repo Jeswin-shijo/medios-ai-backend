@@ -7,6 +7,7 @@ import type { Actor } from '../beds/actor';
 import { ApprovalsService } from '../coordinator/approvals.service';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { UserRole } from '../users/schemas/user.schema';
+import { FinalBillService } from './revenue-final.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { RevenueSettingsService } from './revenue-settings.service';
@@ -28,6 +29,7 @@ export class RefundsService {
     private readonly settings: RevenueSettingsService,
     private readonly bills: RevenueBillsService,
     private readonly approvals: ApprovalsService,
+    private readonly final: FinalBillService,
     @InjectModel(Refund.name) private readonly refunds: Model<RefundDocument>,
     @InjectModel(TaskAlertItem.name) private readonly alerts: Model<TaskAlertDocument>,
   ) {
@@ -61,7 +63,20 @@ export class RefundsService {
       if ((e as { code?: number }).code === 11000) throw new ConflictException('A refund is already waiting on this bill');
       throw e;
     }
-    if (actor.role === UserRole.ADMIN) return this.approve(String(refund._id), actor);
+    // A settle that ran between the check above and the insert wins: the refund is withdrawn.
+    if ((await this.bills.get(billId)).state === 'settled') {
+      await this.refunds.deleteOne({ _id: refund._id }).exec();
+      throw new ConflictException('This bill is settled');
+    }
+    if (actor.role === UserRole.ADMIN) {
+      try {
+        return await this.approve(String(refund._id), actor);
+      } catch (e) {
+        // Rolled back to requested with no approval to reopen: withdraw it so it cannot hold the bill.
+        await this.refunds.deleteOne({ _id: refund._id, state: 'requested' }).exec();
+        throw e;
+      }
+    }
     try {
       const approval = await this.approvals.request({
         type: 'revenue.refund',
@@ -84,6 +99,7 @@ export class RefundsService {
     if (!r) return;
     if (decision === 'rejected') {
       await this.refunds.updateOne({ _id: r._id, state: 'requested' }, { $set: { state: 'rejected', waiting: false, decidedBy: { id: actor.id, name: actor.name } } }).exec();
+      await this.alerts.updateOne({ link: link(r._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
       return;
     }
     await this.approve(String(r._id), actor);
@@ -91,7 +107,8 @@ export class RefundsService {
 
   /**
    * Approves and announces: `revenue.refund-due` (the clock, dueAt = real now + the refund target) and the `revenue-refund:<id>`
-   * task. The claim is one guarded write; a retry after a throw finds it approved but not announced and finishes the announcing.
+   * task. The claim is one guarded write. If announcing throws, the claim is put back (R24) so the reopened approval can be
+   * approved again or rejected.
    */
   private async approve(refundId: string, actor: Actor): Promise<RefundDocument> {
     let r = await this.refunds.findOneAndUpdate({ _id: refundId, state: 'requested' }, { $set: { state: 'approved', decidedBy: { id: actor.id, name: actor.name } } }, { new: true }).exec();
@@ -101,6 +118,15 @@ export class RefundsService {
       if (found.state !== 'approved' || found.announcedAt) return found;
       r = found;
     }
+    try {
+      return await this.announce(r);
+    } catch (e) {
+      await this.refunds.updateOne({ _id: r._id, state: 'approved', announcedAt: null }, { $set: { state: 'requested' }, $unset: { decidedBy: 1 } }).exec().catch(() => undefined);
+      throw e;
+    }
+  }
+
+  private async announce(r: RefundDocument): Promise<RefundDocument> {
     const bill = await this.bills.get(String(r.bill));
     const cfg = await this.settings.get();
     const dueAt = new Date(Date.now() + cfg.clocks.refund * 60_000);
@@ -128,26 +154,61 @@ export class RefundsService {
     return (await this.refunds.findOneAndUpdate({ _id: r._id }, { $set: { announcedAt: new Date(), dueAt } }, { new: true }).exec()) ?? r;
   }
 
-  /** Pays an approved refund once: the total moves only if this call won the claim, and goes back if the move fails. */
+  /** R27: a refund that leaves the balance at 0 settles the bill through the guarded settle. A failure is logged, not thrown. */
+  private async settleIfZero(billId: string): Promise<void> {
+    try {
+      const bill = await this.bills.get(billId);
+      if ((bill.totals?.balance ?? 0) === 0 && bill.state !== 'settled') await this.final.settle('agent', billId);
+    } catch (e) {
+      this.logger.warn(`Bill ${billId} did not settle after its refund (${(e as Error).message})`);
+    }
+  }
+
+  /** The bill owes the patient nothing any more: the refund is void, its task completes and its clock stops (R25). */
+  private async voidRefund(found: RefundDocument, bill: { _id: unknown; number: string; case?: unknown }): Promise<RefundDocument> {
+    const v = await this.refunds.findOneAndUpdate({ _id: found._id, state: 'approved' }, { $set: { state: 'void', waiting: false, voidReason: 'Nothing left to refund' } }, { new: true }).exec();
+    if (!v) throw new ConflictException('This refund is no longer waiting');
+    try {
+      await this.registration.send(
+        'revenue.refund-void',
+        bill,
+        { refundId: String(v._id), refundNumber: v.number, billNumber: bill.number },
+        { text: `Refund ${v.number} is no longer owed`, dedupeKey: `refund-void:${String(v._id)}` },
+      );
+      await this.alerts.updateOne({ link: link(v._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
+    } catch (e) {
+      this.logger.warn(`Refund ${v.number} voided, but its message or task failed (${(e as Error).message})`);
+    }
+    await this.settleIfZero(String(v.bill));
+    return v;
+  }
+
+  /**
+   * Pays an approved refund once: the total moves only if this call won the claim, and goes back if the move fails. It pays
+   * what the bill owes the patient now, at most the approved amount; when nothing is owed the refund is voided (R25).
+   */
   async pay(actor: Actor, refundId: string, input: { mode: string; reference?: string }): Promise<RefundDocument> {
     this.desk(actor);
     if (!MODES.includes(input?.mode)) throw new BadRequestException('The payment mode must be cash, upi or card');
     const found = isValidObjectId(refundId) ? await this.refunds.findById(refundId).exec() : null;
     if (!found) throw new NotFoundException('Refund not found');
     if (found.state === 'paid') throw new ConflictException('This refund is already paid');
+    if (found.state === 'void') throw new ConflictException('This refund is void: nothing is left to refund');
     if (found.state !== 'approved') throw new ConflictException('The refund has not been approved');
     const bill = await this.bills.get(String(found.bill));
-    if (-(bill.totals?.balance ?? 0) < found.amount) throw new ConflictException('The bill no longer owes this refund');
+    const owed = -(bill.totals?.balance ?? 0);
+    if (bill.state === 'settled' || owed < 1) return this.voidRefund(found, bill);
+    const amount = Math.min(found.amount, owed);
     const paid = await this.refunds
       .findOneAndUpdate(
         { _id: found._id, state: 'approved' },
-        { $set: { state: 'paid', waiting: false, paid: { at: clinicNow(), by: { id: actor.id, name: actor.name }, mode: input.mode, reference: (input.reference ?? '').trim().slice(0, 80) } } },
+        { $set: { state: 'paid', waiting: false, paid: { at: clinicNow(), by: { id: actor.id, name: actor.name }, amount, mode: input.mode, reference: (input.reference ?? '').trim().slice(0, 80) } } },
         { new: true },
       )
       .exec();
     if (!paid) throw new ConflictException('This refund is already paid');
     try {
-      await this.bills.adjust(String(bill._id), { refunds: paid.amount }, { onlyActive: true });
+      await this.bills.adjust(String(bill._id), { refunds: amount }, { onlyActive: true });
     } catch (e) {
       await this.refunds.updateOne({ _id: paid._id }, { $set: { state: 'approved', waiting: true }, $unset: { paid: 1 } }).exec();
       throw e;
@@ -157,13 +218,14 @@ export class RefundsService {
         'revenue.refund-paid',
         bill,
         { refundId: String(paid._id), refundNumber: paid.number, billNumber: bill.number },
-        { text: `Refund ${paid.number} paid by ${input.mode}`, amount: paid.amount, dedupeKey: `refund-paid:${String(paid._id)}` },
+        { text: `Refund ${paid.number} paid by ${input.mode}`, amount, dedupeKey: `refund-paid:${String(paid._id)}` },
       );
       await this.alerts.updateOne({ link: link(paid._id), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
     } catch (e) {
       // The money is recorded; the reconcile pass (Task 11) tells the Coordinator again.
       this.logger.warn(`Refund ${paid.number} paid, but its message or task failed (${(e as Error).message})`);
     }
+    await this.settleIfZero(String(bill._id));
     return paid;
   }
 
@@ -178,7 +240,7 @@ export class RefundsService {
       billNumber: bill.number,
       patientName: bill.patientName,
       patientUhid: bill.patientUhid,
-      amount: r.amount,
+      amount: r.paid?.amount ?? r.amount,
       state: r.state,
       mode: r.paid?.mode ?? null,
       reference: r.paid?.reference ?? '',

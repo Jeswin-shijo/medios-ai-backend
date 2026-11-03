@@ -1,0 +1,21 @@
+import 'reflect-metadata';
+import * as assert from 'node:assert/strict';
+import { describe, test } from 'node:test';
+import { RevenueModule } from './revenue.module';
+
+describe('RevenueModule providers', () => {
+  test('every constructor parameter has a real type or an @Inject token (Nest can resolve it at boot)', () => {
+    const providers: any[] = Reflect.getMetadata('providers', RevenueModule);
+    assert.ok(providers.length > 5);
+    const bad: string[] = [];
+    for (const p of providers) {
+      if (typeof p !== 'function') continue;
+      const types: any[] = Reflect.getMetadata('design:paramtypes', p) ?? [];
+      const injected = new Set<number>(((Reflect.getMetadata('self:paramtypes', p) ?? []) as { index: number }[]).map((x) => x.index));
+      types.forEach((t, i) => {
+        if ((t === Object || t === undefined) && !injected.has(i)) bad.push(`${p.name}[${i}]`);
+      });
+    }
+    assert.deepEqual(bad, []);
+  });
+});

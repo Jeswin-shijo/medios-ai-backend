@@ -55,8 +55,8 @@ describe('RevenueCoordinatorRegistration', () => {
     caseId = String((await cases.openOrJoin({ patientId: String(p._id), patientUhid: p.uhid, patientName: 'Ravi Kumar', kind: 'er', priority: 'high', openedBy: 'er' })).case._id);
   });
 
-  test('the agent is built with its 10 message types, 3 clocks and 2 rules', async () => {
-    assert.equal(REVENUE_MESSAGE_TYPES.length, 10);
+  test('the agent is built with its 11 message types, 3 clocks and 2 rules', async () => {
+    assert.equal(REVENUE_MESSAGE_TYPES.length, 11);
     const payloads: Record<string, Record<string, string>> = {
       'estimate-ready': { billId: 'string', billNumber: 'string', low: 'number', high: 'number' },
       'deposit-due': { billId: 'string', billNumber: 'string', amount: 'number' },
@@ -68,6 +68,7 @@ describe('RevenueCoordinatorRegistration', () => {
       'bill-settled': { billId: 'string', billNumber: 'string', total: 'number' },
       'refund-due': { refundId: 'string', refundNumber: 'string', billNumber: 'string', amount: 'number', dueAt: 'date' },
       'refund-paid': { refundId: 'string', refundNumber: 'string', billNumber: 'string' },
+      'refund-void': { refundId: 'string', refundNumber: 'string', billNumber: 'string' },
     };
     for (const [t, payload] of Object.entries(payloads)) {
       const d = registry.messageType(`revenue.${t}`);
@@ -82,7 +83,7 @@ describe('RevenueCoordinatorRegistration', () => {
     const r = registry.clock('revenue-refund')!;
     assert.deepEqual([f.startOn, f.stopOn, f.minutes, f.ladder], ['revenue.final-requested', ['revenue.bill-final', 'revenue.bill-settled'], 60, 'revenue']);
     assert.deepEqual([t.startOn, t.stopOn, t.minutes, t.ladder], ['revenue.topup-due', ['revenue.topup-met', 'revenue.bill-settled'], 240, 'revenue']);
-    assert.deepEqual([r.startOn, r.stopOn, r.minutes, r.ladder], ['revenue.refund-due', ['revenue.refund-paid'], 2880, 'revenue']);
+    assert.deepEqual([r.startOn, r.stopOn, r.minutes, r.ladder], ['revenue.refund-due', ['revenue.refund-paid', 'revenue.refund-void'], 2880, 'revenue']);
     assert.deepEqual([f.resolveEscalationOnStop, t.resolveEscalationOnStop, r.resolveEscalationOnStop], [true, true, true]);
     assert.deepEqual([f.resolvedBy, t.resolvedBy, r.resolvedBy], ['Final bill ready', 'Top-up met', 'Refund paid']);
     assert.equal(f.alertLink!('b1'), 'revenue-bill:b1:final');
