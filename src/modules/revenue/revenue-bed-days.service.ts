@@ -12,6 +12,7 @@ import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { RevenueDepositsService } from './revenue-deposits.service';
 import { RevenueEstimatesService } from './revenue-estimates.service';
+import { FinalBillService } from './revenue-final.service';
 import { ACTIVE_BILL_STATES, Bill, BillDocument } from './schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from './schemas/charge-line.schema';
 
@@ -26,7 +27,7 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : nul
 /**
  * Bed days and daily nursing charges for admitted patients. Each 24-hour period from the admission time is charged once,
  * at the rate of the ward the patient was in when the period started. Handlers never throw.
- * Task 8 appends the estimate and deposit to `onAssigned`; Task 9 appends the final-bill request to `onDischarged`.
+ * `onAssigned` ends with the estimate and deposit; `onDischarged` ends with the final-bill request.
  */
 @Injectable()
 export class RevenueBedDaysService {
@@ -47,6 +48,7 @@ export class RevenueBedDaysService {
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
     private readonly estimates: RevenueEstimatesService,
     private readonly deposits: RevenueDepositsService,
+    private readonly final: FinalBillService,
   ) {
     registration.capture.set('bed.assigned', (id) => this.run('bed.assigned', id, (m) => this.onAssigned(m)));
     registration.capture.set('bed.transferred', (id) => this.run('bed.transferred', id, (m) => this.onTransferred(m)));
@@ -141,9 +143,15 @@ export class RevenueBedDaysService {
     }
     if (admission.sample) return;
     // Step 1: make sure the stay has a bill (a missed bed.assigned would leave none).
-    await this.ensureBill(admission, m.case);
-    // Step 2: the last bed day. Task 9 adds the final-bill request after this step.
+    const bill = await this.ensureBill(admission, m.case);
+    // Step 2: the last bed day.
     await this.chargeDue(String(admission._id));
+    // Step 3 (R1): the final-bill request, caught on its own so it can never undo the bed day.
+    try {
+      await this.final.request('agent', String(bill._id));
+    } catch (e) {
+      this.logger.warn(`bed.discharged: final bill not requested (${(e as Error).message})`);
+    }
   }
 
   /**

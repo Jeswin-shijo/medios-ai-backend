@@ -139,15 +139,19 @@ export class RevenueBillsService {
     return this.open({ kind: 'walk-in', patientId: input.patientId, day });
   }
 
-  /** Atomically changes the totals and the balance together, then tells the listeners. */
-  async adjust(billId: string, delta: TotalsDelta): Promise<BillDocument> {
+  /**
+   * Atomically changes the totals and the balance together, then tells the listeners. With `onlyActive` the write happens only
+   * while the bill is open or final, so money can never land on a bill that settled a moment before (409).
+   */
+  async adjust(billId: string, delta: TotalsDelta, opts: { onlyActive?: boolean } = {}): Promise<BillDocument> {
     const d = { charges: 0, discounts: 0, payments: 0, refunds: 0, ...delta };
     for (const v of Object.values(d)) {
       if (!Number.isInteger(v)) throw new BadRequestException('Amounts are whole rupees');
     }
+    const id = oid(billId, 'billId');
     const bill = await this.bills
-      .findByIdAndUpdate(
-        oid(billId, 'billId'),
+      .findOneAndUpdate(
+        opts.onlyActive ? { _id: id, state: { $in: ACTIVE_BILL_STATES } } : { _id: id },
         {
           $inc: {
             'totals.charges': d.charges,
@@ -160,7 +164,10 @@ export class RevenueBillsService {
         { new: true },
       )
       .exec();
-    if (!bill) throw new NotFoundException('Bill not found');
+    if (!bill) {
+      if (opts.onlyActive && (await this.bills.exists({ _id: id }))) throw new ConflictException('This bill is settled');
+      throw new NotFoundException('Bill not found');
+    }
     for (const fn of this.onTotalsChanged) {
       try {
         Promise.resolve(fn(billId)).catch((e) => this.logger.warn(`A totals listener failed: ${(e as Error).message}`));
@@ -200,7 +207,7 @@ export class RevenueBillsService {
         needsPrice: !!input.needsPrice,
       });
       try {
-        await this.adjust(billId, { charges: amount });
+        await this.adjust(billId, { charges: amount }, { onlyActive: true });
       } catch (e) {
         // No total, no line: a retry can then charge cleanly.
         await this.lines.deleteOne({ _id: line._id }).exec();

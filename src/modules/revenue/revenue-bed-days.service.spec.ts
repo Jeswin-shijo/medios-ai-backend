@@ -15,6 +15,7 @@ import { RevenueCaptureService } from './revenue-capture.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { RevenueDepositsService } from './revenue-deposits.service';
 import { RevenueEstimatesService } from './revenue-estimates.service';
+import { FinalBillService } from './revenue-final.service';
 import { RevenueSettingsService } from './revenue-settings.service';
 import { RulesService } from '../coordinator/rules.service';
 import { SettingsService } from '../settings/settings.service';
@@ -75,7 +76,7 @@ describe('RevenueBedDaysService', () => {
     const revenueSettings = new RevenueSettingsService(settingsService);
     const estimates = new RevenueEstimatesService(reg, revenueSettings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
     const deposits = new RevenueDepositsService(messages, reg, new RulesService(registry, settingsService, new CoordinatorEvents()), revenueSettings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
-    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits);
+    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment));
     reg.onModuleInit();
     svc.clock = () => at(0);
     patient = await m.Patient.create({ uhid: 'MHK202600961', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000061' });

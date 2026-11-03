@@ -13,7 +13,10 @@ import { PriceListService } from './price-list.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCaptureService } from './revenue-capture.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { FinalBillService } from './revenue-final.service';
 import { RevenueOpdService } from './revenue-opd.service';
+import { RevenueSettingsService } from './revenue-settings.service';
+import { SettingsService } from '../settings/settings.service';
 
 describe('RevenueOpdService', () => {
   const m = models();
@@ -46,7 +49,9 @@ describe('RevenueOpdService', () => {
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
     bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
-    svc = new RevenueOpdService(events, prices, bills, m.Appointment, m.Patient, m.ChargeLine);
+    const revenueSettings = new RevenueSettingsService(new SettingsService(m.HospitalSettings));
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    svc = new RevenueOpdService(events, prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600961', name: 'Asha Devi', age: 40, gender: 'Female', phone: '9100000061' });
     doctor = await m.OpDoctor.create({ name: 'Dr Arun', departmentCode: 'GEN', tokenPrefix: 'G', room: 'R1', fee: 300, active: true });

@@ -100,6 +100,7 @@ export const CAPTURE_TYPES = [
   'bed.assigned',
   'bed.transferred',
   'bed.discharged',
+  'er.left',
 ] as const;
 
 export type ApprovalListener = (approvalId: string, decision: 'approved' | 'rejected', actor: Actor) => Promise<void>;

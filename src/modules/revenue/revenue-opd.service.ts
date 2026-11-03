@@ -8,6 +8,7 @@ import { Appointment, AppointmentDocument } from '../appointments/schemas/appoin
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { PriceListService } from './price-list.service';
 import { RevenueBillsService } from './revenue-bills.service';
+import { FinalBillService } from './revenue-final.service';
 import { ChargeLine, ChargeLineDocument } from './schemas/charge-line.schema';
 
 const BY = { name: 'Revenue Agent' };
@@ -15,7 +16,7 @@ const FEE_STATUSES = ['Checked In', 'Waiting', 'In Consultation', 'Completed'];
 
 /**
  * The OPD consultation fee, charged once when an appointment is checked in. The one AppointmentEvents subscription lives here:
- * Task 9 adds a `Completed` branch to `onStatusChange` for OPD auto-settle. Nothing here ever throws into the stream.
+ * a `Completed` status settles the OPD bill when nothing is due. Nothing here ever throws into the stream.
  */
 @Injectable()
 export class RevenueOpdService implements OnModuleInit, OnModuleDestroy {
@@ -29,6 +30,7 @@ export class RevenueOpdService implements OnModuleInit, OnModuleDestroy {
     @InjectModel(Appointment.name) private readonly appointments: Model<AppointmentDocument>,
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
+    private readonly final: FinalBillService,
   ) {}
 
   onModuleInit() {
@@ -45,6 +47,8 @@ export class RevenueOpdService implements OnModuleInit, OnModuleDestroy {
   async onStatusChange(change: AppointmentStatusChange): Promise<void> {
     try {
       if (change.status === 'Checked In') await this.chargeFee(change.id);
+      // R1: the same subscription settles an OPD bill with nothing due at the end of the visit.
+      if (change.status === 'Completed') await this.final.autoSettleForAppointment(change.id);
     } catch (e) {
       this.logger.warn(`Appointment ${change.id} (${change.status}): ${(e as Error).message}`);
     }
