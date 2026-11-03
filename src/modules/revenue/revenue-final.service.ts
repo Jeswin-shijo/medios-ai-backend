@@ -170,6 +170,9 @@ export class FinalBillService {
   async settle(_actor: Actor | 'agent', billId: string): Promise<BillDocument> {
     const id = isValidObjectId(billId) ? new Types.ObjectId(billId) : null;
     if (!id) throw new NotFoundException('Bill not found');
+    // R19: a waiting correction or refund holds the bill open. The check runs again after the write (below), so a request that
+    // slips in between is caught either by this pass or by the request's own "settled?" re-check.
+    if (await this.bills.hasPendingMoney(id)) throw new ConflictException('A correction or refund is waiting');
     const bill = await this.billModel
       .findOneAndUpdate(
         {
@@ -188,6 +191,11 @@ export class FinalBillService {
       if (now.state === 'settled') throw new ConflictException('This bill is settled');
       if (now.state === 'open' && (now.kind === 'er' || now.kind === 'admission')) throw new ConflictException('Prepare the final bill first');
       throw new ConflictException('The balance is not zero');
+    }
+    if (await this.bills.hasPendingMoney(id)) {
+      // A request landed between the check and the write: put the bill back as it was, then refuse.
+      await this.billModel.updateOne({ _id: id, state: 'settled' }, { $set: { state: bill.finalAt ? 'final' : 'open' }, $unset: { settledAt: 1 } }).exec();
+      throw new ConflictException('A correction or refund is waiting');
     }
     try {
       await this.alerts.updateMany({ link: new RegExp(`^revenue-bill:${String(bill._id)}:`), status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();

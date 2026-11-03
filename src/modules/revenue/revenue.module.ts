@@ -18,6 +18,8 @@ import { RevenueEstimatesService } from './revenue-estimates.service';
 import { FinalBillService } from './revenue-final.service';
 import { RevenueOpdService } from './revenue-opd.service';
 import { PaymentsService } from './revenue-payments.service';
+import { CorrectionsService } from './revenue-corrections.service';
+import { RefundsService } from './revenue-refunds.service';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { OpdModule } from '../opd/opd.module';
 import { Appointment, AppointmentSchema } from '../appointments/schemas/appointment.schema';
@@ -76,7 +78,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     AppointmentsModule, // AppointmentEvents
     OpdModule,
   ],
-  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService],
-  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService],
+  providers: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService],
+  exports: [PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService],
 })
 export class RevenueModule {}

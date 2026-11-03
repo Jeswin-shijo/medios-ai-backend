@@ -6,7 +6,7 @@ export type CorrectionDocument = Correction & Document;
 
 export const CORRECTION_KINDS = ['change', 'reversal', 'discount', 'writeoff'] as const;
 export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
-export const CORRECTION_STATES = ['pending', 'approved', 'rejected'] as const;
+export const CORRECTION_STATES = ['pending', 'approved', 'rejected', 'void'] as const;
 export type CorrectionState = (typeof CORRECTION_STATES)[number];
 
 @Schema({ timestamps: true })
@@ -47,9 +47,24 @@ export class Correction {
   @Prop({ type: Date })
   appliedAt?: Date;
 
+  /** Who decided it (or the admin who asked). */
+  @Prop({ type: ActorRefSchema })
+  decidedBy?: ActorRef;
+
+  /** The signed amount of the line it wrote (negative takes money off). */
+  @Prop({ type: Number })
+  delta?: number;
+
+  /** Why an approved correction could not be applied (for example the bill settled first). */
+  @Prop({ type: String })
+  voidReason?: string;
+
   /** True when the agent proposed it (for example a reversal after a recollection). */
   @Prop({ default: false })
   suggested: boolean;
 }
 
 export const CorrectionSchema = SchemaFactory.createForClass(Correction);
+/** One waiting correction per charge line. */
+CorrectionSchema.index({ line: 1 }, { unique: true, partialFilterExpression: { state: 'pending', line: { $exists: true } } });
+CorrectionSchema.index({ approvalId: 1 });

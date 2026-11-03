@@ -34,6 +34,12 @@ export class Refund {
   @Prop({ type: MongooseSchema.Types.ObjectId })
   approvalId?: Types.ObjectId;
 
+  @Prop({ type: ActorRefSchema })
+  requestedBy?: ActorRef;
+
+  @Prop({ type: ActorRefSchema })
+  decidedBy?: ActorRef;
+
   @Prop({ type: RefundPaidSchema })
   paid?: RefundPaid;
 
@@ -42,6 +48,11 @@ export class Refund {
 
   @Prop({ type: Date })
   announcedAt?: Date;
+
+  /** True while requested or approved and unpaid; the unique index below allows one such refund per bill. */
+  @Prop({ default: true })
+  waiting: boolean;
 }
 
 export const RefundSchema = SchemaFactory.createForClass(Refund);
+RefundSchema.index({ bill: 1, waiting: 1 }, { unique: true, partialFilterExpression: { waiting: true } });

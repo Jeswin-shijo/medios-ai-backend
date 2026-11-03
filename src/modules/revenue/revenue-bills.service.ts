@@ -33,6 +33,8 @@ export interface ChargeInput {
   unitPrice: number;
   source: { type: string; ref: string };
   needsPrice?: boolean;
+  /** Why a charge was added by hand. */
+  reason?: string;
   by: { id?: string; name: string };
 }
 
@@ -205,6 +207,7 @@ export class RevenueBillsService {
         chargedAt: clinicNow(),
         by: { id: input.by.id ?? '', name: input.by.name },
         needsPrice: !!input.needsPrice,
+        reason: input.reason ?? '',
       });
       try {
         await this.adjust(billId, { charges: amount }, { onlyActive: true });
@@ -221,6 +224,19 @@ export class RevenueBillsService {
       }
       throw e;
     }
+  }
+
+  /**
+   * True while a correction is pending (or approved but not yet applied) or a refund is requested or approved but unpaid.
+   * Settling waits for these (R19).
+   */
+  async hasPendingMoney(billId: string | Types.ObjectId): Promise<boolean> {
+    const bill = typeof billId === 'string' ? oid(billId, 'billId') : billId;
+    const [c, r] = await Promise.all([
+      this.corrections.exists({ bill, $or: [{ state: 'pending' }, { state: 'approved', appliedAt: null }] }).exec(),
+      this.refunds.exists({ bill, state: { $in: ['requested', 'approved'] } }).exec(),
+    ]);
+    return !!(c || r);
   }
 
   async get(id: string): Promise<BillDocument> {

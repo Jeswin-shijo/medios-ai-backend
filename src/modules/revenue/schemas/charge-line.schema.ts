@@ -5,6 +5,10 @@ import { ActorRef, ActorRefSchema } from './actor-ref';
 
 export type ChargeLineDocument = ChargeLine & Document;
 
+/** A correction's discount and write-off lines carry these two extra categories (R19), so totals can tell them from charges. */
+export const LINE_CATEGORIES = [...PRICE_CATEGORIES, 'discount', 'write-off'] as const;
+export type LineCategory = (typeof LINE_CATEGORIES)[number];
+
 @Schema({ _id: false })
 export class ChargeSource {
   @Prop({ required: true }) type: string;
@@ -24,8 +28,8 @@ export class ChargeLine {
   @Prop({ required: true })
   name: string;
 
-  @Prop({ type: String, required: true, enum: PRICE_CATEGORIES })
-  category: PriceCategory;
+  @Prop({ type: String, required: true, enum: LINE_CATEGORIES })
+  category: LineCategory;
 
   @Prop({ required: true, min: 1 })
   qty: number;
@@ -49,6 +53,10 @@ export class ChargeLine {
 
   @Prop({ default: false })
   needsPrice: boolean;
+
+  /** Why a missed charge was added by hand. */
+  @Prop({ default: '' })
+  reason: string;
 
   @Prop({ default: false })
   reversed: boolean;
