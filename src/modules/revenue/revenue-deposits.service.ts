@@ -170,6 +170,10 @@ export class RevenueDepositsService {
     const existing = await this.alerts.findOne({ link }).lean().exec();
     if (opts.onlyIfOpen && (!existing || existing.status === 'Completed')) return null;
     const fields = await this.depositFields(bill, due.reason, remaining);
+    // R31: the ask is written before the task, so a crash between them leaves a marker the reconcile pass completes.
+    if (!existing || existing.status === 'Completed' || existing.title !== fields.title) {
+      await this.billModel.updateOne({ _id: bill._id }, { $set: { depositAsk: { amount: remaining } } }).exec();
+    }
     let announce = false;
     if (!existing) {
       try {
@@ -187,8 +191,6 @@ export class RevenueDepositsService {
       announce = existing.title !== fields.title;
     }
     if (announce) {
-      // The ask is written before the send so a failed send leaves it for the reconcile pass (the task is already written).
-      await this.billModel.updateOne({ _id: bill._id }, { $set: { depositAsk: { amount: remaining } } }).exec();
       await this.sendDepositDue(bill, remaining);
     }
     return remaining;
@@ -232,10 +234,11 @@ export class RevenueDepositsService {
     const remaining = due.amount - (bill.totals?.payments ?? 0);
     if (remaining <= 0) return false;
     const link = depositLink(bill._id);
-    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.depositFields(bill, due.reason, remaining)), link } }, { upsert: true }).exec();
-    if (!r.upsertedCount) return false;
+    if (await this.alerts.exists({ link })) return false;
+    // R31: marker first.
     await this.billModel.updateOne({ _id: bill._id }, { $set: { depositAsk: { amount: remaining } } }).exec();
-    return true;
+    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.depositFields(bill, due.reason, remaining)), link } }, { upsert: true }).exec();
+    return !!r.upsertedCount;
   }
 
   /** The reconcile pass: writes the top-up task when it is needed and missing. Never reopens one that exists. True when it wrote one. */
@@ -247,11 +250,12 @@ export class RevenueDepositsService {
     const plan = await this.topUpPlan(bill);
     if (!plan.needed || !(plan.amount > 0)) return false;
     const link = topupLink(bill._id);
-    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.topUpFields(bill, plan.amount)), link } }, { upsert: true }).exec();
-    if (!r.upsertedCount) return false;
+    if (await this.alerts.exists({ link })) return false;
     const cfg = await this.settings.get();
+    // R31: marker first.
     await this.billModel.updateOne({ _id: bill._id }, { $set: { topupAsk: { amount: plan.amount, dueAt: new Date(Date.now() + cfg.clocks.topup * 60_000) } } }).exec();
-    return true;
+    const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...(await this.topUpFields(bill, plan.amount)), link } }, { upsert: true }).exec();
+    return !!r.upsertedCount;
   }
 
   /**
@@ -298,12 +302,14 @@ export class RevenueDepositsService {
 
   private async sendTopUpDue(bill: BillDocument, amount: number, dueAt: Date): Promise<void> {
     await this.registration.send('revenue.topup-due', bill, { billId: String(bill._id), billNumber: bill.number, amount, dueAt }, { text: 'Top-up due', amount });
-    await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.announcedAt': new Date() } }).exec();
+    // Guarded on the amount and time that went out, so a newer top-up written meanwhile stays unannounced.
+    await this.billModel.updateOne({ _id: bill._id, 'topupAsk.amount': amount, 'topupAsk.dueAt': dueAt }, { $set: { 'topupAsk.announcedAt': new Date() } }).exec();
   }
 
   private async sendTopUpMet(bill: BillDocument): Promise<void> {
     await this.registration.send('revenue.topup-met', bill, { billId: String(bill._id), billNumber: bill.number }, { text: 'Top-up met' });
-    await this.billModel.updateOne({ _id: bill._id }, { $set: { 'topupAsk.metAnnouncedAt': new Date() } }).exec();
+    // The due message is moot once the top-up is met: mark it too, so it does not keep matching the reconcile pass.
+    await this.billModel.updateOne({ _id: bill._id, 'topupAsk.metAt': { $exists: true } }, { $set: { 'topupAsk.metAnnouncedAt': new Date(), 'topupAsk.announcedAt': new Date() } }).exec();
   }
 
   private async complete(link: string): Promise<boolean> {
@@ -345,6 +351,11 @@ export class RevenueDepositsService {
     const fields = await this.topUpFields(bill, amount);
     const existing = await this.alerts.findOne({ link }).lean().exec();
     let raised = false;
+    const cfg = await this.settings.get();
+    // Clocks run on real time; the bill's own times are on the clinic clock.
+    const dueAt = new Date(Date.now() + cfg.clocks.topup * 60_000);
+    // R31: the ask is written before the task.
+    if (!existing || existing.status === 'Completed') await this.billModel.updateOne({ _id: bill._id }, { $set: { topupAsk: { amount, dueAt } } }).exec();
     if (!existing) {
       try {
         await this.alerts.create({ ...fields, link });
@@ -356,10 +367,6 @@ export class RevenueDepositsService {
       raised = !!(await this.alerts.findOneAndUpdate({ link, status: 'Completed' }, { $set: fields }, { new: true }).lean().exec());
     }
     if (!raised) return null;
-    // Clocks run on real time; the bill's own times are on the clinic clock.
-    const cfg = await this.settings.get();
-    const dueAt = new Date(Date.now() + cfg.clocks.topup * 60_000);
-    await this.billModel.updateOne({ _id: bill._id }, { $set: { topupAsk: { amount, dueAt } } }).exec();
     await this.sendTopUpDue(bill, amount, dueAt);
     return 'raised';
   }

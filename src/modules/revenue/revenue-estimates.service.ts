@@ -135,10 +135,15 @@ export class RevenueEstimatesService {
 
   /** The reconcile pass: sends the message of an estimate with no announcedAt. Never throws; true when it sent. */
   async reannounce(estimateId: string): Promise<boolean> {
-    const estimate = isValidObjectId(estimateId) ? await this.estimates.findById(estimateId).exec() : null;
-    const bill = estimate ? await this.billModel.findById(estimate.bill).exec() : null;
-    if (!estimate || !bill) return false;
-    return this.announce(bill, estimate);
+    try {
+      const estimate = isValidObjectId(estimateId) ? await this.estimates.findById(estimateId).exec() : null;
+      const bill = estimate ? await this.billModel.findById(estimate.bill).exec() : null;
+      if (!estimate || !bill) return false;
+      return await this.announce(bill, estimate);
+    } catch (e) {
+      this.logger.warn(`Estimate ${estimateId} not re-announced (${(e as Error).message})`);
+      return false;
+    }
   }
 
   private async announce(bill: BillDocument, estimate: EstimateDocument): Promise<boolean> {

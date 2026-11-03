@@ -87,8 +87,9 @@ export class RevenueOpdService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Today's checked-in, waiting, seen or completed appointments with no fee line get one. Returns how many were charged. */
-  async catchUp(day: string = isoDate(clinicNow())): Promise<number> {
-    const found = await this.appointments.find({ date: day, status: { $in: FEE_STATUSES } }).select('_id').lean().exec();
+  async catchUp(day: string = isoDate(clinicNow()), since?: Date): Promise<number> {
+    // R32: with `since`, only appointments touched after the Revenue Agent first ran.
+    const found = await this.appointments.find({ date: day, status: { $in: FEE_STATUSES }, ...(since ? { updatedAt: { $gte: since } } : {}) }).select('_id').lean().exec();
     let charged = 0;
     for (const a of found) {
       const id = String(a._id);

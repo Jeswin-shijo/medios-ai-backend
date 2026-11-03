@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
+import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { ErVisit, ErVisitDocument } from '../er/schemas/er-visit.schema';
 import { LabLine, LabLineDocument } from '../lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from '../lab/schemas/lab-request.schema';
@@ -11,7 +12,7 @@ import { ConsultRequest, ConsultRequestDocument } from '../scheduling/schemas/co
 import { ProcedureBooking, ProcedureBookingDocument } from '../scheduling/schemas/procedure-booking.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { RevenueBedDaysService } from './revenue-bed-days.service';
-import { RevenueBillsService } from './revenue-bills.service';
+import { RevenueBillsService, lineTotals } from './revenue-bills.service';
 import { RevenueCaptureService } from './revenue-capture.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { RevenueDepositsService } from './revenue-deposits.service';
@@ -34,6 +35,8 @@ export const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** Lab lines past collection: a charge was made for each when the sample was collected. */
 const COLLECTED = ['collected', 'received', 'awaiting-validation', 'released'];
 const BATCH = 300;
+/** At most this many missed charges are made per pass; rows examined are not capped. */
+const MISS_CAP = 200;
 const stamp = (doc: unknown, key: 'createdAt' | 'updatedAt'): Date | undefined => (doc as Partial<Record<typeof key, Date>>)[key];
 
 export interface RevenueReconcileResult {
@@ -48,7 +51,7 @@ export interface RevenueReconcileResult {
 }
 
 @Injectable()
-export class RevenueReconcileService {
+export class RevenueReconcileService implements OnModuleInit {
   private readonly logger = new Logger(RevenueReconcileService.name);
 
   constructor(
@@ -77,21 +80,33 @@ export class RevenueReconcileService {
     @InjectModel(PharmacyOrder.name) private readonly pharmacyOrders: Model<PharmacyOrderDocument>,
     @InjectModel(ProcedureBooking.name) private readonly procedures: Model<ProcedureBookingDocument>,
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
+    @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
   ) {}
+
+  /** R32: remember when the Revenue Agent first ran, so the first pass never looks before it. */
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.bills.startedAt();
+    } catch (e) {
+      this.logger.warn(`Revenue start time not stored (${(e as Error).message})`);
+    }
+  }
 
   /**
    * Repairs what a failed send or a crash left undone, then runs the agent's periodic work. Every step is idempotent, a step
-   * that fails is logged and does not stop the next, and records younger than 30 seconds are left alone. The scheduler
-   * (a later task) calls reconcile() every minute.
+   * that fails is logged and does not stop the next, and records younger than 30 seconds are left alone. Nothing older than
+   * 7 days, or than the Revenue Agent's first start, is touched (R32). The scheduler (a later task) calls reconcile() every minute.
    */
   async reconcile(): Promise<RevenueReconcileResult> {
     const old = new Date(Date.now() - RECONCILE_GRACE_MS);
-    const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
+    const start = await this.bills.startedAt();
+    const since = new Date(Math.max(Date.now() - RECONCILE_WINDOW_MS, start.getTime()));
     const out: RevenueReconcileResult = { announced: 0, tasks: 0, charges: 0, totals: 0, reversals: 0, clocks: 0, bedDays: 0, opdFees: 0 };
     await this.step('charges', async () => (out.charges += await this.missedCharges(old, since)));
     await this.step('bed days', async () => (out.bedDays += await this.bedDays.tick()));
-    await this.step('OPD fees', async () => (out.opdFees += await this.opd.catchUp()));
-    await this.step('totals', async () => (out.totals += await this.healTotals(old)));
+    await this.step('OPD fees', async () => (out.opdFees += await this.opd.catchUp(undefined, since)));
+    await this.step('totals', async () => (out.totals += await this.healTotals(old, since)));
+    await this.step('final bills', async () => (out.tasks += await this.requestFinals(old, since)));
     await this.step('bill messages', async () => (out.announced += await this.reannounceBills(old, since)));
     await this.step('payment messages', async () => (out.announced += await this.reannouncePayments(old, since)));
     await this.step('estimate messages', async () => (out.announced += await this.reannounceEstimates(old, since)));
@@ -111,8 +126,26 @@ export class RevenueReconcileService {
     }
   }
 
-  private ids(docs: { _id: unknown }[]): string[] {
-    return docs.map((d) => String(d._id));
+  /**
+   * Walks every row of a filter in _id order, a page at a time (R30): handled rows never crowd out the rest, because nothing
+   * here is "the N oldest". A page callback returns false to stop early.
+   */
+  private async walk(model: Model<any>, filter: Record<string, unknown>, each: (rows: any[]) => Promise<void | false>): Promise<void> {
+    let last: unknown = null;
+    for (;;) {
+      const rows = await model.find(last ? { ...filter, _id: { $gt: last } } : filter).sort({ _id: 1 }).limit(BATCH).lean().exec();
+      if (!rows.length) return;
+      if ((await each(rows)) === false) return;
+      if (rows.length < BATCH) return;
+      last = rows[rows.length - 1]._id;
+    }
+  }
+
+  /** Of these source refs, the ones with no charge line yet (one query for the whole page). */
+  private async uncharged(type: string, refs: string[]): Promise<Set<string>> {
+    if (!refs.length) return new Set();
+    const have = new Set((await this.chargeLines.distinct('source.ref', { 'source.type': type, 'source.ref': { $in: refs } }).exec()) as string[]);
+    return new Set(refs.filter((r) => !have.has(r)));
   }
 
   // ---------- messages ----------
@@ -120,34 +153,40 @@ export class RevenueReconcileService {
   /** Bills whose message for the current state never went out: final, settled, or open with an open `:final` task. */
   private async reannounceBills(old: Date, since: Date): Promise<number> {
     const window = { announcedAt: { $exists: false }, updatedAt: { $lte: old, $gte: since } };
-    const owed = await this.billModel.find({ ...window, state: { $in: ['final', 'settled'] } }).select('_id').sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    const tasks = await this.alerts.find({ link: /^revenue-bill:[0-9a-f]{24}:final$/, status: { $ne: 'Completed' } }).select('link').limit(BATCH).lean().exec();
-    const taskBills = tasks.map((t) => (t.link ?? '').split(':')[1]).filter((id) => isValidObjectId(id));
-    const asking = taskBills.length ? await this.billModel.find({ ...window, _id: { $in: taskBills }, state: 'open' }).select('_id').lean().exec() : [];
     let n = 0;
-    for (const id of [...this.ids(owed), ...this.ids(asking)]) if (await this.final.announce(id)) n++;
+    await this.walk(this.billModel, { ...window, state: { $in: ['final', 'settled'] } }, async (rows) => {
+      for (const r of rows) if (await this.final.announce(String(r._id))) n++;
+    });
+    await this.walk(this.alerts, { link: /^revenue-bill:[0-9a-f]{24}:final$/, status: { $ne: 'Completed' } }, async (tasks) => {
+      const ids = tasks.map((t) => String(t.link).split(':')[1]).filter((id) => isValidObjectId(id));
+      const asking = ids.length ? await this.billModel.find({ ...window, _id: { $in: ids }, state: 'open' }).select('_id').lean().exec() : [];
+      for (const b of asking) if (await this.final.announce(String(b._id))) n++;
+    });
     return n;
   }
 
   private async reannouncePayments(old: Date, since: Date): Promise<number> {
-    const owed = await this.paymentModel.find({ announcedAt: { $exists: false }, cancelled: { $exists: false }, updatedAt: { $lte: old, $gte: since } }).select('_id').sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
     let n = 0;
-    for (const id of this.ids(owed)) if (await this.payments.announce(id)) n++;
+    await this.walk(this.paymentModel, { announcedAt: { $exists: false }, cancelled: { $exists: false }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const r of rows) if (await this.payments.announce(String(r._id))) n++;
+    });
     return n;
   }
 
   private async reannounceEstimates(old: Date, since: Date): Promise<number> {
-    const owed = await this.estimateModel.find({ announcedAt: { $exists: false }, updatedAt: { $lte: old, $gte: since } }).select('_id').sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
     let n = 0;
-    for (const id of this.ids(owed)) if (await this.estimates.reannounce(id)) n++;
+    await this.walk(this.estimateModel, { announcedAt: { $exists: false }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const r of rows) if (await this.estimates.reannounce(String(r._id))) n++;
+    });
     return n;
   }
 
   /** Refunds whose message for the current state never went out (refund-due, refund-paid, refund-void). */
   private async reannounceRefunds(old: Date, since: Date): Promise<number> {
-    const owed = await this.refundModel.find({ announcedAt: { $exists: false }, state: { $in: ['approved', 'paid', 'void'] }, updatedAt: { $lte: old, $gte: since } }).select('_id').sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
     let n = 0;
-    for (const id of this.ids(owed)) if (await this.refunds.reannounce(id)) n++;
+    await this.walk(this.refundModel, { announcedAt: { $exists: false }, state: { $in: ['approved', 'paid', 'void'] }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const r of rows) if (await this.refunds.reannounce(String(r._id))) n++;
+    });
     return n;
   }
 
@@ -156,80 +195,97 @@ export class RevenueReconcileService {
    * escalation cannot be acknowledged. Sends `revenue.refund-void` for it (deduped) and completes the task.
    */
   private async stopDeadRefundClocks(old: Date): Promise<number> {
-    const running = await this.clockModel.find({ def: 'revenue-refund', state: 'running', startedAt: { $lte: old } }).limit(BATCH).lean().exec();
     let n = 0;
-    for (const c of running) {
-      const ref = c.ref ?? '';
-      try {
-        const refund = isValidObjectId(ref) ? await this.refundModel.findById(ref).lean().exec() : null;
-        if (refund && refund.state !== 'rejected' && refund.state !== 'void') continue;
-        const bill = refund ? await this.billModel.findById(refund.bill).select('number case').lean().exec() : null;
-        const billNumber = bill?.number ?? '';
-        await this.registration.send(
-          'revenue.refund-void',
-          { number: billNumber, case: bill?.case ?? c.case ?? undefined },
-          { refundId: ref, refundNumber: refund?.number ?? c.detail ?? '', billNumber },
-          { text: `Refund ${refund?.number ?? c.detail ?? ''} is no longer owed`, dedupeKey: `refund-void:${ref}` },
-        );
-        await this.alerts.updateOne({ link: `revenue-refund:${ref}`, status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
-        n++;
-      } catch (e) {
-        this.logger.warn(`Refund clock ${String(c._id)} not stopped (${(e as Error).message})`);
+    await this.walk(this.clockModel, { def: 'revenue-refund', state: 'running', startedAt: { $lte: old } }, async (running) => {
+      for (const c of running) {
+        const ref = c.ref ?? '';
+        try {
+          const refund = isValidObjectId(ref) ? await this.refundModel.findById(ref).lean().exec() : null;
+          if (refund && refund.state !== 'rejected' && refund.state !== 'void') continue;
+          const bill = refund ? await this.billModel.findById(refund.bill).select('number case').lean().exec() : null;
+          const billNumber = bill?.number ?? '';
+          await this.registration.send(
+            'revenue.refund-void',
+            { number: billNumber, case: bill?.case ?? c.case ?? undefined },
+            { refundId: ref, refundNumber: refund?.number ?? c.detail ?? '', billNumber },
+            { text: `Refund ${refund?.number ?? c.detail ?? ''} is no longer owed`, dedupeKey: `refund-void:${ref}` },
+          );
+          await this.alerts.updateOne({ link: `revenue-refund:${ref}`, status: { $ne: 'Completed' } }, { $set: { status: 'Completed' } }).exec();
+          n++;
+        } catch (e) {
+          this.logger.warn(`Refund clock ${String(c._id)} not stopped (${(e as Error).message})`);
+        }
       }
-    }
+    });
     return n;
   }
 
   /** Deposit, top-up and top-up-met messages that a failed send left unsent. */
   private async reannounceAsks(old: Date, since: Date): Promise<number> {
-    const owed = await this.billModel
-      .find({
+    let n = 0;
+    await this.walk(
+      this.billModel,
+      {
         updatedAt: { $lte: old, $gte: since },
         $or: [
           { 'depositAsk.amount': { $exists: true }, 'depositAsk.announcedAt': { $exists: false } },
           { 'topupAsk.amount': { $exists: true }, 'topupAsk.announcedAt': { $exists: false } },
           { 'topupAsk.metAt': { $exists: true }, 'topupAsk.metAnnouncedAt': { $exists: false } },
         ],
-      })
-      .select('_id')
-      .limit(BATCH)
-      .lean()
-      .exec();
-    let n = 0;
-    for (const id of this.ids(owed)) n += await this.deposits.announceAsks(id);
+      },
+      async (rows) => {
+        for (const r of rows) n += await this.deposits.announceAsks(String(r._id));
+      },
+    );
     return n;
   }
 
   // ---------- tasks ----------
 
+  /**
+   * The final bill is asked for (R29) when an open ER bill's visit has left for any reason but admission, or an open admission
+   * bill's admission is discharged, and no `:final` task exists. request() itself refuses a bill that already has one.
+   */
+  private async requestFinals(old: Date, since: Date): Promise<number> {
+    let n = 0;
+    const window = { state: 'open', updatedAt: { $lte: old, $gte: since } };
+    await this.walk(this.billModel, { ...window, kind: 'er', erVisit: { $exists: true } }, async (bills) => {
+      const left = await this.visits.find({ _id: { $in: bills.map((b) => b.erVisit) }, status: 'left', leftReason: { $ne: 'admitted' } }).select('_id').lean().exec();
+      const gone = new Set(this.ids(left));
+      for (const b of bills) if (gone.has(String(b.erVisit)) && (await this.final.request('agent', String(b._id)))) n++;
+    });
+    await this.walk(this.billModel, { ...window, kind: 'admission', admission: { $exists: true } }, async (bills) => {
+      const done = await this.admissions.find({ _id: { $in: bills.map((b) => b.admission) }, status: 'discharged' }).select('_id').lean().exec();
+      const gone = new Set(this.ids(done));
+      for (const b of bills) if (gone.has(String(b.admission)) && (await this.final.request('agent', String(b._id)))) n++;
+    });
+    return n;
+  }
+
   /** Deposit, top-up, final-bill and refund tasks that are missing. A task that exists, completed or not, is never touched. */
   private async restoreTasks(old: Date, since: Date): Promise<number> {
     let n = 0;
-    const active = await this.billModel
-      .find({ state: { $in: ACTIVE_BILL_STATES }, kind: { $ne: 'er' }, updatedAt: { $lte: old, $gte: since } })
-      .select('_id kind')
-      .sort({ updatedAt: -1 })
-      .limit(BATCH)
-      .lean()
-      .exec();
-    for (const b of active) {
-      try {
-        if (await this.deposits.ensureDepositTask(String(b._id))) n++;
-        if (b.kind === 'admission' && (await this.deposits.ensureTopUpTask(String(b._id)))) n++;
-      } catch (e) {
-        this.logger.warn(`Tasks of bill ${String(b._id)} not restored (${(e as Error).message})`);
+    await this.walk(this.billModel, { state: { $in: ACTIVE_BILL_STATES }, kind: { $ne: 'er' }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const b of rows) {
+        try {
+          if (await this.deposits.ensureDepositTask(String(b._id))) n++;
+          if (b.kind === 'admission' && (await this.deposits.ensureTopUpTask(String(b._id)))) n++;
+        } catch (e) {
+          this.logger.warn(`Tasks of bill ${String(b._id)} not restored (${(e as Error).message})`);
+        }
       }
-    }
-    const asked = await this.billModel
-      .find({ state: 'open', kind: { $in: ['er', 'admission'] }, announcedAt: { $exists: true }, updatedAt: { $lte: old, $gte: since } })
-      .select('_id')
-      .limit(BATCH)
-      .lean()
-      .exec();
-    for (const id of this.ids(asked)) if (await this.final.ensureFinalTask(id)) n++;
-    const owed = await this.refundModel.find({ state: 'approved', announcedAt: { $exists: true }, updatedAt: { $lte: old, $gte: since } }).select('_id').limit(BATCH).lean().exec();
-    for (const id of this.ids(owed)) if (await this.refunds.ensureTask(id)) n++;
+    });
+    await this.walk(this.billModel, { state: 'open', kind: { $in: ['er', 'admission'] }, announcedAt: { $exists: true }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const b of rows) if (await this.final.ensureFinalTask(String(b._id))) n++;
+    });
+    await this.walk(this.refundModel, { state: 'approved', announcedAt: { $exists: true }, updatedAt: { $lte: old, $gte: since } }, async (rows) => {
+      for (const r of rows) if (await this.refunds.ensureTask(String(r._id))) n++;
+    });
     return n;
+  }
+
+  private ids(docs: { _id: unknown }[]): string[] {
+    return docs.map((d) => String(d._id));
   }
 
   // ---------- charges ----------
@@ -240,68 +296,90 @@ export class RevenueReconcileService {
 
   /**
    * Charges for things that happened while the agent was down or a message was lost, found from the last 7 days of ER, Lab,
-   * Pharmacy and Scheduling records. Each goes through the same handler the message would have, which checks the charge
-   * source first, so nothing is charged twice. Returns how many new charges appeared.
+   * Pharmacy and Scheduling records. Every page of rows is checked against the charge lines in one query (R30), and only the
+   * misses are replayed through the same handler the message would have used, which checks the charge source first, so
+   * nothing is charged twice. Returns how many new charges appeared (at most MISS_CAP per pass).
    */
   private async missedCharges(old: Date, since: Date): Promise<number> {
     const window = { updatedAt: { $lte: old, $gte: since } };
     let n = 0;
-    const attempt = async (type: string, ref: string, refType: string, message: { case: string | null; payload: Record<string, unknown> }) => {
-      if (await this.has(refType, ref)) return;
+    const full = () => n >= MISS_CAP;
+    const guard = async (what: string, id: string, fn: () => Promise<void>) => {
+      try {
+        await fn();
+      } catch (e) {
+        this.logger.warn(`Missed ${what} charge ${id} not made (${(e as Error).message})`);
+      }
+    };
+    const replay = async (type: string, refType: string, ref: string, message: { case: string | null; payload: Record<string, unknown> }) => {
       await this.capture.replay(type, message);
       if (await this.has(refType, ref)) n++;
     };
-    const each = async <T extends { _id: unknown }>(what: string, rows: T[], fn: (row: T) => Promise<void>) => {
-      for (const row of rows) {
-        try {
-          await fn(row);
-        } catch (e) {
-          this.logger.warn(`Missed ${what} charge ${String(row._id)} not made (${(e as Error).message})`);
-        }
-      }
-    };
 
     // ER visits: arrival, and the doctor's visit once seen. A visit whose bill is already settled is left alone.
-    const visits = await this.visits.find(window).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    await each('ER', visits, async (v) => {
-      const id = String(v._id);
-      if (await this.billModel.exists({ kind: 'er', erVisit: v._id, state: 'settled' }).exec()) return;
-      const caseId = v.case ? String(v.case) : null;
-      await attempt('er.arrived', id, 'er.arrived', { case: caseId, payload: { visitId: id } });
-      if (v.doctorSeenAt) await attempt('er.doctor-seen', id, 'er.doctor-seen', { case: caseId, payload: { visitId: id } });
+    await this.walk(this.visits, window, async (visits) => {
+      const noArrival = await this.uncharged('er.arrived', this.ids(visits));
+      const noDoctor = await this.uncharged('er.doctor-seen', this.ids(visits.filter((v) => v.doctorSeenAt)));
+      for (const v of visits) {
+        const id = String(v._id);
+        if (full()) return false;
+        if (!noArrival.has(id) && !noDoctor.has(id)) continue;
+        await guard('ER', id, async () => {
+          if (await this.billModel.exists({ kind: 'er', erVisit: v._id, state: 'settled' }).exec()) return;
+          const message = { case: v.case ? String(v.case) : null, payload: { visitId: id } };
+          if (noArrival.has(id)) await replay('er.arrived', 'er.arrived', id, message);
+          if (noDoctor.has(id)) await replay('er.doctor-seen', 'er.doctor-seen', id, message);
+        });
+      }
     });
 
     // Lab: tests collected or later, grouped by request.
-    const labLines = await this.labLines.find({ ...window, status: { $in: COLLECTED } }).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    const byRequest = new Map<string, string[]>();
-    for (const l of labLines) {
-      const key = String(l.request);
-      byRequest.set(key, [...(byRequest.get(key) ?? []), l.test]);
-    }
-    await each('lab', [...byRequest.entries()].map(([request, tests]) => ({ _id: request, tests })), async ({ _id, tests }) => {
-      const request = await this.labRequests.findById(_id).select('case').lean().exec();
-      if (!request) return;
-      const missing: string[] = [];
-      for (const t of tests) if (!(await this.has('lab', `${_id}:${t}`))) missing.push(t);
-      if (!missing.length) return;
-      await this.capture.replay('lab.collected', { case: String(request.case), payload: { requestId: String(_id), tests: missing } });
-      for (const t of missing) if (await this.has('lab', `${_id}:${t}`)) n++;
+    await this.walk(this.labLines, { ...window, status: { $in: COLLECTED } }, async (lines) => {
+      const missing = await this.uncharged('lab', lines.map((l) => `${l.request}:${l.test}`));
+      const byRequest = new Map<string, string[]>();
+      for (const l of lines) if (missing.has(`${l.request}:${l.test}`)) byRequest.set(String(l.request), [...(byRequest.get(String(l.request)) ?? []), l.test]);
+      for (const [requestId, tests] of byRequest) {
+        if (full()) return false;
+        await guard('lab', requestId, async () => {
+          const request = await this.labRequests.findById(requestId).select('case').lean().exec();
+          if (!request) return;
+          await this.capture.replay('lab.collected', { case: String(request.case), payload: { requestId, tests } });
+          for (const t of tests) if (await this.has('lab', `${requestId}:${t}`)) n++;
+        });
+      }
     });
 
-    // Pharmacy: lines issued.
-    const pharmacy = await this.pharmacyLines.find({ ...window, status: 'issued' }).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    await each('pharmacy', pharmacy, async (l) => {
-      const id = String(l._id);
-      if (await this.has('pharmacy.issued', id)) return;
-      const order = await this.pharmacyOrders.findById(l.order).select('case').lean().exec();
-      await attempt('pharmacy.issued', id, 'pharmacy.issued', { case: order?.case ? String(order.case) : null, payload: { lineId: id, quantity: l.issued?.quantity } });
+    // Pharmacy: lines issued, even if the doctor has stopped them since (a stopped line that was never issued has no quantity).
+    await this.walk(this.pharmacyLines, { ...window, status: { $in: ['issued', 'stopped'] }, 'issued.quantity': { $gte: 1 } }, async (lines) => {
+      const missing = await this.uncharged('pharmacy.issued', this.ids(lines));
+      for (const l of lines) {
+        const id = String(l._id);
+        if (!missing.has(id)) continue;
+        if (full()) return false;
+        await guard('pharmacy', id, async () => {
+          const order = await this.pharmacyOrders.findById(l.order).select('case').lean().exec();
+          await replay('pharmacy.issued', 'pharmacy.issued', id, { case: order?.case ? String(order.case) : null, payload: { lineId: id, quantity: l.issued?.quantity } });
+        });
+      }
     });
 
     // Scheduling: procedures done, consults seen.
-    const done = await this.procedures.find({ ...window, status: 'done' }).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    await each('procedure', done, (b) => attempt('scheduling.procedure-done', String(b._id), 'procedure', { case: b.case ? String(b.case) : null, payload: { bookingId: String(b._id) } }));
-    const seen = await this.consults.find({ ...window, status: 'seen' }).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
-    await each('consult', seen, (c) => attempt('scheduling.consult-seen', String(c._id), 'consult', { case: c.case ? String(c.case) : null, payload: { consultId: String(c._id) } }));
+    await this.walk(this.procedures, { ...window, status: 'done' }, async (rows) => {
+      const missing = await this.uncharged('procedure', this.ids(rows));
+      for (const b of rows) {
+        if (!missing.has(String(b._id))) continue;
+        if (full()) return false;
+        await guard('procedure', String(b._id), () => replay('scheduling.procedure-done', 'procedure', String(b._id), { case: b.case ? String(b.case) : null, payload: { bookingId: String(b._id) } }));
+      }
+    });
+    await this.walk(this.consults, { ...window, status: 'seen' }, async (rows) => {
+      const missing = await this.uncharged('consult', this.ids(rows));
+      for (const c of rows) {
+        if (!missing.has(String(c._id))) continue;
+        if (full()) return false;
+        await guard('consult', String(c._id), () => replay('scheduling.consult-seen', 'consult', String(c._id), { case: c.case ? String(c.case) : null, payload: { consultId: String(c._id) } }));
+      }
+    });
     return n;
   }
 
@@ -311,60 +389,61 @@ export class RevenueReconcileService {
    * Rewrites the totals of an active bill when they disagree with its records (a crash between a line insert and its total
    * leaves them behind): charges = the non-discount lines, discounts = the discount and write-off lines, payments = the
    * non-cancelled payments, refunds = the paid refunds, balance = charges - discounts - payments + refunds. A correction's
-   * lines count only once the correction is applied (a ref of `<id>:discount` belongs to correction `<id>`). A bill touched in
-   * the last 30 seconds, or with a correction being applied, is skipped. The write is guarded by the totals it read.
+   * lines count only once the correction is applied (a ref of `<id>:discount` belongs to correction `<id>`). Every bill with a
+   * record changed inside the window is checked (R30); one touched in the last 30 seconds, or with a correction being applied,
+   * is skipped. The write is guarded by the totals it read.
    */
-  private async healTotals(old: Date): Promise<number> {
-    const candidates = await this.billModel.find({ state: { $in: ACTIVE_BILL_STATES } }).select('_id totals updatedAt').sort({ updatedAt: -1 }).limit(1000).lean().exec();
+  private async healTotals(old: Date, since: Date): Promise<number> {
+    const touched = new Set<string>();
+    for (const model of [this.chargeLines, this.paymentModel, this.refundModel, this.corrections] as Model<any>[]) {
+      for (const id of (await model.distinct('bill', { updatedAt: { $gte: since } }).exec()) as unknown[]) touched.add(String(id));
+    }
+    for (const id of (await this.billModel.distinct('_id', { updatedAt: { $gte: since } }).exec()) as unknown[]) touched.add(String(id));
+    const all = [...touched];
     let healed = 0;
-    for (const bill of candidates) {
-      try {
-        if (new Date(stamp(bill, 'updatedAt') ?? 0) > old) continue;
-        if (await this.corrections.exists({ bill: bill._id, state: 'approved', appliedAt: null }).exec()) continue;
-        const [lines, payments, refunds] = await Promise.all([
-          this.chargeLines.find({ bill: bill._id }).select('amount category source createdAt').lean().exec(),
-          this.paymentModel.find({ bill: bill._id }).select('amount cancelled updatedAt').lean().exec(),
-          this.refundModel.find({ bill: bill._id, state: 'paid' }).select('amount paid updatedAt').lean().exec(),
-        ]);
-        const recent = [...lines.map((l) => stamp(l, 'createdAt')), ...payments.map((p) => stamp(p, 'updatedAt')), ...refunds.map((r) => stamp(r, 'updatedAt'))].some((t) => t && new Date(t) > old);
-        if (recent) continue;
-        const correctionIds = [...new Set(lines.filter((l) => l.source.type === 'correction').map((l) => l.source.ref.split(':')[0]))].filter((id) => isValidObjectId(id));
-        const applied = new Set(
-          correctionIds.length ? this.ids(await this.corrections.find({ _id: { $in: correctionIds.map((id) => new Types.ObjectId(id)) }, appliedAt: { $ne: null } }).select('_id').lean().exec()) : [],
-        );
-        let charges = 0;
-        let discounts = 0;
-        for (const l of lines) {
-          if (l.source.type === 'correction' && !applied.has(l.source.ref.split(':')[0])) continue;
-          if (l.category === 'discount' || l.category === 'write-off') discounts -= l.amount;
-          else charges += l.amount;
-        }
-        const paid = payments.filter((p) => !p.cancelled).reduce((sum, p) => sum + p.amount, 0);
-        const refunded = refunds.reduce((sum, r) => sum + (r.paid?.amount ?? r.amount), 0);
-        const next = { charges, discounts, payments: paid, refunds: refunded, balance: charges - discounts - paid + refunded };
-        const t = bill.totals ?? { charges: 0, discounts: 0, payments: 0, refunds: 0, balance: 0 };
-        if (t.charges === next.charges && t.discounts === next.discounts && t.payments === next.payments && t.refunds === next.refunds && t.balance === next.balance) continue;
-        const r = await this.billModel
-          .updateOne(
-            { _id: bill._id, state: { $in: ACTIVE_BILL_STATES }, 'totals.charges': t.charges, 'totals.discounts': t.discounts, 'totals.payments': t.payments, 'totals.refunds': t.refunds, 'totals.balance': t.balance },
-            { $set: { totals: next } },
-          )
-          .exec();
-        if (!r.modifiedCount) continue;
-        healed++;
-        this.logger.warn(`Bill ${String(bill._id)}: totals rewritten from its records (balance ${t.balance} to ${next.balance})`);
-        for (const fn of this.bills.onTotalsChanged) {
-          try {
-            Promise.resolve(fn(String(bill._id))).catch((e) => this.logger.warn(`A totals listener failed: ${(e as Error).message}`));
-          } catch (e) {
-            this.logger.warn(`A totals listener failed: ${(e as Error).message}`);
-          }
-        }
-      } catch (e) {
-        this.logger.warn(`Totals of bill ${String(bill._id)} not checked (${(e as Error).message})`);
-      }
+    for (let i = 0; i < all.length; i += BATCH) {
+      const candidates = await this.billModel.find({ _id: { $in: all.slice(i, i + BATCH) }, state: { $in: ACTIVE_BILL_STATES } }).select('_id totals updatedAt').lean().exec();
+      for (const bill of candidates) if (await this.healBill(bill, old)) healed++;
     }
     return healed;
+  }
+
+  private async healBill(bill: { _id: Types.ObjectId; totals?: { charges: number; discounts: number; payments: number; refunds: number; balance: number } }, old: Date): Promise<boolean> {
+    try {
+      if (new Date(stamp(bill, 'updatedAt') ?? 0) > old) return false;
+      if (await this.corrections.exists({ bill: bill._id, state: 'approved', appliedAt: null }).exec()) return false;
+      const [lines, payments, refunds] = await Promise.all([
+        this.chargeLines.find({ bill: bill._id }).select('amount category source createdAt').lean().exec(),
+        this.paymentModel.find({ bill: bill._id }).select('amount cancelled updatedAt').lean().exec(),
+        this.refundModel.find({ bill: bill._id, state: 'paid' }).select('amount paid updatedAt').lean().exec(),
+      ]);
+      const recent = [...lines.map((l) => stamp(l, 'createdAt')), ...payments.map((p) => stamp(p, 'updatedAt')), ...refunds.map((r) => stamp(r, 'updatedAt'))].some((t) => t && new Date(t) > old);
+      if (recent) return false;
+      const correctionIds = [...new Set(lines.filter((l) => l.source.type === 'correction').map((l) => l.source.ref.split(':')[0]))].filter((id) => isValidObjectId(id));
+      const applied = new Set(
+        correctionIds.length ? this.ids(await this.corrections.find({ _id: { $in: correctionIds.map((id) => new Types.ObjectId(id)) }, appliedAt: { $ne: null } }).select('_id').lean().exec()) : [],
+      );
+      const counted = lines.filter((l) => l.source.type !== 'correction' || applied.has(l.source.ref.split(':')[0]));
+      const { charges, discounts } = lineTotals(counted);
+      const paid = payments.filter((p) => !p.cancelled).reduce((sum, p) => sum + p.amount, 0);
+      const refunded = refunds.reduce((sum, r) => sum + (r.paid?.amount ?? r.amount), 0);
+      const next = { charges, discounts, payments: paid, refunds: refunded, balance: charges - discounts - paid + refunded };
+      const t = bill.totals ?? { charges: 0, discounts: 0, payments: 0, refunds: 0, balance: 0 };
+      if (t.charges === next.charges && t.discounts === next.discounts && t.payments === next.payments && t.refunds === next.refunds && t.balance === next.balance) return false;
+      const r = await this.billModel
+        .updateOne(
+          { _id: bill._id, state: { $in: ACTIVE_BILL_STATES }, 'totals.charges': t.charges, 'totals.discounts': t.discounts, 'totals.payments': t.payments, 'totals.refunds': t.refunds, 'totals.balance': t.balance },
+          { $set: { totals: next } },
+        )
+        .exec();
+      if (!r.modifiedCount) return false;
+      this.logger.warn(`Bill ${String(bill._id)}: totals rewritten from its records (balance ${t.balance} to ${next.balance})`);
+      this.bills.notifyTotalsChanged(String(bill._id));
+      return true;
+    } catch (e) {
+      this.logger.warn(`Totals of bill ${String(bill._id)} not checked (${(e as Error).message})`);
+      return false;
+    }
   }
 
   // ---------- suggested reversals ----------
@@ -375,21 +454,26 @@ export class RevenueReconcileService {
    * itself is once per line, so a replay is safe.
    */
   private async resuggestReversals(old: Date, since: Date): Promise<number> {
-    const cancelled = await this.labLines.find({ status: 'cancelled', updatedAt: { $lte: old, $gte: since } }).sort({ updatedAt: 1 }).limit(BATCH).lean().exec();
     let n = 0;
-    for (const l of cancelled) {
-      try {
-        const charged = await this.chargeLines.findOne({ 'source.type': 'lab', 'source.ref': `${l.request}:${l.test}` }).lean().exec();
-        if (!charged || charged.reversed) continue;
-        if (await this.corrections.exists({ line: charged._id, state: 'pending' }).exec()) continue;
-        const suggested = { line: charged._id, kind: 'reversal', suggested: true, state: { $ne: 'void' } };
-        if (await this.corrections.exists(suggested).exec()) continue;
-        await this.capture.suggestReversal({ billId: String(charged.bill), lineId: String(charged._id), reason: `Lab test ${l.test} was cancelled after it was charged` });
-        if (await this.corrections.exists(suggested).exec()) n++;
-      } catch (e) {
-        this.logger.warn(`Suggested reversal for lab line ${String(l._id)} not made (${(e as Error).message})`);
+    await this.walk(this.labLines, { status: 'cancelled', updatedAt: { $lte: old, $gte: since } }, async (cancelled) => {
+      const tests = new Map(cancelled.map((l) => [`${l.request}:${l.test}`, l.test as string]));
+      const charged = await this.chargeLines.find({ 'source.type': 'lab', 'source.ref': { $in: [...tests.keys()] }, reversed: false }).select('_id bill source').lean().exec();
+      if (!charged.length) return;
+      const ids = charged.map((c) => c._id);
+      const busy = new Set((await this.corrections.distinct('line', { line: { $in: ids }, state: 'pending' }).exec()).map(String));
+      const suggestedBefore = { kind: 'reversal', suggested: true, state: { $ne: 'void' } };
+      const done = new Set((await this.corrections.distinct('line', { line: { $in: ids }, ...suggestedBefore }).exec()).map(String));
+      for (const c of charged) {
+        const id = String(c._id);
+        if (busy.has(id) || done.has(id)) continue;
+        try {
+          await this.capture.suggestReversal({ billId: String(c.bill), lineId: id, reason: `Lab test ${tests.get(c.source.ref)} was cancelled after it was charged` });
+          if (await this.corrections.exists({ line: c._id, ...suggestedBefore }).exec()) n++;
+        } catch (e) {
+          this.logger.warn(`Suggested reversal for charge line ${id} not made (${(e as Error).message})`);
+        }
       }
-    }
+    });
     return n;
   }
 }

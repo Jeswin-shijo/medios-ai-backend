@@ -45,6 +45,17 @@ export interface TotalsDelta {
   refunds?: number;
 }
 
+/** What a set of lines does to the totals: discount and write-off lines move discounts, the rest move charges. One definition for corrections and reconcile. */
+export function lineTotals(lines: { category: string; amount: number }[]): { charges: number; discounts: number } {
+  let charges = 0;
+  let discounts = 0;
+  for (const l of lines) {
+    if (l.category === 'discount' || l.category === 'write-off') discounts -= l.amount;
+    else charges += l.amount;
+  }
+  return { charges, discounts };
+}
+
 const oid = (id: string, what: string): Types.ObjectId => {
   if (!isValidObjectId(id)) throw new BadRequestException(`${what} is not a valid id`);
   return new Types.ObjectId(id);
@@ -73,6 +84,15 @@ export class RevenueBillsService {
   async nextNumber(key: string, prefix: string): Promise<string> {
     const c = await this.counters.findOneAndUpdate({ key }, { $inc: { last: 1 } }, { upsert: true, new: true }).exec();
     return `${prefix}-${String(c.last).padStart(4, '0')}`;
+  }
+
+  /**
+   * When the Revenue Agent first ran against this database, stored once (R32). Reconcile never looks before it, so a first
+   * boot on a database with history does not bill past visits.
+   */
+  async startedAt(): Promise<Date> {
+    const c = await this.counters.findOneAndUpdate({ key: 'revenue-start' }, { $setOnInsert: { last: Date.now() } }, { upsert: true, new: true }).exec();
+    return new Date(c.last);
   }
 
   /** The link that makes a bill unique, as a query. */
@@ -170,6 +190,12 @@ export class RevenueBillsService {
       if (opts.onlyActive && (await this.bills.exists({ _id: id }))) throw new ConflictException('This bill is settled');
       throw new NotFoundException('Bill not found');
     }
+    this.notifyTotalsChanged(billId);
+    return bill;
+  }
+
+  /** Tells the listeners the totals changed. Never throws, never waits. */
+  notifyTotalsChanged(billId: string): void {
     for (const fn of this.onTotalsChanged) {
       try {
         Promise.resolve(fn(billId)).catch((e) => this.logger.warn(`A totals listener failed: ${(e as Error).message}`));
@@ -177,7 +203,6 @@ export class RevenueBillsService {
         this.logger.warn(`A totals listener failed: ${(e as Error).message}`);
       }
     }
-    return bill;
   }
 
   /**

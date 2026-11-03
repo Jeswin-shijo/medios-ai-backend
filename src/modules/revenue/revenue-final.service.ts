@@ -78,8 +78,10 @@ export class FinalBillService {
   }
 
   /**
-   * Asks the desk to prepare the bill: sends `revenue.final-requested` (the 60-minute clock, real time) and raises the
-   * `:final` task. Only an open ER or admission bill; a replay finds the task and does nothing. Returns true when it asked.
+   * Asks the desk to prepare the bill: writes the `:final` task first (the marker that the ask was made), then sends
+   * `revenue.final-requested` (the 60-minute clock, real time) through the never-throwing announce. A failed send leaves an
+   * open, unannounced task, which the reconcile pass re-sends (R29). Only an open ER or admission bill; a replay finds the task
+   * and does nothing. Returns true when it asked.
    */
   async request(_actor: Actor | 'agent', billId: string): Promise<boolean> {
     if (!isValidObjectId(billId)) return false;
@@ -87,23 +89,13 @@ export class FinalBillService {
     if (!bill || bill.state !== 'open' || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
     const link = finalLink(bill._id);
     if (await this.alerts.exists({ link })) return false;
-    const cfg = await this.settings.get();
-    const dueAt = new Date(Date.now() + cfg.clocks.final * 60_000);
-    // The message first: its dedupe key makes a retry after a crash safe, and the clock starts from it.
-    await this.registration.send(
-      'revenue.final-requested',
-      bill,
-      { billId: String(bill._id), billNumber: bill.number, dueAt },
-      { text: 'Final bill to prepare', dedupeKey: `final:${String(bill._id)}` },
-    );
     try {
       await this.alerts.create({ ...this.finalTaskFields(bill), link });
     } catch (e) {
       if ((e as { code?: number }).code !== 11000) throw e;
       return false;
     }
-    // The message and the task both went: the reconcile pass has nothing to re-send for this state.
-    await this.billModel.updateOne({ _id: bill._id, state: 'open' }, { $set: { announcedAt: new Date() } }).exec();
+    await this.announce(String(bill._id));
     return true;
   }
 

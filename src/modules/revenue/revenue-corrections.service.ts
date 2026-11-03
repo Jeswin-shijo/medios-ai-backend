@@ -8,7 +8,7 @@ import { ApprovalsService } from '../coordinator/approvals.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { PriceListService } from './price-list.service';
 import { PRICE_CATEGORIES, PriceCategory } from './revenue-catalogue';
-import { RevenueBillsService } from './revenue-bills.service';
+import { RevenueBillsService, lineTotals } from './revenue-bills.service';
 import { RevenueCaptureService, SuggestedReversal } from './revenue-capture.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { FinalBillService } from './revenue-final.service';
@@ -277,13 +277,7 @@ export class CorrectionsService {
 
   /** What a set of correction lines does to the totals: discount and write-off lines move discounts, the rest move charges. */
   private totalsOf(lines: { category: string; amount: number }[]): { charges: number; discounts: number } {
-    let charges = 0;
-    let discounts = 0;
-    for (const l of lines) {
-      if (l.category === 'discount' || l.category === 'write-off') discounts -= l.amount;
-      else charges += l.amount;
-    }
-    return { charges, discounts };
+    return lineTotals(lines);
   }
 
   private async finish(c: CorrectionDocument): Promise<CorrectionDocument> {

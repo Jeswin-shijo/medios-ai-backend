@@ -45,6 +45,7 @@ describe('RevenueReconcileService', () => {
   let capture: RevenueCaptureService;
   let corrections: CorrectionsService;
   let reconcile: RevenueReconcileService;
+  let approvals: ApprovalsService;
   let patient: any;
   let caseId: string;
 
@@ -73,6 +74,8 @@ describe('RevenueReconcileService', () => {
 
   before(async () => {
     await connectTestDb();
+    // The deliberate faults in these tests log warnings; keep the output clean.
+    Logger.overrideLogger(false);
   });
   after(async () => {
     await closeTestDb();
@@ -87,7 +90,7 @@ describe('RevenueReconcileService', () => {
     const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
     await escalations.ensureDefaults();
     new ClocksService(m.Clock, registry, messages, escalations);
-    const approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, events);
+    approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, events);
     const settingsService = new SettingsService(m.HospitalSettings);
     const settings = new RevenueSettingsService(settingsService);
     const rules = new RulesService(registry, settingsService, events);
@@ -106,11 +109,13 @@ describe('RevenueReconcileService', () => {
     reconcile = new RevenueReconcileService(
       reg, bills, final, payments, estimates, deposits, refunds, capture, bedDays, opd,
       m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.TaskAlertItem, m.Clock,
-      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest,
+      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission,
     );
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600995', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000095' });
     caseId = String(new Types.ObjectId());
+    // R32: the Revenue Agent first ran long ago, so the 7-day window is the lower bound unless a test says otherwise.
+    await m.CoordinatorCounter.create({ key: 'revenue-start', last: Date.now() - 30 * 86_400_000 });
     await m.PriceItem.create({ code: 'med:para500', name: 'Paracetamol 500 mg', category: 'pharmacy', price: 4, unit: 'each', active: true });
   });
 
@@ -142,7 +147,17 @@ describe('RevenueReconcileService', () => {
     assert.equal(task.title, `Collect advance ₹10,000: ${bill.number}`);
     assert.equal(first.tasks, 1);
     await m.TaskAlertItem.updateOne({ link }, { $set: { status: 'Completed' } });
-    await reconcile.reconcile();
+    // R33: the first pass touched the bill, so age it again; ensureDepositTask must really run, and must leave the task alone.
+    await age(m.Bill, bill._id);
+    let calls = 0;
+    const original = deposits.ensureDepositTask.bind(deposits);
+    deposits.ensureDepositTask = async (id: string) => {
+      calls++;
+      return original(id);
+    };
+    const second = await reconcile.reconcile();
+    assert.equal(calls, 1, 'the second pass looked at the bill');
+    assert.equal(second.tasks, 0);
     assert.equal((await m.TaskAlertItem.findOne({ link }).lean())!.status, 'Completed');
     assert.equal(await m.TaskAlertItem.countDocuments({ link }), 1);
   });
@@ -158,6 +173,7 @@ describe('RevenueReconcileService', () => {
     assert.equal((await sent('revenue.bill-final')).length, 0, 'a bill younger than 30 seconds is left alone');
     await age(m.Bill, bill._id);
     await reconcile.reconcile();
+    await age(m.Bill, bill._id);
     await reconcile.reconcile();
     const msgs = await sent('revenue.bill-final');
     assert.equal(msgs.length, 1);
@@ -177,6 +193,7 @@ describe('RevenueReconcileService', () => {
     assert.equal((await sent('revenue.bill-settled')).length, 0);
     await age(m.Bill, bill._id);
     await reconcile.reconcile();
+    await age(m.Bill, bill._id);
     await reconcile.reconcile();
     assert.equal((await sent('revenue.bill-settled')).length, 1);
     assert.ok((await fresh(bill._id))!.announcedAt);
@@ -192,6 +209,7 @@ describe('RevenueReconcileService', () => {
     assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:deposit` }), 'the task was written before the send');
     await age(m.Bill, bill._id);
     await reconcile.reconcile();
+    await age(m.Bill, bill._id);
     await reconcile.reconcile();
     const msgs = await sent('revenue.deposit-due');
     assert.equal(msgs.length, 1);
@@ -212,6 +230,7 @@ describe('RevenueReconcileService', () => {
     const totals = (await fresh(bill._id))!.totals;
     assert.deepEqual([totals.charges, totals.discounts, totals.payments, totals.refunds, totals.balance], [1500, 0, 300, 0, 1200]);
     assert.equal(r.totals, 1);
+    await age(m.Bill, bill._id);
     assert.equal((await reconcile.reconcile()).totals, 0, 'a second pass finds nothing to heal');
   });
 
@@ -248,6 +267,7 @@ describe('RevenueReconcileService', () => {
     assert.equal(await m.Clock.countDocuments({ def: 'revenue-refund', state: 'running' }), 0);
     assert.equal((await sent('revenue.refund-void')).length, 1);
     assert.ok((await m.Refund.findById(refund._id).lean())!.announcedAt);
+    await age(m.Refund, refund._id);
     await reconcile.reconcile();
     assert.equal((await sent('revenue.refund-void')).length, 1);
   });
@@ -271,9 +291,13 @@ describe('RevenueReconcileService', () => {
     const request = await m.LabRequest.create({ number: 'LR-0001', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: new Types.ObjectId(caseId), orderedBy: BY, priority: 'routine', orderedAt: new Date(), collectBy: new Date() });
     await m.LabLine.create({ request: request._id, test: 'cbc', status: 'cancelled', tatDueAt: new Date() });
     const { line } = await bills.addCharge(String(bill._id), { code: 'lab:cbc', name: 'CBC', category: 'lab', qty: 1, unitPrice: 400, source: { type: 'lab', ref: `${request._id}:cbc` }, by: { name: 'Revenue Agent' } });
-    const desk = await corrections.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'change', qty: 2, reason: 'Two vials' });
-    // The agent's own suggestion was dropped while the desk's was pending; the desk's is now decided elsewhere.
-    await m.Correction.updateOne({ _id: desk!._id }, { $set: { state: 'rejected' } });
+    // The real drop path: the desk's correction is pending when lab.cancelled arrives, so the agent's suggestion is refused.
+    const desk = await corrections.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'change', qty: 2, reason: 'Two vials' });
+    await capture.replay('lab.cancelled', { case: caseId, payload: { requestId: String(request._id), test: 'cbc' } });
+    assert.equal(await m.Correction.countDocuments({ line: line._id, kind: 'reversal' }), 0, 'the suggestion was dropped');
+    await age(m.Bill, bill._id);
+    assert.equal((await reconcile.reconcile()).reversals, 0, 'while the desk correction is pending nothing is suggested');
+    await approvals.act(ADMIN, String(desk!.approvalId), 'rejected');
     await m.Correction.collection.updateMany({}, { $set: { updatedAt: new Date(Date.now() - 120_000) } });
     await m.LabLine.collection.updateMany({}, { $set: { updatedAt: new Date(Date.now() - 120_000) } });
     await age(m.Bill, bill._id);
@@ -282,8 +306,126 @@ describe('RevenueReconcileService', () => {
     assert.equal(suggested.length, 1);
     assert.equal(suggested[0].state, 'pending');
     assert.equal(first.reversals, 1);
-    await reconcile.reconcile();
+    await age(m.Bill, bill._id);
+    assert.equal((await reconcile.reconcile()).reversals, 0);
     assert.equal(await m.Correction.countDocuments({ line: line._id, kind: 'reversal', suggested: true }), 1, 'once per line');
+  });
+
+  test('R29: a failed final-requested send is re-sent by reconcile and its clock starts', async () => {
+    const bill = await erBill(1000);
+    const restore = failing('revenue.final-requested');
+    assert.equal(await final.request('agent', String(bill._id)), true);
+    restore();
+    assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:final` }), 'the task is written first');
+    assert.equal((await sent('revenue.final-requested')).length, 0);
+    assert.equal(await m.Clock.countDocuments({ def: 'revenue-final', state: 'running' }), 0);
+    await age(m.Bill, bill._id);
+    await reconcile.reconcile();
+    assert.equal((await sent('revenue.final-requested')).length, 1);
+    assert.equal(await m.Clock.countDocuments({ def: 'revenue-final', state: 'running' }), 1);
+    assert.ok((await fresh(bill._id))!.announcedAt);
+  });
+
+  test('R29: an ER bill for a visit that already left gets its final request from reconcile', async () => {
+    const visit = await m.ErVisit.create({ number: 'ER-9001', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, mode: 'walk-in', complaint: 'chest-pain', arrivedAt: new Date(), case: new Types.ObjectId(caseId), status: 'left', leftReason: 'home' });
+    const bill = await bills.open({ kind: 'er', patientId: String(patient._id), caseId, erVisitId: String(visit._id) });
+    await age(m.Bill, bill._id);
+    await age(m.ErVisit, visit._id);
+    await reconcile.reconcile(); // charges the arrival, which touches the bill
+    await age(m.Bill, bill._id);
+    await reconcile.reconcile();
+    assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:final` }));
+    assert.equal((await sent('revenue.final-requested')).length, 1);
+    // A visit that left by admission is not asked for: its stay's own bill asks at discharge.
+    const other = await m.Patient.create({ uhid: 'MHK202600996', name: 'Asha', age: 30, gender: 'Female', phone: '9100000096' });
+    const admitted = await m.ErVisit.create({ number: 'ER-9002', patient: other._id, patientUhid: other.uhid, patientName: other.name, mode: 'walk-in', complaint: 'x', arrivedAt: new Date(), case: new Types.ObjectId(caseId), status: 'left', leftReason: 'admitted' });
+    const keep = await bills.open({ kind: 'er', patientId: String(other._id), caseId, erVisitId: String(admitted._id) });
+    await age(m.Bill, keep._id);
+    await age(m.ErVisit, admitted._id);
+    await reconcile.reconcile();
+    await age(m.Bill, keep._id);
+    await reconcile.reconcile();
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${keep._id}:final` }), 0);
+  });
+
+  test('R29: an admission bill whose admission is discharged gets its final request from reconcile', async () => {
+    const adm = await m.Admission.create({ patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'discharged', admittedAt: new Date(Date.now() - 86_400_000), dischargedAt: new Date(), admittedBy: 'Nurse' } as any);
+    const bill = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId, admissionId: String(adm._id) });
+    await age(m.Bill, bill._id);
+    await age(m.Admission, adm._id);
+    await reconcile.reconcile();
+    assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:final` }));
+  });
+
+  test('R30: a miss newer than 300 charged rows is still charged in one pass', async () => {
+    const order = await m.PharmacyOrder.create({ number: 'PO-9', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: new Types.ObjectId(caseId), setting: 'ER', orderedBy: BY, priority: 'routine', orderedAt: new Date() });
+    const anyBill = new Types.ObjectId();
+    const old = new Date(Date.now() - 2 * 3_600_000);
+    const charged = await m.PharmacyLine.insertMany(Array.from({ length: 305 }, () => ({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued', issued: { quantity: 1 } })));
+    await m.ChargeLine.insertMany(charged.map((l) => ({ bill: anyBill, code: 'med:para500', name: 'P', category: 'pharmacy', qty: 1, unitPrice: 4, amount: 4, source: { type: 'pharmacy.issued', ref: String(l._id) }, chargedAt: old, by: { id: '', name: 'Revenue Agent' } })));
+    await m.PharmacyLine.collection.updateMany({}, { $set: { updatedAt: old } });
+    const miss = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued', issued: { quantity: 2 } as any });
+    await age(m.PharmacyLine, miss._id);
+    await reconcile.reconcile();
+    assert.ok(await m.ChargeLine.exists({ 'source.type': 'pharmacy.issued', 'source.ref': String(miss._id) }));
+  });
+
+  test('R30: an issued medicine that was then stopped is still charged', async () => {
+    const order = await m.PharmacyOrder.create({ number: 'PO-10', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: new Types.ObjectId(caseId), setting: 'ER', orderedBy: BY, priority: 'routine', orderedAt: new Date() });
+    const line = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'stopped', issued: { quantity: 2 } as any });
+    await age(m.PharmacyLine, line._id);
+    await reconcile.reconcile();
+    const charge = await m.ChargeLine.findOne({ 'source.ref': String(line._id) }).lean();
+    assert.equal(charge!.amount, 8);
+    // A stopped line that was never issued has no quantity and is not charged.
+    const never = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'stopped' });
+    await age(m.PharmacyLine, never._id);
+    await reconcile.reconcile();
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': String(never._id) }), 0);
+  });
+
+  test('R32: a record older than the Revenue Agent\'s first start is never charged', async () => {
+    await m.CoordinatorCounter.updateOne({ key: 'revenue-start' }, { $set: { last: Date.now() - 100_000 } });
+    const order = await m.PharmacyOrder.create({ number: 'PO-11', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: new Types.ObjectId(caseId), setting: 'ER', orderedBy: BY, priority: 'routine', orderedAt: new Date() });
+    const before = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued', issued: { quantity: 1 } as any });
+    const after = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued', issued: { quantity: 1 } as any });
+    await age(m.PharmacyLine, before._id); // 120 s ago: before the start
+    await m.PharmacyLine.collection.updateOne({ _id: after._id }, { $set: { updatedAt: new Date(Date.now() - 50_000) } });
+    await reconcile.reconcile();
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': String(before._id) }), 0);
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': String(after._id) }), 1);
+  });
+
+  test('R31: the deposit ask is written before the task, so a failed task write is healed', async () => {
+    const bill = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId, admissionId: String(new Types.ObjectId()) });
+    await m.Bill.updateOne({ _id: bill._id }, { $set: { wardType: 'general' } });
+    const create = m.TaskAlertItem.create.bind(m.TaskAlertItem);
+    (m.TaskAlertItem as any).create = async () => {
+      throw new Error('db down');
+    };
+    await assert.rejects(deposits.raise(String(bill._id)), /db down/);
+    (m.TaskAlertItem as any).create = create;
+    assert.equal((await fresh(bill._id))!.depositAsk?.amount, 10000, 'the marker came first');
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${bill._id}:deposit` }), 0);
+    await age(m.Bill, bill._id);
+    await reconcile.reconcile();
+    assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:deposit` }));
+    await age(m.Bill, bill._id);
+    await reconcile.reconcile();
+    assert.equal((await sent('revenue.deposit-due')).length, 1);
+  });
+
+  test('R31: estimates.reannounce never throws', async () => {
+    const original = m.Estimate.findById;
+    (m.Estimate as any).findById = () => {
+      throw new Error('db down');
+    };
+    try {
+      const estimates = (reconcile as any).estimates as RevenueEstimatesService;
+      assert.equal(await estimates.reannounce(String(new Types.ObjectId())), false);
+    } finally {
+      (m.Estimate as any).findById = original;
+    }
   });
 
   test('a missing bed logs its warning once per admission, not on every tick', async () => {
