@@ -8,6 +8,7 @@ import { Bed, BedSchema } from '../modules/beds/schemas/bed.schema';
 import { Ward, WardSchema } from '../modules/beds/schemas/ward.schema';
 import { AgentRegistry } from '../modules/coordinator/agent-registry';
 import { ApprovalsService } from '../modules/coordinator/approvals.service';
+import { CasesService } from '../modules/coordinator/cases.service';
 import { ClocksService } from '../modules/coordinator/clocks.service';
 import { CoordinatorEvents } from '../modules/coordinator/coordinator-events';
 import { DEFAULT_TITLES, EscalationsService } from '../modules/coordinator/escalations.service';
@@ -59,6 +60,8 @@ import { ProcedureBooking, ProcedureBookingSchema } from '../modules/scheduling/
 import { HospitalSettings, HospitalSettingsSchema } from '../modules/settings/schemas/settings.schema';
 import { SettingsService } from '../modules/settings/settings.service';
 import { TaskAlertItem, TaskAlertItemSchema } from '../modules/tasks-alerts/schemas/task-alert.schema';
+import { TimelineEvent, TimelineEventSchema } from '../modules/timeline/schemas/timeline.schema';
+import { TimelineService } from '../modules/timeline/timeline.service';
 import { User, UserRole, UserSchema } from '../modules/users/schemas/user.schema';
 
 // Loosely typed on purpose (see seed.ts).
@@ -198,8 +201,14 @@ function wire() {
     model(RevenueSnapshot, RevenueSnapshotSchema) as never, model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, model(Payment, PaymentSchema) as never,
     model(Refund, RefundSchema) as never, model(TaskAlertItem, TaskAlertItemSchema) as never, new RevenueAiService(undefined as never),
   );
+  // The admitted patients' cases, opened or joined as the Bed Agent does on a bed assignment (F3). No case closes while the
+  // seed runs: an empty registry has no close checks (as in seedScheduling).
+  const cases = new CasesService(
+    model(Case, CaseSchema) as never, model(CoordinatorCounter, CoordinatorCounterSchema) as never, messages, new AgentRegistry(),
+    new TimelineService(model(TimelineEvent, TimelineEventSchema) as never),
+  );
   registration.onModuleInit();
-  return { escalations, registration, bills, prices, capture, final, payments, opd, estimates, deposits, bedDays, refunds, corrections, overview };
+  return { escalations, registration, bills, prices, capture, final, payments, opd, estimates, deposits, bedDays, refunds, corrections, overview, cases };
 }
 
 /**
@@ -208,7 +217,8 @@ function wire() {
  * angiography, James Wilson's HDU stay with a top-up due, David Raj's final bill waiting with a needs-price line, settled bills
  * with receipts, a refund due, a discount waiting for approval, the clinic day's outpatient fees and a walk-in), plus a week
  * of hourly snapshots. Run last, after seedScheduling: it reads the visits, admissions, tests, medicines and appointments the
- * other seeds made and writes none of them. The Revenue Agent "starts" at this moment (R36), so the reconcile pass never
+ * other seeds made and writes none of them; the one Coordinator write is the admitted patients' cases, opened or joined as a
+ * bed assignment does. The Revenue Agent "starts" at this moment (R36), so the reconcile pass never
  * back-bills the rest of the clinic day. Money times use the clinic clock; everything else the real clock, so nothing is after `nowMs`.
  * `nowMs` is for tests, which pin the clock (Date) to it as well: the live services stamp their own records.
  */
@@ -235,7 +245,6 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   const pharmacyOrders = model(PharmacyOrder, PharmacyOrderSchema);
   const pharmacyLines = model(PharmacyLine, PharmacyLineSchema);
   const admissions = model(Admission, AdmissionSchema);
-  const cases = model(Case, CaseSchema);
   const bookings = model(ProcedureBooking, ProcedureBookingSchema);
   const messagesModel = model(AgentMessage, AgentMessageSchema);
   const clocks = model(Clock, ClockSchema);
@@ -356,10 +365,22 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
     }
     return (await billModel.findOne({ kind: 'er', erVisit: visit._id }).lean<any>()) ?? null;
   };
-  /** The assignment of a bed: the admission bill, the bed days so far, the estimate and the deposit task. */
+  /**
+   * The assignment of a bed: the admission bill, the bed days so far, the estimate and the deposit task. First the patient's
+   * case is opened or joined (lifted to ipd) with the admission on it, as the Bed Agent does on bed.assigned, so the bill, its
+   * messages and its clocks carry the case from the start (a clock is matched on its case and could not be stopped otherwise).
+   */
   const admit = async (admission: any) => {
-    const c = await cases.findOne({ patient: admission.patient, kind: 'ipd', state: 'open' }).sort({ number: -1 }).select('_id').lean<any>();
-    await (w.bedDays as any).onAssigned({ case: c ? String(c._id) : null, payload: { admissionId: String(admission._id) } });
+    const { case: c } = await w.cases.openOrJoin({
+      patientId: String(admission.patient),
+      patientUhid: admission.patientUhid,
+      patientName: admission.patientName,
+      kind: 'ipd',
+      priority: 'medium',
+      openedBy: 'bed',
+    });
+    await w.cases.addRefs(String(c._id), { admissionId: String(admission._id) });
+    await (w.bedDays as any).onAssigned({ case: String(c._id), payload: { admissionId: String(admission._id) } });
     const bill = await billModel.findOne({ kind: 'admission', admission: admission._id }).lean<any>();
     if (!bill) throw new Error(`Revenue seed: no admission bill for ${admission.patientName}`);
     return bill;

@@ -101,7 +101,7 @@ describe('seedRevenue', () => {
       m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.TaskAlertItem, m.Clock,
       m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission,
     );
-    return { reconcile, bedDays };
+    return { reconcile, bedDays, registry };
   };
 
   const billOf = async (uhid: string, kind?: string) => {
@@ -280,6 +280,29 @@ describe('seedRevenue', () => {
     assert.equal(await m.AgentMessage.countDocuments({ type: 'revenue.final-requested', 'payload.billId': String(bill._id) }).exec(), 1);
     const clock = (await m.Clock.findOne({ def: 'revenue-final', ref: String(bill._id) }).lean<any>().exec())!;
     assert.equal(clock?.state, 'running');
+  });
+
+  test('both admission bills carry the patient\'s ipd case, as a bed assignment gives them, and its Bill settled check fails while money is due', async () => {
+    const { registry } = await reconcileWorld();
+    const check = registry.closeChecks().find((c) => c.agent === 'revenue' && c.label === 'Bill settled')!;
+    assert.ok(check, 'the Revenue close check');
+    for (const [uhid, clockDef] of [['MHK202500327', 'revenue-topup'], ['MHK202500325', 'revenue-final']] as const) {
+      const bill = await billOf(uhid, 'admission');
+      assert.ok(bill.case, `${bill.number} has a case`);
+      const c = (await m.Case.findById(bill.case).lean<any>().exec())!;
+      assert.deepEqual([String(c.patient), c.kind, c.state], [String(bill.patient), 'ipd', 'open'], bill.number);
+      assert.ok(c.agents.includes('bed'), `${bill.number} case joined by the bed agent`);
+      assert.equal(String(c.refs?.admissionId), String(bill.admission), `${bill.number} case refers to the admission`);
+      assert.equal(await m.Case.countDocuments({ patient: bill.patient, state: 'open' }).exec(), 1, `${bill.number}: one open case`);
+      assert.ok(bill.totals.balance !== 0 || bill.state !== 'settled', `${bill.number} has money due`);
+      assert.equal(await check.check(String(bill.case)), 'fail', `${bill.number} close check`);
+      // Its messages and clocks carry the case, so the clock can be stopped and its escalation acknowledged.
+      const sent = await m.AgentMessage.find({ from: 'revenue', 'payload.billId': String(bill._id) }).lean<any[]>().exec();
+      assert.ok(sent.length >= 1, bill.number);
+      for (const msg of sent) assert.equal(String(msg.case), String(bill.case), `${bill.number} ${msg.type}`);
+      const clock = (await m.Clock.findOne({ def: clockDef, ref: String(bill._id) }).lean<any>().exec())!;
+      assert.equal(String(clock.case), String(bill.case), `${bill.number} ${clockDef} clock`);
+    }
   });
 
   test('bills in every state: settled with receipts, a refund due, a discount waiting, outpatients and a walk-in', async () => {
