@@ -198,7 +198,7 @@ export class FinalBillService {
     if (bill.admission && (await this.admissions.exists({ _id: bill.admission, status: 'active' }))) {
       out.push({ kind: 'admission', text: 'The patient is still admitted' });
     }
-    const unpriced = await this.chargeLines.find({ bill: bill._id, needsPrice: true }).select('name').lean().exec();
+    const unpriced = await this.chargeLines.find({ bill: bill._id, needsPrice: true, reversed: { $ne: true } }).select('name').lean().exec();
     if (unpriced.length) out.push({ kind: 'needs-price', text: `${unpriced.length} charge${unpriced.length === 1 ? ' has' : 's have'} no price: ${list(unpriced.map((l) => l.name))}` });
     return out;
   }
@@ -274,7 +274,7 @@ export class FinalBillService {
       const appointment = await this.appointments.findById(bill.appointment).select('status').lean().exec();
       if (appointment?.status !== 'Completed') return false;
       // R20: an unpriced line is not "nothing due"; the desk prices it or settles by hand.
-      if (await this.chargeLines.exists({ bill: bill._id, needsPrice: true })) return false;
+      if (await this.chargeLines.exists({ bill: bill._id, needsPrice: true, reversed: { $ne: true } })) return false;
       await this.settle('agent', String(bill._id));
       return true;
     } catch (e) {

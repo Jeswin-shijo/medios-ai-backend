@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Types } from 'mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentKey, MessageTypeDef } from '../coordinator/coordinator-types';
@@ -17,6 +18,8 @@ import { CorrectionsService } from './revenue-corrections.service';
 import { FinalBillService } from './revenue-final.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
+import { RevenueAiService } from './revenue-ai';
+import { RevenueOverviewService } from './revenue-overview.service';
 import { RevenueSettingsService } from './revenue-settings.service';
 
 const ADMIN = { id: 'a1', name: 'Admin', role: UserRole.ADMIN };
@@ -38,6 +41,15 @@ describe('CorrectionsService', () => {
     if (opts.final) await final.prepare(ADMIN, String(b._id));
     return { bill: b, line };
   };
+  /** An OPD bill for a Completed visit with one ₹0 Needs price line (charges 0). */
+  const opdNeedsPrice = async () => {
+    const visit = await m.Appointment.create({ uhid: patient.uhid, patientName: patient.name, age: 62, gender: 'Male', phone: '9100000082', time: '09:30 AM', date: isoDate(clinicNow()), type: 'Consultation', condition: 'Fever', status: 'Completed' });
+    const b = await bills.open({ kind: 'opd', patientId: String(patient._id), appointmentId: String(visit._id) });
+    const { line } = await bills.addCharge(String(b._id), { code: 'lab:blood-culture', name: 'Blood culture', category: 'lab', qty: 1, unitPrice: 0, needsPrice: true, source: { type: 'manual', ref: String(new Types.ObjectId()) }, by: { name: 'T' } });
+    return { bill: b, line };
+  };
+  const overviewSvc = () => new RevenueOverviewService(m.RevenueSnapshot, m.Bill, m.ChargeLine, m.Payment, m.Refund, m.TaskAlertItem, new RevenueAiService({} as any));
+  const needsPriceWarning = async (billId: unknown) => (await final.prepare(ADMIN, String(billId))).warnings.filter((w) => w.kind === 'needs-price');
   const fresh = (id: unknown) => m.Bill.findById(id).lean();
   const totals = async (id: unknown) => ({ ...(await fresh(id))!.totals });
   const decide = (c: any, d: 'approved' | 'rejected') => approvals.act(ADMIN, String(c.approvalId), d);
@@ -211,6 +223,84 @@ describe('CorrectionsService', () => {
     await decide(c, 'approved');
     assert.deepEqual(await totals(bill._id), { charges: 8000, discounts: 0, payments: 0, refunds: 0, balance: 8000 });
     assert.equal((await m.ChargeLine.findById(line._id).lean())!.amount, 5000);
+  });
+
+  test('R44: an approved price change on a Needs price line clears the flag, so the Prepare warning, the overview and R20 stop seeing it', async () => {
+    const { bill, line } = await opdNeedsPrice();
+    const overview = overviewSvc();
+    assert.equal(await final.autoSettleOpd(String(bill._id)), false, 'R20 holds the bill while a line needs a price');
+    assert.equal((await overview.overview()).needsPrice.length, 1);
+    assert.equal((await needsPriceWarning(bill._id)).length, 1);
+    const c = await svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 1200, reason: 'Outside lab price' });
+    await decide(c, 'approved');
+    const original = await m.ChargeLine.findById(line._id).lean();
+    assert.equal(original!.needsPrice, false);
+    assert.equal(original!.amount, 0, 'the original line keeps its money; the change is its own line');
+    assert.deepEqual(original!.corrections.map(String), [String(c._id)], 'the correction stays linked');
+    assert.equal((await m.ChargeLine.findOne({ 'source.ref': String(c._id) }).lean())!.amount, 1200);
+    assert.deepEqual(await totals(bill._id), { charges: 1200, discounts: 0, payments: 0, refunds: 0, balance: 1200 });
+    assert.deepEqual((await overview.overview()).needsPrice, []);
+    assert.deepEqual(await needsPriceWarning(bill._id), []);
+    await bills.adjust(String(bill._id), { payments: 1200 });
+    assert.equal(await final.autoSettleOpd(String(bill._id)), true, 'R20 no longer holds the bill');
+    assert.equal((await fresh(bill._id))!.state, 'settled');
+  });
+
+  test('R44: a change to ₹0 on a Needs price line confirms it as free: the flag clears, no money moves and it is not voided', async () => {
+    const { bill, line } = await opdNeedsPrice();
+    const before = await totals(bill._id);
+    const c = await svc.request(DESK, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 0, reason: 'Free of charge' });
+    await decide(c, 'approved');
+    const done = await m.Correction.findById(c._id).lean();
+    assert.equal(done!.state, 'approved');
+    assert.ok(done!.appliedAt);
+    assert.equal(done!.delta, 0);
+    const original = await m.ChargeLine.findById(line._id).lean();
+    assert.equal(original!.needsPrice, false);
+    assert.deepEqual(original!.corrections.map(String), [String(c._id)]);
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.type': 'correction' }), 0, 'no money line is written');
+    assert.deepEqual(await totals(bill._id), before);
+    assert.deepEqual((await overviewSvc().overview()).needsPrice, []);
+    assert.equal(await final.autoSettleOpd(String(bill._id)), true, 'nothing due and nothing unpriced: R20 settles it');
+    // An admin's own confirmation applies at once; an unchanged amount on a priced line is still voided.
+    const er = await erBill();
+    const { line: free } = await bills.addCharge(String(er.bill._id), { code: 'cons:gauze', name: 'Gauze', category: 'consumables', qty: 2, unitPrice: 0, needsPrice: true, source: { type: 'manual', ref: String(new Types.ObjectId()) }, by: { name: 'T' } });
+    const own = await svc.request(ADMIN, { billId: String(er.bill._id), lineId: String(free._id), kind: 'change', unitPrice: 0, reason: 'Given free' });
+    assert.ok(own!.appliedAt);
+    assert.equal((await m.ChargeLine.findById(free._id).lean())!.needsPrice, false);
+    const same = await svc.request(ADMIN, { billId: String(er.bill._id), lineId: String(er.line._id), kind: 'change', unitPrice: 5000, reason: 'Same' });
+    assert.equal(same!.state, 'void');
+    assert.equal((await totals(er.bill._id)).charges, 5000);
+  });
+
+  test('R44: a failed flag clear never undoes the applied price, and confirming the price again clears it', async () => {
+    const { bill, line } = await opdNeedsPrice();
+    const realUpdate = m.ChargeLine.updateOne.bind(m.ChargeLine);
+    (m.ChargeLine as any).updateOne = (filter: any, update: any, ...rest: any[]) => {
+      if (update?.$set?.needsPrice === false) throw new Error('flag write failed');
+      return (realUpdate as any)(filter, update, ...rest);
+    };
+    let c: any;
+    try {
+      c = await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 800, reason: 'Outside lab price' });
+    } finally {
+      (m.ChargeLine as any).updateOne = realUpdate;
+    }
+    assert.ok(c.appliedAt, 'the correction is applied, not rolled back');
+    assert.deepEqual(await totals(bill._id), { charges: 800, discounts: 0, payments: 0, refunds: 0, balance: 800 });
+    assert.equal((await m.ChargeLine.findById(line._id).lean())!.needsPrice, true);
+    const again = await svc.request(ADMIN, { billId: String(bill._id), lineId: String(line._id), kind: 'change', unitPrice: 800, reason: 'Price confirmed' });
+    assert.ok(again!.appliedAt);
+    assert.equal(again!.delta, 0);
+    assert.equal((await m.ChargeLine.findById(line._id).lean())!.needsPrice, false);
+    assert.equal((await totals(bill._id)).charges, 800, 'confirming moves no money');
+  });
+
+  test('a reversed line no longer counts as needing a price in the Prepare warning or R20', async () => {
+    const { bill, line } = await opdNeedsPrice();
+    await m.ChargeLine.updateOne({ _id: line._id }, { $set: { reversed: true } });
+    assert.deepEqual(await needsPriceWarning(bill._id), []);
+    assert.equal(await final.autoSettleOpd(String(bill._id)), true);
   });
 
   test('an admin\'s own write-off applies at once and settles a zero balance', async () => {

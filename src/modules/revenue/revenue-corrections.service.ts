@@ -319,7 +319,8 @@ export class CorrectionsService {
       const bill = await this.bills.get(billId);
       const computed = bill.state === 'settled' ? 'This bill is settled' : await this.compute(c, bill);
       if (typeof computed === 'string') return this.void(c, computed);
-      delta = computed[0].amount;
+      // An empty list is a price confirmed as it is (R44: a Needs price line confirmed free): no money moves.
+      delta = computed[0]?.amount ?? 0;
       const made: ChargeLineDocument[] = [];
       let raced = false;
       try {
@@ -346,7 +347,7 @@ export class CorrectionsService {
         if ((e as { code?: number }).code !== 11000) throw e;
         raced = true;
       }
-      if (!raced) {
+      if (!raced && computed.length) {
         try {
           after = await this.bills.adjust(billId, this.totalsOf(computed), { onlyActive: true });
         } catch (e) {
@@ -360,6 +361,8 @@ export class CorrectionsService {
       await this.lines.updateOne({ _id: c.line }, { $addToSet: { corrections: c._id }, ...(c.kind === 'reversal' ? { $set: { reversed: true } } : {}) }).exec();
     }
     const done = await this.corrections.findOneAndUpdate({ _id: c._id, state: 'approved' }, { $set: { appliedAt: new Date(), delta } }, { new: true }).exec();
+    // R44: an applied change prices the line. Runs after the commit and never throws (a throw here would roll back an applied correction).
+    if (done && c.kind === 'change' && c.line) await this.clearNeedsPrice(c);
     // R22: a write-off that brings the balance to 0 settles the bill, through the guarded settle. A failure is logged, not thrown.
     if (c.kind === 'writeoff') {
       const bill = after ?? (await this.bills.get(billId));
@@ -372,6 +375,18 @@ export class CorrectionsService {
       }
     }
     return done ?? c;
+  }
+
+  /**
+   * Clears Needs price on the corrected line (R44). The flag is metadata, not money, so the original line's amount is untouched
+   * and the correction stays linked. Never throws: a failure is logged and the line keeps the flag until its price is confirmed again.
+   */
+  private async clearNeedsPrice(c: CorrectionDocument): Promise<void> {
+    try {
+      await this.lines.updateOne({ _id: c.line, needsPrice: true }, { $set: { needsPrice: false } }).exec();
+    } catch (e) {
+      this.logger.warn(`Correction ${String(c._id)} applied, but its line still says Needs price (${(e as Error).message})`);
+    }
   }
 
   /** Undoes a failed apply, best effort: totals put back, lines removed, link cleared, state `pending` again. */
@@ -398,7 +413,7 @@ export class CorrectionsService {
     return v ?? c;
   }
 
-  /** The lines to write, from the money as it is now; a string means "cannot apply" (the reason). The first line is the main one. */
+  /** The lines to write, from the money as it is now; a string means "cannot apply" (the reason). The first line is the main one; none means nothing moves (R44). */
   private async compute(c: CorrectionDocument, bill: BillDocument): Promise<{ ref: string; amount: number; category: LineCategory; name: string }[] | string> {
     const ref = String(c._id);
     let line: ChargeLineDocument | null = null;
@@ -433,6 +448,8 @@ export class CorrectionsService {
       case 'change': {
         if (line!.reversed) return 'The charge is already reversed';
         const now = (c.qty ?? qty) * (c.unitPrice ?? price);
+        // R44: a price given for a Needs price line confirms it, even unchanged (₹0 = free): nothing to write, the flag clears.
+        if (now === charge && line!.needsPrice && c.unitPrice !== undefined) return [];
         if (now === charge) return 'The new amount is the same as the old one';
         return [{ ref, amount: now - charge, category: line!.category, name: `Correction: ${line!.name}`.slice(0, 120) }];
       }
