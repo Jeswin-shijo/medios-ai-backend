@@ -43,8 +43,8 @@ describe('DashboardService billing numbers', () => {
     await pay(b, 300, { cancelled: { at: day, by: BY, reason: 'oops' } });
     await pay(b, 9999, { at: new Date(2026, 9, 19, 23, 0, 0) });
     await Invoice().collection.insertMany([
-      { billDate: displayDate(day), paidAmount: 200, totalAmount: 200, status: 'Paid' },
-      { billDate: '01 Jan 2020', paidAmount: 777, totalAmount: 777, status: 'Paid' },
+      { billNumber: 'INV-T001', billDate: displayDate(day), paidAmount: 200, totalAmount: 200, status: 'Paid' },
+      { billNumber: 'INV-T002', billDate: '01 Jan 2020', paidAmount: 777, totalAmount: 777, status: 'Paid' },
     ]);
     const out = await build().getDashboardStats(day, UserRole.ADMIN);
     assert.equal(out.billing.revenue, 1700);
@@ -54,7 +54,7 @@ describe('DashboardService billing numbers', () => {
     await bill();
     await bill({ kind: 'opd', erVisit: undefined });
     await bill({ openedAt: new Date(2026, 9, 18, 9, 0, 0) });
-    await Invoice().collection.insertMany([{ billDate: displayDate(day), paidAmount: 0, totalAmount: 50, status: 'Unpaid' }]);
+    await Invoice().collection.insertMany([{ billNumber: 'INV-T003', billDate: displayDate(day), paidAmount: 0, totalAmount: 50, status: 'Unpaid' }]);
     const out = await build().getDashboardStats(day, UserRole.ADMIN);
     assert.equal(out.billing.invoices, 3);
   });
