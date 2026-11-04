@@ -200,6 +200,20 @@ describe('RefundsService', () => {
     assert.equal((await m.TaskAlertItem.findOne({ link: `revenue-refund:${r._id}` }).lean())!.status, 'Completed');
     assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled');
   });
+  test('an open OPD bill in credit closes by Prepare, then a refund: the refund is refused until the bill is final, then paid and the bill settles', async () => {
+    const b = await bills.open({ kind: 'opd', patientId: String(patient._id), appointmentId: String(new Types.ObjectId()) });
+    await bills.adjust(String(b._id), { charges: 300, payments: 800 }); // the patient paid more than the bill
+    await assert.rejects(() => svc.request(DESK, String(b._id)), /Prepare the final bill first/);
+    await assert.rejects(() => final.settle(DESK, String(b._id)), /The balance is not zero/);
+    const prepared = await final.prepare(DESK, String(b._id));
+    assert.equal(prepared.view.bill.state, 'final');
+    const r = await svc.request(ADMIN, String(b._id));
+    assert.deepEqual([r.state, r.amount], ['approved', 500]);
+    await svc.pay(DESK, String(r._id), { mode: 'cash' });
+    assert.deepEqual(await totals(b._id), { charges: 300, discounts: 0, payments: 800, refunds: 500, balance: 0 });
+    assert.equal((await m.Bill.findById(b._id).lean())!.state, 'settled', 'R27: a refund that leaves 0 settles the bill');
+  });
+
   test('listPending shows a waiting refund with its bill, and not a paid one', async () => {
     const b = await owing();
     const r = await svc.request(DESK, String(b._id));

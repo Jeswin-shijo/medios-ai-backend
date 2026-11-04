@@ -122,7 +122,7 @@ export class PaymentsService {
     const { from, to } = clinicDayWindow(day);
     const rows = await this.payments.find({ at: { $gte: from, $lt: to } }).sort({ at: -1, _id: -1 }).lean().exec();
     const billModel = this.payments.db.model<BillDocument>(Bill.name);
-    const found = await billModel.find({ _id: { $in: [...new Set(rows.map((r) => String(r.bill)))] } }).select('number kind patientName patientUhid').lean().exec();
+    const found = await billModel.find({ _id: { $in: [...new Set(rows.map((r) => String(r.bill)))] } }).select('number kind state patientName patientUhid').lean().exec();
     const byId = new Map(found.map((b) => [String(b._id), b]));
     return rows.map((p) => {
       const b = byId.get(String(p.bill));
@@ -132,6 +132,8 @@ export class PaymentsService {
         billId: String(p.bill),
         billNumber: b?.number ?? '',
         billKind: b?.kind ?? '',
+        // The bill's state now: no cancel on a settled bill (R18), and the balance worded by it (R39).
+        billState: b?.state ?? '',
         patientName: b?.patientName ?? '',
         patientUhid: b?.patientUhid ?? '',
         amount: p.amount,
@@ -164,6 +166,8 @@ export class PaymentsService {
       receivedBy: payment.by.name,
       at: payment.at,
       balance: bill.totals?.balance ?? 0,
+      // The bill's state now, so a reprint words the balance as the bill stands (R39).
+      billState: bill.state,
       cancelled: payment.cancelled ? { at: payment.cancelled.at, by: payment.cancelled.by.name, reason: payment.cancelled.reason } : null,
     };
   }

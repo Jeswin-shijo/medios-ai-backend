@@ -136,7 +136,11 @@ describe('PaymentsService', () => {
     assert.equal(r.kind, 'deposit');
     assert.equal(r.receivedBy, 'Front Desk');
     assert.equal(r.balance, 3500);
+    assert.equal(r.billState, 'open');
     assert.equal(r.cancelled, null);
+    // A reprint words the balance by the bill's state now (P16-a).
+    await final.prepare(DESK, String(b._id));
+    assert.equal((await svc.receipt(String(p._id))).billState, 'final');
     await assert.rejects(svc.receipt(String(new Types.ObjectId())), /not found/i);
   });
 
@@ -183,8 +187,15 @@ describe('PaymentsService', () => {
     assert.equal(rows[0].billKind, 'er');
     assert.equal(rows[0].patientName, b.patientName);
     assert.equal(rows[0].patientUhid, b.patientUhid);
+    assert.equal(rows[0].billState, 'open');
     assert.equal(rows[0].cancelled, false);
     assert.equal(rows[1].cancelled, true);
+    // A settled bill's receipts say so, so the admin is not offered a cancel the API refuses.
+    const paid = await bill(300);
+    const full = await svc.record(DESK, String(paid._id), { amount: 300, mode: 'cash', kind: 'settlement' });
+    await final.prepare(DESK, String(paid._id));
+    await final.settle(DESK, String(paid._id));
+    assert.equal((await svc.list()).find((r) => r.receiptNumber === full.receiptNumber)!.billState, 'settled');
     assert.equal(rows[1].cancelledReason, 'Wrong amount');
     assert.equal((await svc.list({ day: '2001-01-01' })).length, 1);
     await assert.rejects(() => svc.list({ day: '2001-02-31' }), BadRequestException);
