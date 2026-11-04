@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
+import { PatientEvents } from './patient-events';
 import { PatientsService } from './patients.service';
 
 describe('PatientsService.update', () => {
@@ -45,6 +46,22 @@ describe('PatientsService.update', () => {
     const out = await service.update(id, { detailsPending: false, phone: '9100000002' });
     assert.equal(out.detailsPending, false);
     assert.equal(await pending(id), false);
+  });
+
+  test('a change of name or UHID is announced once; other changes are not', async () => {
+    const events = new PatientEvents();
+    const seen: string[] = [];
+    events.detailsChanged$.subscribe((c) => seen.push(c.id));
+    service = new PatientsService(m.Patient, events);
+    const id = await placeholder();
+    await service.update(id, { age: 41 });
+    assert.deepEqual(seen, [], 'the age is not a name');
+    await service.update(id, { name: 'Ravi Kumar', phone: '9100000001' });
+    assert.deepEqual(seen, [id]);
+    await service.update(id, { name: 'Ravi Kumar', phone: '9100000002' });
+    assert.deepEqual(seen, [id], 'the same name again is no change');
+    await service.update(id, { uhid: 'MHK202600999' });
+    assert.deepEqual(seen, [id, id]);
   });
 
   test('a patient who was never a placeholder is left as is', async () => {

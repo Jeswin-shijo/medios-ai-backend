@@ -27,6 +27,7 @@ import { RevenueOverviewService } from './revenue-overview.service';
 import { RevenueController } from './revenue.controller';
 import { RevenueScheduler } from './revenue.scheduler';
 import { AppointmentsModule } from '../appointments/appointments.module';
+import { PatientsModule } from '../patients/patients.module';
 import { OpdModule } from '../opd/opd.module';
 import { Appointment, AppointmentSchema } from '../appointments/schemas/appointment.schema';
 import { OpDoctor, OpDoctorSchema } from '../opd/schemas/op-doctor.schema';
@@ -81,6 +82,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     SettingsModule,
     CoordinatorModule, // the counter model
     AppointmentsModule, // AppointmentEvents
+    PatientsModule, // PatientEvents: a bill follows the patient's name (final I7)
     OpdModule,
     AiModule,
   ],

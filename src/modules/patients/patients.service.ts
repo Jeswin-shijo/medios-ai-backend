@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
+import { PatientEvents } from './patient-events';
 import { Patient, PatientDocument } from './schemas/patient.schema';
 import { CreatePatientDto } from './dto/create-patient.dto';
 import { escapeRegex } from '../../common/utils/escape-regex';
@@ -15,6 +16,8 @@ const hasRealDetails = (p: { name?: string; phone?: string }) => !!p.phone?.trim
 export class PatientsService {
   constructor(
     @InjectModel(Patient.name) private patientModel: Model<PatientDocument>,
+    /** Absent only where a service is built by hand (seeds, specs). */
+    private readonly events?: PatientEvents,
   ) {}
 
   async findAll(query: {
@@ -101,11 +104,15 @@ export class PatientsService {
 
   async update(idOrUhid: string, updates: Partial<Patient>): Promise<PatientDocument> {
     const patient = await this.findOne(idOrUhid);
+    const before = { name: patient.name, uhid: patient.uhid };
     Object.assign(patient, updates);
     // An unknown ER patient stops being a placeholder once it has a real name and a phone,
     // unless the update says otherwise.
     if (patient.detailsPending && updates.detailsPending === undefined && hasRealDetails(patient)) patient.detailsPending = false;
-    return patient.save();
+    const saved = await patient.save();
+    // Copies of the name and UHID (Revenue's bills) follow the record.
+    if (saved.name !== before.name || saved.uhid !== before.uhid) this.events?.detailsChanged({ id: String(saved._id) });
+    return saved;
   }
 
   async remove(idOrUhid: string): Promise<{ success: boolean; message: string }> {

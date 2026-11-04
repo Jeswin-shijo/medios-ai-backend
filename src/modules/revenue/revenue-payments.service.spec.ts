@@ -10,6 +10,8 @@ import { CoordinatorEvents } from '../coordinator/coordinator-events';
 import { EscalationsService } from '../coordinator/escalations.service';
 import { MessagesService } from '../coordinator/messages.service';
 import { ER_MESSAGE_TYPES } from '../er/er-coordinator.registration';
+import { PatientEvents } from '../patients/patient-events';
+import { PatientsService } from '../patients/patients.service';
 import { SettingsService } from '../settings/settings.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { FinalBillService } from './revenue-final.service';
@@ -136,6 +138,34 @@ describe('PaymentsService', () => {
     assert.equal(r.balance, 3500);
     assert.equal(r.cancelled, null);
     await assert.rejects(svc.receipt(String(new Types.ObjectId())), /not found/i);
+  });
+
+  test('I7: an ER placeholder filled in later shows the real name on the bill view, the list and its search, the receipt and the final bill', async () => {
+    const events = new PatientEvents();
+    const listening = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, events);
+    listening.onModuleInit();
+    const patients = new PatientsService(m.Patient, events);
+    const unknown = await m.Patient.create({ uhid: 'MHK202600990', name: 'Unknown male, ER-0012', age: 40, gender: 'Male', phone: '', detailsPending: true });
+    const other = await bill(); // Ravi Kumar's bill is left alone
+    const b = await bills.open({ kind: 'er', patientId: String(unknown._id), erVisitId: String(new Types.ObjectId()) });
+    await bills.adjust(String(b._id), { charges: 1200 });
+    const p = await svc.record(DESK, String(b._id), { amount: 200, mode: 'cash', kind: 'part' });
+    assert.equal((await svc.receipt(String(p._id))).patientName, 'Unknown male, ER-0012');
+    try {
+      await patients.update(String(unknown._id), { name: 'Arjun Mehta', phone: '9100000090' });
+      // The listener is not waited for by the patients API.
+      for (let i = 0; i < 100 && (await fresh(b._id))!.patientName !== 'Arjun Mehta'; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await bills.view(String(b._id))).bill.patientName, 'Arjun Mehta');
+      assert.deepEqual((await bills.list({ q: 'Arjun' })).map((x) => x.number), [b.number]);
+      assert.equal((await bills.list({ q: 'Unknown male' })).length, 0);
+      assert.equal((await svc.receipt(String(p._id))).patientName, 'Arjun Mehta');
+      assert.equal((await svc.list()).find((r) => r.receiptNumber === p.receiptNumber)!.patientName, 'Arjun Mehta');
+      assert.equal((await final.prepare(DESK, String(b._id))).view.bill.patientName, 'Arjun Mehta');
+      assert.equal((await fresh(b._id))!.patientUhid, 'MHK202600990');
+      assert.equal((await fresh(other._id))!.patientName, 'Ravi Kumar');
+    } finally {
+      listening.onModuleDestroy();
+    }
   });
 
   test('list gives the clinic day\'s payments newest first with the bill and patient, and shows cancelled ones (R35)', async () => {

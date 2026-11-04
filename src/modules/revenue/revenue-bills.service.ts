@@ -1,8 +1,10 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
+import { Subscription } from 'rxjs';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
+import { PatientEvents } from '../patients/patient-events';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { PriceCategory } from './revenue-catalogue';
 import { ACTIVE_BILL_STATES, Bill, BillDocument, BillKind, BillState } from './schemas/bill.schema';
@@ -63,8 +65,9 @@ const oid = (id: string, what: string): Types.ObjectId => {
 
 /** Bills and their charge lines. Totals change only through `adjust`, one atomic $inc. */
 @Injectable()
-export class RevenueBillsService {
+export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RevenueBillsService.name);
+  private patientSub?: Subscription;
 
   /** Fired after every totals change. Task 8 registers here. */
   onTotalsChanged: ((billId: string) => void)[] = [];
@@ -78,7 +81,39 @@ export class RevenueBillsService {
     @InjectModel(Estimate.name) private readonly estimates: Model<EstimateDocument>,
     @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>,
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
+    /** Absent only where the service is built by hand (seeds, specs). */
+    private readonly patientEvents?: PatientEvents,
   ) {}
+
+  onModuleInit() {
+    this.patientSub = this.patientEvents?.detailsChanged$.subscribe((change) => {
+      void this.refreshPatient(change.id);
+    });
+  }
+
+  onModuleDestroy() {
+    this.patientSub?.unsubscribe();
+  }
+
+  /**
+   * A bill keeps a copy of the patient's name and UHID for lists, search and printing. When the patient record changes (an ER
+   * placeholder filled in) every bill of the patient takes the current ones, read from the record (final I7). A Revenue write
+   * to its own records; never throws. Returns how many bills changed.
+   */
+  async refreshPatient(patientId: string): Promise<number> {
+    try {
+      if (!isValidObjectId(patientId)) return 0;
+      const p = await this.patients.findById(patientId).select('name uhid').lean().exec();
+      if (!p) return 0;
+      const r = await this.bills
+        .updateMany({ patient: p._id, $or: [{ patientName: { $ne: p.name } }, { patientUhid: { $ne: p.uhid } }] }, { $set: { patientName: p.name, patientUhid: p.uhid } })
+        .exec();
+      return r.modifiedCount;
+    } catch (e) {
+      this.logger.warn(`Bills of patient ${patientId} keep the old name (${(e as Error).message})`);
+      return 0;
+    }
+  }
 
   /** BL-0001 style numbers from the shared counter collection. Atomic; a lost race skips a number. */
   async nextNumber(key: string, prefix: string): Promise<string> {
