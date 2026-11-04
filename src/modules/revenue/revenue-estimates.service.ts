@@ -102,6 +102,11 @@ export class RevenueEstimatesService {
    * nothing to estimate (no stay and no procedures). Safe to run twice.
    */
   async draft(billId: string) {
+    const doc = await this.drafted(billId, false);
+    return doc ? doc.toObject() : null;
+  }
+
+  private async drafted(billId: string, retried: boolean): Promise<EstimateDocument | null> {
     if (!isValidObjectId(billId)) return null;
     const bill = await this.billModel.findById(billId).exec();
     if (!bill) return null;
@@ -126,11 +131,14 @@ export class RevenueEstimatesService {
         doc = await this.estimates.create({ bill: bill._id, ...set, extra: [], by: BY });
       } catch (e) {
         if ((e as { code?: number }).code !== 11000) throw e;
+        // One estimate per bill (unique index): another draft wrote it first. Redraft over it from the records as they are
+        // now, so what this draft saw is not lost.
+        if (!retried) return this.drafted(billId, true);
         doc = (await this.estimates.findOne({ bill: bill._id }).exec())!;
       }
     }
     if (changed || !doc.announcedAt) await this.announce(bill, doc);
-    return doc.toObject();
+    return doc;
   }
 
   /** The reconcile pass: sends the message of an estimate with no announcedAt. Never throws; true when it sent. */

@@ -375,6 +375,39 @@ describe('Estimates, deposits and top-ups', () => {
     assert.equal((await sent('revenue.deposit-due')).length, 2);
   });
 
+  test('drafts that land at the same moment leave one estimate for the bill', async () => {
+    await assigned(await admit());
+    const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
+    await m.Estimate.deleteMany({});
+    const out = await Promise.all([1, 2, 3, 4].map(() => estimates.draft(String(bill._id))));
+    assert.equal(await m.Estimate.countDocuments({ bill: bill._id }), 1);
+    assert.equal(new Set(out.map((e) => String(e!._id))).size, 1, 'every draft returns the one estimate');
+    assert.equal(String((await estimates.get(String(bill._id)))!._id), String(out[0]!._id));
+  });
+
+  test('a draft that loses the race redrafts over the winner, so what it saw is not lost', async () => {
+    await assigned(await admit());
+    const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
+    const full = (await estimates.get(String(bill._id)))!.total;
+    assert.ok(full > 0);
+    await m.Estimate.deleteMany({});
+    const realCreate = m.Estimate.create.bind(m.Estimate);
+    // Another draft that read the records earlier (nothing to price yet) writes first.
+    (m.Estimate as any).create = async (doc: any) => {
+      (m.Estimate as any).create = realCreate;
+      await realCreate({ ...doc, lines: [], total: 0, low: 0, high: 0 });
+      return realCreate(doc);
+    };
+    try {
+      const out = await estimates.draft(String(bill._id));
+      assert.equal(out!.total, full);
+    } finally {
+      (m.Estimate as any).create = realCreate;
+    }
+    assert.equal(await m.Estimate.countDocuments({ bill: bill._id }), 1);
+    assert.equal((await estimates.get(String(bill._id)))!.total, full);
+  });
+
   test('the desk can edit the days and add lines; a redraft keeps them; others cannot edit', async () => {
     await assigned(await admit());
     const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;

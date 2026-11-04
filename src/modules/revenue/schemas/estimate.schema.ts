@@ -13,7 +13,8 @@ export const EstimateLineSchema = SchemaFactory.createForClass(EstimateLine);
 
 @Schema({ timestamps: true })
 export class Estimate {
-  @Prop({ type: MongooseSchema.Types.ObjectId, required: true, index: true })
+  /** One estimate per bill: drafts that land together write one (the unique index turns the rest into a read). */
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true })
   bill: Types.ObjectId;
 
   @Prop({ type: [EstimateLineSchema], default: [] })
@@ -54,3 +55,4 @@ export class Estimate {
 }
 
 export const EstimateSchema = SchemaFactory.createForClass(Estimate);
+EstimateSchema.index({ bill: 1 }, { unique: true });
