@@ -11,7 +11,7 @@ import { PriceListService } from './price-list.service';
 import { ESTIMATE_HIGH, ESTIMATE_LOW, nursingCode, procCode, wardGroupOf } from './revenue-catalogue';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
 import { RevenueSettingsService } from './revenue-settings.service';
-import { Bill, BillDocument } from './schemas/bill.schema';
+import { ACTIVE_BILL_STATES, Bill, BillDocument } from './schemas/bill.schema';
 import { Estimate, EstimateDocument, EstimateLine } from './schemas/estimate.schema';
 
 const BY = { id: '', name: 'Revenue Agent' };
@@ -24,6 +24,11 @@ export async function bookingsOf(model: Model<ProcedureBookingDocument>, bill: {
     ? { case: bill.case, status: { $in: statuses } }
     : { patient: bill.patient, status: { $in: statuses }, start: { $gte: bill.openedAt } };
   return model.find(filter).sort({ createdAt: 1, _id: 1 }).lean().exec();
+}
+
+export interface EstimateListRow {
+  estimate: Estimate & { _id: Types.ObjectId };
+  bill: { id: string; number: string; kind: string; state: string; patientName: string; patientUhid: string };
 }
 
 export interface EstimateEdit {
@@ -49,6 +54,25 @@ export class RevenueEstimatesService {
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     @InjectModel(Bed.name) private readonly beds: Model<BedDocument>,
   ) {}
+
+  /**
+   * The estimate of every bill not yet settled, of any kind, newest first, each with its bill (the Estimates tab: one call
+   * instead of one per bill). Active bills come first through their state index, then their estimates through the bill index.
+   */
+  async list(): Promise<EstimateListRow[]> {
+    const bills = await this.billModel
+      .find({ state: { $in: ACTIVE_BILL_STATES } })
+      .select('number kind state patientName patientUhid')
+      .lean<{ _id: Types.ObjectId; number: string; kind: string; state: string; patientName: string; patientUhid: string }[]>()
+      .exec();
+    if (!bills.length) return [];
+    const byId = new Map(bills.map((b) => [String(b._id), b]));
+    const found = await this.estimates.find({ bill: { $in: bills.map((b) => b._id) } }).sort({ at: -1, _id: -1 }).lean<(Estimate & { _id: Types.ObjectId })[]>().exec();
+    return found.flatMap((estimate): EstimateListRow[] => {
+      const b = byId.get(String(estimate.bill));
+      return b ? [{ estimate, bill: { id: String(b._id), number: b.number, kind: b.kind, state: b.state, patientName: b.patientName, patientUhid: b.patientUhid } }] : [];
+    });
+  }
 
   async get(billId: string) {
     if (!isValidObjectId(billId)) return null;

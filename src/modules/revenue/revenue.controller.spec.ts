@@ -31,6 +31,7 @@ const TABLE: Record<string, UserRole[]> = {
   'POST bills/:id/settle': DESK,
   'POST bills/:id/corrections': DESK,
   'POST bills/:id/refund': DESK,
+  'GET estimates': DESK,
   'GET estimates/:billId': DESK,
   'PUT estimates/:id': DESK,
   'GET approvals': DESK,
@@ -67,7 +68,7 @@ const allowed = (name: string, role: UserRole) => {
 describe('RevenueController roles', () => {
   test('the controller is mounted at revenue and has exactly the routes of the table', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, RevenueController), 'revenue');
-    assert.equal(Object.keys(TABLE).length, 25);
+    assert.equal(Object.keys(TABLE).length, 26);
     assert.deepEqual(handlers.map((n) => keyOf(proto[n] as object)).sort(), Object.keys(TABLE).sort());
   });
 
@@ -112,7 +113,7 @@ describe('RevenueController roles', () => {
     const c = new RevenueController(
       { overview: rec('overview'), series: rec('series') } as never,
       { list: rec('list'), view: rec('view'), patientTotal: rec('patientTotal') } as never,
-      { get: rec('estimate'), edit: rec('edit') } as never,
+      { get: rec('estimate'), edit: rec('edit'), list: rec('estimateList') } as never,
       { record: rec('record'), list: rec('payList'), cancel: rec('cancel'), receipt: rec('receipt') } as never,
       { request: rec('finalRequest'), prepare: rec('prepare'), settle: rec('settle') } as never,
       { addMissed: rec('addMissed'), request: rec('correct') } as never,
@@ -132,6 +133,7 @@ describe('RevenueController roles', () => {
     await c.payments({ day: '2026-10-20' });
     await c.bills({ state: 'open' });
     await c.estimate({ billId: id });
+    await c.estimateList();
     assert.deepEqual(seen[0], ['settle', actor, id]);
     assert.deepEqual(seen[1], ['prepare', actor, id]);
     assert.deepEqual(seen[2], ['finalRequest', actor, id]);
@@ -141,6 +143,7 @@ describe('RevenueController roles', () => {
     assert.deepEqual(seen[6], ['payList', { day: '2026-10-20' }]);
     assert.deepEqual(seen[7], ['list', { state: 'open', kind: undefined, q: undefined }]);
     assert.deepEqual(seen[8], ['estimate', id]);
+    assert.deepEqual(seen[9], ['estimateList']);
   });
 
   test('the scheduler starts after bootstrap and stops on destroy', () => {

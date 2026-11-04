@@ -172,6 +172,13 @@ export class RevenueController {
 
   // ---------- estimates ----------
 
+  @Get('estimates')
+  @Roles(...REV_DESK)
+  @ApiOperation({ summary: 'The estimate of every bill not yet settled, any kind, newest first, with its bill' })
+  estimateList() {
+    return this.estimates.list();
+  }
+
   @Get('estimates/:billId')
   @Roles(...REV_DESK)
   @ApiOperation({ summary: 'The estimate of a bill' })

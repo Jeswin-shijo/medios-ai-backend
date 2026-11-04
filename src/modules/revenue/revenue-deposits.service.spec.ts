@@ -408,6 +408,30 @@ describe('Estimates, deposits and top-ups', () => {
     assert.equal((await estimates.get(String(bill._id)))!.total, full);
   });
 
+  test('list gives the estimate of every bill not yet settled, of any kind, newest first, with its bill', async () => {
+    const other = await m.Patient.create({ uhid: 'MHK202600972', name: 'Ilango R', age: 51, gender: 'Male', phone: '9100000072' });
+    const make = async (who: any, kind: string, state: string, minutes: number) => {
+      const b = await m.Bill.create({
+        number: `BL-${9000 + ++seq}`, patient: who._id, patientUhid: who.uhid, patientName: who.name, kind, state, payer: 'self', openedAt: T0,
+        ...(kind === 'opd' ? { appointment: new Types.ObjectId(), day: '2026-09-26' } : kind === 'walk-in' ? { day: '2026-09-26' } : kind === 'er' ? { erVisit: new Types.ObjectId() } : { admission: new Types.ObjectId() }),
+      });
+      await m.Estimate.create({ bill: b._id, lines: [{ name: 'Hernia repair (PR-1)', amount: 48000 }], days: 0, total: 48000, low: 43200, high: 57600, by: { name: 'Revenue Agent' }, at: new Date(T0.getTime() + minutes * 60_000), bookings: [], extra: [] });
+      return b;
+    };
+    const opd = await make(other, 'opd', 'open', 30);
+    const walkIn = await make(patient, 'walk-in', 'final', 20);
+    const admission = await make(patient, 'admission', 'open', 40);
+    const er = await make(other, 'er', 'open', 10);
+    await make(patient, 'opd', 'settled', 50);
+    const rows = await estimates.list();
+    assert.deepEqual(rows.map((r) => r.bill.number), [admission.number, opd.number, walkIn.number, er.number], 'newest first, settled left out');
+    const row = rows.find((r) => r.bill.number === opd.number)!;
+    assert.deepEqual(row.bill, { id: String(opd._id), number: opd.number, kind: 'opd', state: 'open', patientName: 'Ilango R', patientUhid: 'MHK202600972' });
+    assert.equal(String(row.estimate._id), String((await m.Estimate.findOne({ bill: opd._id }).lean())!._id));
+    assert.deepEqual([row.estimate.total, row.estimate.low, row.estimate.high, row.estimate.lines.length], [48000, 43200, 57600, 1]);
+    assert.equal(rows.find((r) => r.bill.number === walkIn.number)!.bill.state, 'final');
+  });
+
   test('the desk can edit the days and add lines; a redraft keeps them; others cannot edit', async () => {
     await assigned(await admit());
     const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
