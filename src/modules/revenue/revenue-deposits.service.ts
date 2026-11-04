@@ -103,10 +103,18 @@ export class RevenueDepositsService {
     return !!(await this.billModel.exists({ patient: new Types.ObjectId(patientId), kind: { $in: ['opd', 'walk-in'] }, day: isoDate(clinicNow()), state: active }));
   }
 
-  /** The advance that should be collected, or null: ER bills, STAT bookings, no ward or package, or the reminder rule off. */
+  /** The advance that should be asked for, or null: ER bills, STAT bookings, no ward or package, or the reminder rule off. */
   async dueFor(bill: BillDocument): Promise<{ amount: number; reason: string } | null> {
-    if (bill.kind === 'er') return null;
     if (!(await this.rules.isOn(RULE))) return null;
+    return this.depositDue(bill);
+  }
+
+  /**
+   * The advance the bill carries, whatever the reminder rule says: R45 lets the rule stop only new asks, so an ask already
+   * made still completes once it is paid. Null for ER bills, STAT bookings, or no ward or package.
+   */
+  private async depositDue(bill: BillDocument): Promise<{ amount: number; reason: string } | null> {
+    if (bill.kind === 'er') return null;
     const cfg = await this.settings.get();
     let amount = 0;
     const parts: string[] = [];
@@ -159,7 +167,7 @@ export class RevenueDepositsService {
     if (!isValidObjectId(billId)) return null;
     const bill = await this.billModel.findById(billId).exec();
     if (!bill || !ACTIVE_BILL_STATES.includes(bill.state)) return null;
-    const due = await this.dueFor(bill);
+    const due = await this.depositDue(bill);
     if (!due) return null;
     const link = depositLink(bill._id);
     const remaining = due.amount - (bill.totals?.payments ?? 0);
@@ -167,6 +175,8 @@ export class RevenueDepositsService {
       await this.complete(link);
       return null;
     }
+    // R45: the reminder rule off stops new asks (a task, a reopen, a rewrite or a message); a met one still completes above.
+    if (!(await this.rules.isOn(RULE))) return null;
     const existing = await this.alerts.findOne({ link }).lean().exec();
     if (opts.onlyIfOpen && (!existing || existing.status === 'Completed')) return null;
     const fields = await this.depositFields(bill, due.reason, remaining);
@@ -317,12 +327,12 @@ export class RevenueDepositsService {
     return r.modifiedCount > 0;
   }
 
-  /** Payments at or above the due amount complete the deposit task. */
+  /** Payments at or above the due amount complete the deposit task, with the reminder rule on or off (R45). */
   async closeIfMet(billId: string): Promise<boolean> {
     if (!isValidObjectId(billId)) return false;
     const bill = await this.billModel.findById(billId).exec();
     if (!bill) return false;
-    const due = await this.dueFor(bill);
+    const due = await this.depositDue(bill);
     if (!due || (bill.totals?.payments ?? 0) < due.amount) return false;
     return this.complete(depositLink(bill._id));
   }
@@ -330,13 +340,13 @@ export class RevenueDepositsService {
   /**
    * An admission asks for a top-up when charges reach the threshold share of payments (payments above 0). The task says how
    * much (the ward's deposit, or what keeps payments ahead of charges, whichever is larger) and the clock starts. When
-   * payments catch up the task completes and `revenue.topup-met` stops the clock.
+   * payments catch up the task completes and `revenue.topup-met` stops the clock. With the reminder rule off only the "met"
+   * half runs (R45): an open top-up still completes and its clock still stops, but no new top-up is asked.
    */
   async checkTopUp(billId: string): Promise<'raised' | 'met' | null> {
     if (!isValidObjectId(billId)) return null;
     const bill = await this.billModel.findById(billId).exec();
     if (!bill || bill.kind !== 'admission' || !ACTIVE_BILL_STATES.includes(bill.state)) return null;
-    if (!(await this.rules.isOn(RULE))) return null;
     const link = topupLink(bill._id);
     const plan = await this.topUpPlan(bill);
     if (!plan.needed) {
@@ -346,6 +356,7 @@ export class RevenueDepositsService {
       await this.sendTopUpMet(bill);
       return 'met';
     }
+    if (!(await this.rules.isOn(RULE))) return null;
     const { amount } = plan;
     if (!(amount > 0)) return null;
     const fields = await this.topUpFields(bill, amount);

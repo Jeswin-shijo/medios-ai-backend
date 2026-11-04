@@ -256,6 +256,43 @@ describe('Estimates, deposits and top-ups', () => {
     assert.ok(await estimates.get(String(bill._id)), 'the estimate is still drafted');
   });
 
+  test('R45: with the rule switched off, an open top-up still completes when met and its clock stops; no new top-up is asked', async () => {
+    await assigned(await admit());
+    const id = String((await m.Bill.findOne({ kind: 'admission' }).lean())!._id);
+    const topup = () => m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:topup` }).lean();
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:deposit` }).lean())!.status === 'Completed');
+    await bills.adjust(id, { charges: 6200 }); // 8,000 of 10,000
+    await until(async () => (await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running', ref: id })) === 1);
+    await rules.set(ADMIN, 'revenue-deposit-reminders', false);
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await topup())!.status === 'Completed');
+    await until(async () => (await sent('revenue.topup-met')).length === 1);
+    await until(async () => (await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running' })) === 0);
+    // Rule still off: a second dip asks for nothing new.
+    await bills.adjust(id, { charges: 30000 });
+    await quiet();
+    assert.equal((await topup())!.status, 'Completed');
+    assert.equal((await sent('revenue.topup-due')).length, 1);
+    assert.equal(await m.Clock.countDocuments({ def: 'revenue-topup', state: 'running' }), 0);
+  });
+
+  test('R45: with the rule switched off, an open deposit task still completes when paid; a later booking asks for nothing new', async () => {
+    await assigned(await admit());
+    const bill = (await m.Bill.findOne({ kind: 'admission' }).lean())!;
+    const id = String(bill._id);
+    const deposit = () => m.TaskAlertItem.findOne({ link: `revenue-bill:${id}:deposit` }).lean();
+    assert.equal((await deposit())!.status, 'Pending');
+    await rules.set(ADMIN, 'revenue-deposit-reminders', false);
+    await bills.adjust(id, { payments: 10000 });
+    await until(async () => (await deposit())!.status === 'Completed');
+    await booked(await booking('routine')); // would reopen the task at ₹40,000 with the rule on
+    await quiet();
+    assert.equal((await deposit())!.status, 'Completed');
+    assert.equal((await sent('revenue.deposit-due')).length, 1);
+    assert.equal(await deposits.ensureDepositTask(id), false);
+  });
+
   test('a transfer to ICU rewrites an open deposit task with the new group amount; a met deposit is not asked again', async () => {
     const adm = await admit();
     await assigned(adm);
