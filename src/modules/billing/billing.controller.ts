@@ -20,15 +20,20 @@ import { parseIsoDay } from '../../common/utils/clinic-time';
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
-  @Roles(UserRole.ADMIN, UserRole.STAFF)
+  /**
+   * R43: open to every signed-in role so the CareSync mobile app's live load keeps working,
+   * but only admin and front desk see invoices; every other role gets an empty list (200).
+   */
   @Get('invoices')
-  @ApiOperation({ summary: 'Get list of invoices with filters' })
+  @ApiOperation({ summary: 'Get list of invoices with filters (admin and front desk; [] for other roles)' })
   @ApiQuery({ name: 'uhid', required: false })
   @ApiQuery({ name: 'status', required: false })
   async findAll(
+    @CurrentUser() user: { role?: UserRole } | null,
     @Query('uhid') uhid?: string,
     @Query('status') status?: string,
   ) {
+    if (user?.role !== UserRole.ADMIN && user?.role !== UserRole.STAFF) return [];
     return this.billingService.findAll({ uhid, status });
   }
 
