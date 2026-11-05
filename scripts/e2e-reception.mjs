@@ -224,6 +224,7 @@ async function main() {
   });
 
   let newToken = '';
+  let newBill = '';
   await section('4. New patient with card payment (a walk-in)', async () => {
     const suffix = String(Math.floor(Math.random() * 1e5)).padStart(5, '0');
     const reg = await kiosk('POST', '/reception/kiosk/register', { name: `E2E Patient ${suffix}`, phone: `90000${suffix}`, gender: 'Female', age: 31 });
@@ -236,6 +237,7 @@ async function main() {
     const paid = await pollPaid(v.data.id);
     ok('visit is paid with a token', paid?.status === 'paid' && LABEL.test(paid?.token?.label ?? ''), paid?.status);
     newToken = paid?.token?.label;
+    newBill = paid?.billNumber;
     const kioskPay = await checkRevenue(paid);
     ok('the payment names the card and SAMPLE', /^Card · .+ · SAMPLE$/.test(kioskPay?.reference ?? ''), kioskPay?.reference);
   });
@@ -295,6 +297,26 @@ async function main() {
       ok(`display lists the ${name} token ${label} with its room`, !!row && !!row.room, row ?? label);
     }
   });
+
+  await section("9. The walk-in's bill settles once the doctor calls its token and marks it done (R30)", async () => {
+    const billOf = async () => (await must('find the walk-in bill', admin('GET', `/revenue/bills?q=${encodeURIComponent(newBill)}`))).find((b) => b.number === newBill);
+    ok('before: the walk-in bill is open with nothing due', (await billOf())?.state === 'open', await billOf());
+    const board = await must('the queue', admin('GET', '/queue'));
+    const token = board.tokens.find((t) => t.label === newToken && t.doctorId === doctor.id);
+    if (!ok('the walk-in token is on the board', !!token, newToken)) return;
+    const busy = board.tokens.find((t) => t.status === 'called' && t.counter === token.room);
+    const called = await admin('POST', `/queue/tokens/${token.id}/call`, { counter: token.room, finish: busy?.id });
+    ok('the doctor calls it', called.status === 200 && called.data?.called?.label === newToken, called.json);
+    ok('a called token is not done: the bill stays open', (await billOf())?.state === 'open');
+    const done = await admin('POST', `/queue/tokens/${token.id}/complete`);
+    ok('and marks it done', done.status === 200, done.json);
+    let bill;
+    for (let i = 0; i < 20 && bill?.state !== 'settled'; i++) {
+      await sleep(250);
+      bill = await billOf();
+    }
+    ok('the walk-in bill is settled, nothing due', bill?.state === 'settled' && bill.totals.balance === 0, bill);
+  });
 }
 
 async function cleanup() {
@@ -308,7 +330,7 @@ async function cleanup() {
 
 console.log('Reception kiosk end-to-end');
 try { await main(); } catch (err) { ok(`setup: ${err.message}`, false); }
-console.log('\n9. Cleanup');
+console.log('\n10. Cleanup');
 try { await cleanup(); } catch (err) { ok(`cleanup: ${err.message}`, false); }
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

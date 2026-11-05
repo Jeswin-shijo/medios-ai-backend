@@ -453,7 +453,7 @@ A patient registers or books an OP visit on a tablet kiosk, pays, and gets a tok
 API=http://localhost:4500/api npm run e2e:reception
 ```
 
-It exercises every kiosk path. Card with UPI, and Find my record with cash, each check in an appointment the script books with its doctor (the Revenue appointment path); a new patient pays by card (the walk-in path); every paid visit is checked on its Revenue bill (one consultation line, the kiosk payment recorded by the kiosk, nothing due). It also puts the doctor on leave for a moment and checks the kiosk refuses them.
+It exercises every kiosk path. Card with UPI, and Find my record with cash, each check in an appointment the script books with its doctor (the Revenue appointment path); a new patient pays by card (the walk-in path); every paid visit is checked on its Revenue bill (one consultation line, the kiosk payment recorded by the kiosk, nothing due). It also puts the doctor on leave for a moment and checks the kiosk refuses them, and at the end calls the walk-in's token and marks it done, after which its walk-in bill must be settled.
 
 - **What it changes:** it creates an all-day "Dr. E2E Test" doctor, or reactivates the one an earlier run left, and deactivates it at the end; the kiosk and display it adds are removed at the end too. The patients it registers and the appointments it books stay.
 - **Local only:** it refuses an API that is not on localhost unless `E2E_ALLOW_REMOTE=true` is set.
