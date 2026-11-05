@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { validateEnv } from './env.validation';
 
-const base = { JWT_SECRET: 'x'.repeat(40) };
+const base = { JWT_SECRET: 'x'.repeat(40), MONGODB_URI: 'mongodb://localhost:27018/medios_test' };
 
 describe('validateEnv (AI)', () => {
   test('the base config passes', () => {
@@ -41,5 +41,15 @@ describe('validateEnv (call agent)', () => {
     const snapserve = { ...base, CALL_PROVIDER: 'snapserve', SNAPSERVE_API_KEY: 'k', SNAPSERVE_CONFIRMATION_AGENT_ID: '1', SNAPSERVE_BOOKING_AGENT_ID: '2' };
     assert.throws(() => validateEnv({ ...snapserve, CALL_WEBHOOK_SECRET: 'short' }), /CALL_WEBHOOK_SECRET/);
     assert.doesNotThrow(() => validateEnv({ ...snapserve, CALL_WEBHOOK_SECRET: 'w'.repeat(24) }));
+  });
+});
+
+describe('validateEnv (database)', () => {
+  test('MONGODB_URI is required: there is no fallback database (R33)', () => {
+    const { MONGODB_URI: _uri, ...without } = base;
+    assert.throws(() => validateEnv(without), /MONGODB_URI is required/);
+    assert.throws(() => validateEnv({ ...base, MONGODB_URI: '' }), /MONGODB_URI is required/);
+    assert.throws(() => validateEnv({ ...base, MONGODB_URI: '   ' }), /MONGODB_URI is required/);
+    assert.doesNotThrow(() => validateEnv({ ...base, MONGODB_URI: 'mongodb+srv://u:p@cluster.example.net/medios_demo' }));
   });
 });

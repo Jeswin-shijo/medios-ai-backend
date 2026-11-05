@@ -17,7 +17,8 @@ export default () => ({
   nodeEnv,
   isProduction,
   database: {
-    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital',
+    // Required and validated at startup (see env.validation.ts); there is no fallback database.
+    uri: process.env.MONGODB_URI,
   },
   jwt: {
     // Required and validated at startup (see env.validation.ts); there is no fallback secret.

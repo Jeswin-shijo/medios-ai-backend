@@ -17,6 +17,11 @@ export function validateEnv(config: Record<string, unknown>) {
     errors.push('JWT_SECRET is a publicly known example value; generate a new one.');
   }
 
+  // There is no fallback database: on a shared machine a guessed localhost one may belong to another project.
+  if (!String(config.MONGODB_URI ?? '').trim()) {
+    errors.push('MONGODB_URI is required: the address of the MongoDB database to use (mongodb:// or mongodb+srv://), in .env or the host\'s settings. The API does not fall back to a local database.');
+  }
+
   const origins = String(config.CORS_ORIGIN ?? '');
   if (origins.split(',').some((o) => o.trim() === '*')) {
     errors.push('CORS_ORIGIN cannot be "*": the API uses credentialed requests. List the allowed origins, comma-separated.');

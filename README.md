@@ -97,7 +97,8 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `BCRYPT_ROUNDS` | `12` | Password hashing cost |
 | `TRUST_PROXY` | `false` | Set behind a reverse proxy so rate limits see client IPs |
 | `SWAGGER_ENABLED` | off in production | Serve `/api/docs` |
-| `PORT`, `MONGODB_URI`, `TZ` | `4000`, local Mongo, — | `TZ` decides what "today" means for record dates and the dashboard |
+| `MONGODB_URI` | required | The database's `mongodb://` or `mongodb+srv://` address; the API refuses to start without it (it never falls back to a local database) |
+| `PORT`, `TZ` | `4000`, — | `TZ` decides what "today" means for record dates and the dashboard |
 | `CLINIC_DATE` | unset | Development only: pins "today" to the seeded demo day (`2026-09-26`), like the web app's `VITE_CLINIC_DATE` |
 | `CALL_PROVIDER` | `simulated` (dev), `none` (production) | AI call agent voice provider: `snapserve`, `simulated` (dev only, no phone rings) or `none` |
 | `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID`, `SNAPSERVE_BOOKING_AGENT_ID` | — | Required with `CALL_PROVIDER=snapserve` |
