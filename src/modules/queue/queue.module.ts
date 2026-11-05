@@ -29,6 +29,7 @@ import { SettingsModule } from '../settings/settings.module';
   ],
   controllers: [QueueController],
   providers: [QueueService, QueueDisplaysService, PatientCardsService, QueueEvents],
-  exports: [QueueService, QueueDisplaysService, PatientCardsService],
+  // QueueEvents: the Revenue Agent settles a kiosk visit's bill when its token is marked done (R30).
+  exports: [QueueService, QueueDisplaysService, PatientCardsService, QueueEvents],
 })
 export class QueueModule {}

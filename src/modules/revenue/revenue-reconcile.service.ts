@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { ErVisit, ErVisitDocument } from '../er/schemas/er-visit.schema';
@@ -48,6 +49,8 @@ export interface RevenueReconcileResult {
   clocks: number;
   bedDays: number;
   opdFees: number;
+  /** Kiosk bills settled (R30). */
+  settled: number;
 }
 
 @Injectable()
@@ -101,11 +104,12 @@ export class RevenueReconcileService implements OnModuleInit {
     const old = new Date(Date.now() - RECONCILE_GRACE_MS);
     const start = await this.bills.startedAt();
     const since = new Date(Math.max(Date.now() - RECONCILE_WINDOW_MS, start.getTime()));
-    const out: RevenueReconcileResult = { announced: 0, tasks: 0, charges: 0, totals: 0, reversals: 0, clocks: 0, bedDays: 0, opdFees: 0 };
+    const out: RevenueReconcileResult = { announced: 0, tasks: 0, charges: 0, totals: 0, reversals: 0, clocks: 0, bedDays: 0, opdFees: 0, settled: 0 };
     await this.step('charges', async () => (out.charges += await this.missedCharges(old, since)));
     await this.step('bed days', async () => (out.bedDays += await this.bedDays.tick()));
     await this.step('OPD fees', async () => (out.opdFees += await this.opd.catchUp(undefined, since)));
     await this.step('totals', async () => (out.totals += await this.healTotals(old, since)));
+    await this.step('kiosk bills', async () => (out.settled += await this.settleKioskBills(old, since)));
     await this.step('final bills', async () => (out.tasks += await this.requestFinals(old, since)));
     await this.step('bill messages', async () => (out.announced += await this.reannounceBills(old, since)));
     await this.step('payment messages', async () => (out.announced += await this.reannouncePayments(old, since)));
@@ -286,6 +290,29 @@ export class RevenueReconcileService implements OnModuleInit {
 
   private ids(docs: { _id: unknown }[]): string[] {
     return docs.map((d) => String(d._id));
+  }
+
+  // ---------- kiosk bills ----------
+
+  /**
+   * R30: an open OPD or walk-in bill holding a reception kiosk visit (an `op-visit` line) with nothing due goes through the one
+   * auto-settle rule. Today's settles once its visits are over, which catches a token event that was missed; an earlier clinic
+   * day's settles whatever the visits' state, the backstop once the day is over (a demo that pins one clinic day relies on the
+   * token rule alone). Only lines made inside the window; a bill touched in the last 30 seconds is left alone.
+   */
+  private async settleKioskBills(old: Date, since: Date): Promise<number> {
+    const today = isoDate(clinicNow());
+    const ids = (await this.chargeLines.distinct('bill', { 'source.type': 'op-visit', updatedAt: { $gte: since } }).exec()) as unknown[];
+    let n = 0;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const due = await this.billModel
+        .find({ _id: { $in: ids.slice(i, i + BATCH) }, kind: { $in: ['opd', 'walk-in'] }, state: { $in: ACTIVE_BILL_STATES }, 'totals.balance': 0, updatedAt: { $lte: old } })
+        .select('_id day')
+        .lean()
+        .exec();
+      for (const b of due) if (await this.final.autoSettleOpd(String(b._id), { dayOver: !!b.day && b.day < today })) n++;
+    }
+    return n;
   }
 
   // ---------- charges ----------

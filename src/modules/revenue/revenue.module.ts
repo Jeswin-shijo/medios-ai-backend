@@ -7,6 +7,9 @@ import { PharmacyLine, PharmacyLineSchema } from '../pharmacy/schemas/pharmacy-l
 import { PharmacyOrder, PharmacyOrderSchema } from '../pharmacy/schemas/pharmacy-order.schema';
 import { ConsultRequest, ConsultRequestSchema } from '../scheduling/schemas/consult-request.schema';
 import { ProcedureBooking, ProcedureBookingSchema } from '../scheduling/schemas/procedure-booking.schema';
+import { QueueToken, QueueTokenSchema } from '../queue/schemas/queue-token.schema';
+import { OpVisit, OpVisitSchema } from '../reception/schemas/op-visit.schema';
+import { QueueModule } from '../queue/queue.module';
 import { RevenueCaptureService } from './revenue-capture.service';
 import { Admission, AdmissionSchema } from '../beds/schemas/admission.schema';
 import { Bed, BedSchema } from '../beds/schemas/bed.schema';
@@ -79,6 +82,9 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
       { name: PharmacyOrder.name, schema: PharmacyOrderSchema },
       { name: ProcedureBooking.name, schema: ProcedureBookingSchema },
       { name: ConsultRequest.name, schema: ConsultRequestSchema },
+      // A kiosk visit's bill settles once its token is done (R30).
+      { name: OpVisit.name, schema: OpVisitSchema },
+      { name: QueueToken.name, schema: QueueTokenSchema },
     ]),
     SettingsModule,
     CoordinatorModule, // the counter model
@@ -86,6 +92,7 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
     PatientsModule, // PatientEvents: a bill follows the patient's name (final I7)
     OpdModule,
     AiModule,
+    QueueModule, // QueueEvents: a token marked done settles its kiosk visit's bill (R30)
   ],
   controllers: [RevenueController],
   providers: [RevenueScheduler, PriceListService, RevenueSettingsService, RevenueBillsService, RevenueCoordinatorRegistration, RevenueCaptureService, RevenueBedDaysService, RevenueOpdService, RevenueEstimatesService, RevenueDepositsService, FinalBillService, PaymentsService, CorrectionsService, RefundsService, RevenueReconcileService, RevenueAiService, RevenueOverviewService, RevenueKioskService],

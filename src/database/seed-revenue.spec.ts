@@ -425,7 +425,7 @@ describe('seedRevenue', () => {
     const beforeRun = await snap();
     try {
       const result = await world.reconcile.reconcile();
-      assert.deepEqual(result, { announced: 0, tasks: 0, charges: 0, totals: 0, reversals: 0, clocks: 0, bedDays: 0, opdFees: 0 });
+      assert.deepEqual(result, { announced: 0, tasks: 0, charges: 0, totals: 0, reversals: 0, clocks: 0, bedDays: 0, opdFees: 0, settled: 0 });
       assert.deepEqual(await snap(), beforeRun, 'nothing new was sent or written');
     } finally {
       mock.timers.setTime(NOW + GAP);

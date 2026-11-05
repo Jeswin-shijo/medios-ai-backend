@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { Logger } from '@nestjs/common';
 import { Types } from 'mongoose';
+import { clinicNow, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AppointmentEvents } from '../appointments/appointment-events';
 import { ApprovalsService } from '../coordinator/approvals.service';
@@ -98,7 +99,7 @@ describe('RevenueReconcileService', () => {
     bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     capture = new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
-    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.OpVisit, m.QueueToken);
     payments = new PaymentsService(reg, settings, bills, final, m.Payment);
     const opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     const estimates = new RevenueEstimatesService(reg, settings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
@@ -426,6 +427,43 @@ describe('RevenueReconcileService', () => {
     } finally {
       (m.Estimate as any).findById = original;
     }
+  });
+
+  test("R30: kiosk bills settle: today's once its token is done, an earlier clinic day's whatever the token; an appointment bill is left alone", async () => {
+    const today = isoDate(clinicNow());
+    const before = parseIsoDay(today);
+    before.setDate(before.getDate() - 1);
+    const yesterday = isoDate(before);
+    /** A kiosk visit paid on `day`: its token, its consultation on that day's walk-in bill, and the kiosk payment (balance 0). */
+    const kioskVisit = async (day: string) => {
+      const token = await m.QueueToken.create({ date: day, number: 1, label: 'G-001', uhid: patient.uhid, patientName: patient.name, status: 'waiting' });
+      const visit = await m.OpVisit.create({ date: day, uhid: patient.uhid, patientName: patient.name, doctorId: 'd1', doctorName: 'Dr. A', fee: 300, status: 'paid', provider: 'cash', kioskId: 'k1', kioskName: 'Front kiosk', via: 'card', expiresAt: new Date(), tokenId: String(token._id) });
+      const bill = await bills.open({ kind: 'walk-in', patientId: String(patient._id), day });
+      await bills.addCharge(String(bill._id), { code: 'opd:d1', name: 'Consultation - Dr. A', category: 'consultation', qty: 1, unitPrice: 300, source: { type: 'op-visit', ref: String(visit._id) }, by: { name: 'Revenue Agent' } });
+      await payments.recordKiosk(String(bill._id), { amount: 300, reference: 'Cash at counter', source: `op-visit:${visit._id}`, by: 'Kiosk: Front kiosk', at: clinicNow() });
+      await age(m.Bill, bill._id);
+      return { bill, token };
+    };
+    const earlier = await kioskVisit(yesterday);
+    const now = await kioskVisit(today);
+    // An earlier day's OPD bill of an appointment never marked Completed: nothing due, but not a kiosk bill.
+    const appointment = await m.Appointment.create({ uhid: patient.uhid, patientName: patient.name, age: 62, gender: 'Male', phone: '9100000095', time: '09:30 AM', date: yesterday, type: 'Consultation', condition: 'Fever', status: 'Checked In' });
+    const opdBill = await bills.open({ kind: 'opd', patientId: String(patient._id), appointmentId: String(appointment._id), day: yesterday });
+    await age(m.Bill, opdBill._id);
+
+    const first = await reconcile.reconcile();
+    assert.equal((await fresh(earlier.bill._id))!.state, 'settled', 'the backstop: the day is over');
+    assert.equal((await fresh(now.bill._id))!.state, 'open', "today's waits for its token");
+    assert.equal((await fresh(opdBill._id))!.state, 'open', 'an appointment bill behaves as before');
+    assert.equal(first.settled, 1);
+
+    // The token was marked done while the event was missed: the next pass settles it.
+    await m.QueueToken.updateOne({ _id: now.token._id }, { $set: { status: 'completed' } });
+    await age(m.Bill, now.bill._id);
+    const second = await reconcile.reconcile();
+    assert.equal((await fresh(now.bill._id))!.state, 'settled');
+    assert.equal(second.settled, 1);
+    assert.equal((await fresh(opdBill._id))!.state, 'open');
   });
 
   test('a missing bed logs its warning once per admission, not on every tick', async () => {

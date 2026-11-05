@@ -10,6 +10,8 @@ import { LabLine, LabLineDocument } from '../lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from '../lab/schemas/lab-request.schema';
 import { PharmacyLine, PharmacyLineDocument } from '../pharmacy/schemas/pharmacy-line.schema';
 import { PharmacyOrder, PharmacyOrderDocument } from '../pharmacy/schemas/pharmacy-order.schema';
+import { QueueToken, QueueTokenDocument } from '../queue/schemas/queue-token.schema';
+import { OpVisit, OpVisitDocument } from '../reception/schemas/op-visit.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueCoordinatorRegistration } from './revenue-coordinator.registration';
@@ -50,6 +52,9 @@ export class FinalBillService {
     @InjectModel(LabLine.name) private readonly labLines: Model<LabLineDocument>,
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     @InjectModel(Appointment.name) private readonly appointments: Model<AppointmentDocument>,
+    /** The reception kiosk's visits and the queue's tokens, read-only (R30). Absent only where the service is built by hand (seeds, specs): a kiosk visit then never counts as over. */
+    @InjectModel(OpVisit.name) private readonly opVisits?: Model<OpVisitDocument>,
+    @InjectModel(QueueToken.name) private readonly tokens?: Model<QueueTokenDocument>,
   ) {
     // A.2: the ER trigger is er.left with any reason but `admitted` (the stay's own bill asks at bed.discharged).
     registration.capture.set('er.left', (id) => this.onErLeft(id));
@@ -265,14 +270,27 @@ export class FinalBillService {
     return bill;
   }
 
-  /** An OPD bill with nothing due settles by itself once the visit is Completed. True when it settled. */
-  async autoSettleOpd(billId: string): Promise<boolean> {
+  /**
+   * An OPD visit's bill with nothing due settles by itself once its visits are over (R1, R30): the appointment it belongs to
+   * is Completed, and every reception kiosk visit charged on it (an `op-visit` line) has had its token marked done. That covers
+   * a kiosk walk-in's bill and the bill of a kiosk visit with another doctor than the appointment's. With `dayOver` (the
+   * reconcile pass's backstop for an earlier clinic day's kiosk bill) the visits need not be over. A bill with neither an
+   * appointment nor a kiosk visit, such as a walk-in bill of counter charges, never settles by itself. True when it settled.
+   */
+  async autoSettleOpd(billId: string, opts: { dayOver?: boolean } = {}): Promise<boolean> {
     try {
       if (!isValidObjectId(billId)) return false;
       const bill = await this.billModel.findById(billId).lean().exec();
-      if (!bill || bill.kind !== 'opd' || !ACTIVE_BILL_STATES.includes(bill.state) || (bill.totals?.balance ?? 0) !== 0 || !bill.appointment) return false;
-      const appointment = await this.appointments.findById(bill.appointment).select('status').lean().exec();
-      if (appointment?.status !== 'Completed') return false;
+      if (!bill || (bill.kind !== 'opd' && bill.kind !== 'walk-in') || !ACTIVE_BILL_STATES.includes(bill.state) || (bill.totals?.balance ?? 0) !== 0) return false;
+      const kioskVisits = (await this.chargeLines.distinct('source.ref', { bill: bill._id, 'source.type': 'op-visit' }).exec()) as string[];
+      if (!bill.appointment && !kioskVisits.length) return false;
+      if (!opts.dayOver) {
+        if (bill.appointment) {
+          const appointment = await this.appointments.findById(bill.appointment).select('status').lean().exec();
+          if (appointment?.status !== 'Completed') return false;
+        }
+        if (kioskVisits.length && !(await this.kioskVisitsOver(kioskVisits))) return false;
+      }
       // R20: an unpriced line is not "nothing due"; the desk prices it or settles by hand.
       if (await this.chargeLines.exists({ bill: bill._id, needsPrice: true, reversed: { $ne: true } })) return false;
       await this.settle('agent', String(bill._id));
@@ -284,6 +302,16 @@ export class FinalBillService {
     }
   }
 
+  /** True when every one of these kiosk visits has a token and each token is marked done. */
+  private async kioskVisitsOver(visitIds: string[]): Promise<boolean> {
+    if (!this.opVisits || !this.tokens || !visitIds.every((id) => isValidObjectId(id))) return false;
+    const visits = await this.opVisits.find({ _id: { $in: visitIds } }).select('tokenId').lean().exec();
+    if (visits.length !== visitIds.length || !visits.every((v) => v.tokenId && isValidObjectId(v.tokenId))) return false;
+    // A patient who already held a token keeps it for a second visit, so two visits may share one.
+    const tokenIds = [...new Set(visits.map((v) => v.tokenId!))];
+    return (await this.tokens.countDocuments({ _id: { $in: tokenIds }, status: 'completed' }).exec()) === tokenIds.length;
+  }
+
   async autoSettleForAppointment(appointmentId: string): Promise<boolean> {
     if (!isValidObjectId(appointmentId)) return false;
     const bill = await this.billModel
@@ -292,5 +320,21 @@ export class FinalBillService {
       .lean()
       .exec();
     return bill ? this.autoSettleOpd(String(bill._id)) : false;
+  }
+
+  /** R30: a token was marked done; the bills holding the consultation of a kiosk visit with that token settle if nothing is due. Never throws. */
+  async autoSettleForToken(tokenId: string): Promise<boolean> {
+    try {
+      if (!this.opVisits || !isValidObjectId(tokenId)) return false;
+      const visits = await this.opVisits.find({ tokenId }).select('_id').lean().exec();
+      if (!visits.length) return false;
+      const billIds = await this.chargeLines.distinct('bill', { 'source.type': 'op-visit', 'source.ref': { $in: visits.map((v) => String(v._id)) } }).exec();
+      let settled = false;
+      for (const id of billIds) if (await this.autoSettleOpd(String(id))) settled = true;
+      return settled;
+    } catch (e) {
+      this.logger.warn(`Bills of token ${tokenId} not settled; the reconcile pass will look again (${(e as Error).message})`);
+      return false;
+    }
   }
 }

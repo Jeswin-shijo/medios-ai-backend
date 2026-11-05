@@ -11,9 +11,9 @@ const SNAPSHOT_MARGIN_MS = 1000;
 export const untilNextHour = (now: number): number => HOUR_MS - (now % HOUR_MS) + SNAPSHOT_MARGIN_MS;
 
 /**
- * The Revenue agent's time-based work: every minute the reconcile pass (which also runs bed days and the OPD catch-up),
- * and every real hour a snapshot (one at start-up too). Each pass logs its own failure and is skipped while the previous
- * one is still running, so one failed pass never stops the timer.
+ * The Revenue agent's time-based work: every minute the reconcile pass (which also runs bed days, the OPD catch-up and the
+ * settling of reception kiosk bills, R30), and every real hour a snapshot (one at start-up too). Each pass logs its own
+ * failure and is skipped while the previous one is still running, so one failed pass never stops the timer.
  */
 @Injectable()
 export class RevenueScheduler implements OnApplicationBootstrap, OnModuleDestroy {

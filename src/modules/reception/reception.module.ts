@@ -31,7 +31,7 @@ import { OpVisitsService } from './visits.service';
     AppointmentsModule,
     OpdModule,
     QueueModule,
-    // Kiosk payments are Revenue payments (R26). Revenue imports nothing of the kiosk, so there is no cycle.
+    // Kiosk payments are Revenue payments (R26). Revenue imports no reception module (it reads the visits read-only, R30), so there is no cycle.
     RevenueModule,
     // A doctor on leave is not bookable at the kiosk (R27); the call agent reads Scheduling the same way.
     SchedulingModule,

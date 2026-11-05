@@ -56,36 +56,38 @@ describe('OpVisitsService', () => {
   let queue: QueueService;
   let revenue: RevenueKioskService;
   let revenueOpd: RevenueOpdService;
+  let revenueBills: RevenueBillsService;
   let clock: Date;
   let docA: string;
   let docB: string;
   let docDone: string;
 
-  /** The Revenue Agent as the app wires it, on the same appointment events as the queue. */
-  const buildRevenue = (settings: SettingsService, appointmentEvents: AppointmentEvents) => {
+  /** The Revenue Agent as the app wires it, on the same appointment and queue events as the queue. */
+  const buildRevenue = (settings: SettingsService, appointmentEvents: AppointmentEvents, queueEvents: QueueEvents) => {
     const registry = new AgentRegistry();
     const messages = new MessagesService(m().AgentMessage, registry, new CoordinatorEvents());
     const reg = new RevenueCoordinatorRegistration(registry, m().Bill, m().Refund, m().TaskAlertItem, messages);
-    const bills = new RevenueBillsService(m().Bill, m().ChargeLine, m().Payment, m().Refund, m().Correction, m().Estimate, m().CoordinatorCounter, m().Patient);
+    const bills = (revenueBills = new RevenueBillsService(m().Bill, m().ChargeLine, m().Payment, m().Refund, m().Correction, m().Estimate, m().CoordinatorCounter, m().Patient));
     const prices = new PriceListService(m().PriceItem, m().Ward, m().OpDoctor);
     const revenueSettings = new RevenueSettingsService(settings);
-    const final = new FinalBillService(messages, reg, revenueSettings, bills, m().Bill, m().ChargeLine, m().TaskAlertItem, m().PharmacyOrder, m().PharmacyLine, m().LabRequest, m().LabLine, m().Admission, m().Appointment);
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m().Bill, m().ChargeLine, m().TaskAlertItem, m().PharmacyOrder, m().PharmacyLine, m().LabRequest, m().LabLine, m().Admission, m().Appointment, m().OpVisit, m().QueueToken);
     const payments = new PaymentsService(reg, revenueSettings, bills, final, m().Payment);
     revenueOpd = new RevenueOpdService(appointmentEvents, prices, bills, m().Appointment, m().Patient, m().ChargeLine, final);
     reg.onModuleInit();
-    return new RevenueKioskService(revenueOpd, bills, payments, m().Patient, m().ChargeLine, m().Payment);
+    return new RevenueKioskService(revenueOpd, bills, payments, m().Patient, m().ChargeLine, m().Payment, final, queueEvents);
   };
 
   const build = (payments: PaymentProvider | null) => {
     const settings = new SettingsService(m().HospitalSettings);
     const opd = new OpdService(m().Department, m().OpDoctor, settings);
     const appointmentEvents = new AppointmentEvents();
-    queue = new QueueService(m().QueueToken, m().QueueSequence, m().Appointment, m().Patient, settings, new QueueEvents(), appointmentEvents, opd);
+    const queueEvents = new QueueEvents();
+    queue = new QueueService(m().QueueToken, m().QueueSequence, m().Appointment, m().Patient, settings, queueEvents, appointmentEvents, opd);
     const cards = new PatientCardsService(m().PatientCard, m().Patient, queue);
     const config = { get: (key: string) => (key === 'jwt.secret' ? 'test-secret-test-secret-test-secret-1234' : key === 'reception.publicWebUrl' ? 'https://web.example' : undefined) } as unknown as ConfigService;
     const now = () => clock;
     const identity = new ReceptionIdentityService(m().ReceptionSession, m().OtpChallenge, m().Patient, m().Appointment, new PatientsService(m().Patient), cards, queue, settings, config, null, now);
-    revenue = buildRevenue(settings, appointmentEvents);
+    revenue = buildRevenue(settings, appointmentEvents, queueEvents);
     const scheduling = new SchedulingDoctorsService(m().DoctorProfile, m().Appointment, opd);
     return new OpVisitsService(m().OpVisit, m().OpSequence, m().Patient, identity, opd, queue, revenue, scheduling, settings, config, payments, now);
   };
@@ -641,6 +643,88 @@ describe('OpVisitsService', () => {
     assert.equal(bill!.kind, 'walk-in');
     assert.equal(bill!.totals.balance, 0);
   });
+
+  // ---------------------------------------------------------------- a kiosk bill settles (R30)
+
+  /** The Revenue bill the visit is on. */
+  const kioskBill = async (visitId: string) => m().Bill.findById((await m().OpVisit.findById(visitId).lean())!.billId).lean();
+  /** The doctor calls the visit's token to their room and marks it done; the token event is handled by the time this returns. */
+  const seeAndFinish = async (visitId: string) => {
+    const token = (await m().QueueToken.findById((await m().OpVisit.findById(visitId).lean())!.tokenId).lean())!;
+    await queue.call(token.room, 'Dr. A', undefined, String(token._id));
+    await queue.complete(String(token._id));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+  /** Revenue's queue subscription, as in the app, around one test. */
+  const withRevenueEvents = async (run: () => Promise<void>) => {
+    revenue.onModuleInit();
+    try {
+      await run();
+    } finally {
+      revenue.onModuleDestroy();
+    }
+  };
+
+  test("a walk-in visit's bill settles once its token is called and marked done", () =>
+    withRevenueEvents(async () => {
+      const visit = await visitWith('U1', 'CASH');
+      await service.confirmCash(visit.id, 'Anita');
+      const paid = await kioskBill(visit.id);
+      assert.deepEqual([paid!.kind, paid!.state, paid!.totals.balance], ['walk-in', 'open', 0]);
+      const token = (await m().QueueToken.findOne({ uhid: 'U1' }).lean())!;
+      await queue.call('Room 101', 'Dr. A');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal((await kioskBill(visit.id))!.state, 'open', 'a called token is not done');
+      await queue.complete(String(token._id));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const settled = await kioskBill(visit.id);
+      assert.equal(settled!.state, 'settled');
+      assert.ok(settled!.settledAt);
+    }));
+
+  test("the bill of a visit with another doctor than the appointment's settles once its token is done; the appointment is left alone", () =>
+    withRevenueEvents(async () => {
+      const appointment = await appointmentFor('U1', docA, 'Dr. A');
+      const visit = await visitWith('U1', 'CASH', docB);
+      await service.confirmCash(visit.id, 'Anita');
+      await seeAndFinish(visit.id);
+      const bill = await kioskBill(visit.id);
+      assert.deepEqual([bill!.kind, bill!.state, bill!.totals.balance], ['walk-in', 'settled', 0]);
+      assert.equal((await m().Appointment.findById(appointment._id).lean())!.status, 'Scheduled');
+    }));
+
+  test('a kiosk bill with a consultation that needs a price, or with money still due, stays open when the token is done', () =>
+    withRevenueEvents(async () => {
+      await m().OpDoctor.updateOne({ _id: docB }, { $set: { fee: 0 } });
+      const free = await visitWith('U1', 'CASH', docB);
+      await service.confirmCash(free.id, 'Anita');
+      const owing = await visitWith('U2', 'CASH');
+      await service.confirmCash(owing.id, 'Anita');
+      const owingBill = (await kioskBill(owing.id))!;
+      await revenueBills.addCharge(String(owingBill._id), { code: 'misc', name: 'Dressing', category: 'other', qty: 1, unitPrice: 50, source: { type: 'manual', ref: 'dressing-1' }, by: { name: 'Desk' } });
+      await seeAndFinish(free.id);
+      await seeAndFinish(owing.id);
+      const unpriced = (await kioskBill(free.id))!;
+      assert.deepEqual([unpriced.state, unpriced.totals.balance], ['open', 0]);
+      assert.equal(await m().ChargeLine.countDocuments({ bill: unpriced._id, needsPrice: true }), 1);
+      assert.deepEqual([(await kioskBill(owing.id))!.state, (await kioskBill(owing.id))!.totals.balance], ['open', 50]);
+    }));
+
+  test('a kiosk bill whose payment lands after the token is done settles when it lands', () =>
+    withRevenueEvents(async () => {
+      const record = revenue.record;
+      revenue.record = async () => {
+        throw new Error('revenue unavailable');
+      };
+      (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: () => undefined };
+      const visit = await visitWith('U1', 'UPI');
+      await service.sampleComplete(kiosk, visit.id);
+      await seeAndFinish(visit.id);
+      revenue.record = record;
+      await service.list({}); // the heal puts the payment on the bill
+      const bill = await kioskBill(visit.id);
+      assert.deepEqual([bill!.kind, bill!.state, bill!.totals.payments], ['walk-in', 'settled', 300]);
+    }));
 
   test("an appointment whose doctor was made inactive moves to the visit's doctor, whose fee is the consultation (R32)", async () => {
     const appointment = await appointmentFor('U1', docB, 'Dr. B');

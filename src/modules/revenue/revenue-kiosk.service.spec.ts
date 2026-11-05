@@ -7,6 +7,7 @@ import { AppointmentEvents } from '../appointments/appointment-events';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { CoordinatorEvents } from '../coordinator/coordinator-events';
 import { MessagesService } from '../coordinator/messages.service';
+import { QueueEvents } from '../queue/queue-events';
 import { SettingsService } from '../settings/settings.service';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PriceListService } from './price-list.service';
@@ -62,7 +63,7 @@ describe('RevenueKioskService', () => {
     const final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
     const pay = new PaymentsService(reg, settings, bills, final, m.Payment);
     opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
-    svc = new RevenueKioskService(opd, bills, pay, m.Patient, m.ChargeLine, m.Payment);
+    svc = new RevenueKioskService(opd, bills, pay, m.Patient, m.ChargeLine, m.Payment, final, new QueueEvents());
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600971', name: 'Leela Thomas', age: 40, gender: 'Female', phone: '9100000071' });
     doctor = await m.OpDoctor.create({ name: 'Dr Arun', departmentCode: 'GEN', tokenPrefix: 'G', room: 'R1', fee: 300, active: true });

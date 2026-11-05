@@ -142,7 +142,9 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         { new: true },
       )
       .exec();
-    if (token) this.events.changed();
+    if (!token) return;
+    if (token.status === 'completed') this.events.tokenCompleted(String(token._id));
+    this.events.changed();
   }
 
   /** The clinic's current day; tokens are numbered per day. */
@@ -551,7 +553,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     const done = await this.tokens
       .findOneAndUpdate({ _id: token._id, status: 'called' }, { $set: { status: 'completed', completedAt: at }, $unset: { activeKey: 1 } }, { new: true })
       .exec();
-    if (done) await this.syncAppointment(done, 'Completed', SEEING);
+    if (done) {
+      await this.syncAppointment(done, 'Completed', SEEING);
+      // R30: a kiosk visit's bill settles once its token is done.
+      this.events.tokenCompleted(String(done._id));
+    }
     return done;
   }
 

@@ -1,7 +1,10 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { Subscription } from 'rxjs';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
+import { QueueEvents } from '../queue/queue-events';
+import { FinalBillService } from './revenue-final.service';
 import { RevenueBillsService } from './revenue-bills.service';
 import { RevenueOpdService } from './revenue-opd.service';
 import { PaymentsService } from './revenue-payments.service';
@@ -45,9 +48,12 @@ export const kioskSource = (visitId: string) => `op-visit:${visitId}`;
  * The reception kiosk's entry into the Revenue Agent (spec 4.5, ruling R26): the consultation and the kiosk payment of one
  * OP visit, once per visit, so a retry, a heal or a replay never records twice. The charge is made before the payment, so the
  * payment never lands on a missing bill or leaves the bill in credit. The reception module calls this; Revenue never calls it.
+ * It also follows the queue: a token marked done settles its visit's bill when nothing is due (R30).
  */
 @Injectable()
-export class RevenueKioskService {
+export class RevenueKioskService implements OnModuleInit, OnModuleDestroy {
+  private sub?: Subscription;
+
   constructor(
     private readonly opd: RevenueOpdService,
     private readonly bills: RevenueBillsService,
@@ -55,7 +61,20 @@ export class RevenueKioskService {
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
     @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
+    private readonly final: FinalBillService,
+    private readonly queueEvents: QueueEvents,
   ) {}
+
+  onModuleInit() {
+    // As an appointment's OPD bill settles once it is Completed (RevenueOpdService). Never throws into the stream.
+    this.sub = this.queueEvents.completed$.subscribe((tokenId) => {
+      void this.final.autoSettleForToken(tokenId);
+    });
+  }
+
+  onModuleDestroy() {
+    this.sub?.unsubscribe();
+  }
 
   async record(visit: KioskVisitInput): Promise<KioskVisitRecord> {
     const source = kioskSource(visit.visitId);
