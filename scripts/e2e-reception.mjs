@@ -1,6 +1,15 @@
 // End-to-end check of every reception-kiosk path against a running API (sample providers).
 // Usage: API=http://localhost:4500/api node scripts/e2e-reception.mjs
 const API = (process.env.API || 'http://localhost:4500/api').replace(/\/+$/, '');
+// Local only unless asked: a run registers patients, books appointments, takes sample payments and changes a doctor.
+{
+  let host = '';
+  try { host = new URL(API).hostname; } catch { /* invalid */ }
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(host) && process.env.E2E_ALLOW_REMOTE !== 'true') {
+    console.error(`Refusing to run: API=${API} is not localhost / 127.0.0.1. Set E2E_ALLOW_REMOTE=true to run against it anyway.`);
+    process.exit(2);
+  }
+}
 const CLIENT = { 'X-MediOS-Client': 'mobile' };
 const LABEL = /^[A-Z][A-Z0-9]{0,2}-\d{3}$/;
 
@@ -105,10 +114,15 @@ async function setup() {
   const login = await call('POST', '/auth/login', { body: { email: 'admin@medios.ai', password: 'Admin@123' } });
   if (login.status >= 300) throw new Error(`admin login failed: ${login.status}`);
   adminToken = login.data.accessToken;
+  // Each device's id is kept the moment it exists, so cleanup removes it even if a later step fails.
   const d = await must('create kiosk', admin('POST', '/queue/displays', { name: 'E2E kiosk', kind: 'kiosk' }));
-  kioskKey = d.key; kioskId = d.display.id;
+  kioskId = d?.display?.id ?? d?.display?._id ?? '';
+  kioskKey = d?.key ?? '';
+  if (!kioskId || !kioskKey) throw new Error(`create kiosk: no id or key in the answer ${JSON.stringify(d)}`);
   const w = await must('create display', admin('POST', '/queue/displays', { name: 'E2E display', kind: 'display' }));
-  displayId = w.display.id; displayKey = w.key;
+  displayId = w?.display?.id ?? w?.display?._id ?? '';
+  displayKey = w?.key ?? '';
+  if (!displayId || !displayKey) throw new Error(`create display: no id or key in the answer ${JSON.stringify(w)}`);
 
   // Demo doctors can be off duty (evening runs), so the run uses its own all-day doctor.
   const body = {
