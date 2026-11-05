@@ -13,6 +13,7 @@ import { KioskController } from './kiosk.controller';
 import { PAYMENT_PROVIDER, createPaymentProvider } from './providers/payment-provider';
 import { SMS_PROVIDER, createSmsProvider } from './providers/sms-provider';
 import { ReceptionController } from './reception.controller';
+import { ReceptionScheduler } from './reception.scheduler';
 import { OpSequence, OpSequenceSchema } from './schemas/op-sequence.schema';
 import { OpVisit, OpVisitSchema } from './schemas/op-visit.schema';
 import { OtpChallenge, OtpChallengeSchema } from './schemas/otp-challenge.schema';
@@ -41,6 +42,8 @@ import { OpVisitsService } from './visits.service';
   providers: [
     ReceptionIdentityService,
     OpVisitsService,
+    // Every minute: paid visits still missing their token or bill are finished (R33).
+    ReceptionScheduler,
     // Without these the services run cash-only and without "find by phone".
     { provide: SMS_PROVIDER, inject: [ConfigService], useFactory: (c: ConfigService) => createSmsProvider(c.get<string>('reception.smsProvider') ?? 'none') },
     { provide: PAYMENT_PROVIDER, inject: [ConfigService], useFactory: (c: ConfigService) => createPaymentProvider(c.get<string>('reception.paymentProvider') ?? 'none') },

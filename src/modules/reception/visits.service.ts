@@ -32,9 +32,12 @@ const FINISH_LEASE_MS = 30 * 1000;
 /** How long a repeat request waits for that work before answering with the visit as it stands. */
 const SETTLE_WAIT_MS = 5 * 1000;
 const SETTLE_POLL_MS = 50;
-/** How many stuck paid visits one staff list call finishes. */
-const FINISH_PER_LIST = 5;
-/** How many days back a paid visit still missing only its bill is put on one (the Revenue Agent's reconcile window). */
+/** How many stuck paid visits one heal pass (the minute timer, or a staff list call) finishes. */
+const FINISH_PER_PASS = 5;
+/**
+ * How many days back a paid visit still missing only its bill is put on one (the Revenue Agent's reconcile window). Past
+ * it the staff add the payment by hand on the Revenue page.
+ */
 const BILL_RETRY_DAYS = 7;
 /** Tries at creating a visit when a request for the same patient races it. */
 const CREATE_ATTEMPTS = 3;
@@ -353,13 +356,16 @@ export class OpVisitsService {
     }
   }
 
-  /** Takes the finishing lease of an unfinished paid visit when no live request holds it, and finishes it; null otherwise. */
+  /**
+   * Takes the finishing lease of an unfinished paid visit when no live request holds it, and finishes it; null otherwise.
+   * The try is stamped, so the heal turns to the others before this one again.
+   */
   private async takeOver(id: unknown): Promise<OpVisitDocument | null> {
     const now = this.now();
     const claimed = await this.visits
       .findOneAndUpdate(
         { _id: id, status: 'paid', ...UNFINISHED, finishingUntil: { $not: { $gt: now } } },
-        { $set: { finishingUntil: after(now, FINISH_LEASE_MS) } },
+        { $set: { finishingUntil: after(now, FINISH_LEASE_MS), finishTriedAt: now } },
         { new: true },
       )
       .exec();
@@ -368,18 +374,20 @@ export class OpVisitsService {
 
   /**
    * Today's paid visits left without their token or bill (finishing failed, or the server
-   * stopped part-way) and whose lease has run out: a few are finished on each call, so the
-   * staff list, polled all day, heals them. Failures are logged and tried again next call.
-   * An earlier day's visit is healed only when the bill alone is missing (the last week):
-   * a token is for its own day and is never issued late.
+   * stopped part-way) and whose lease has run out: a few are finished on each pass, every
+   * minute (ReceptionScheduler) and on each staff list call. The least recently tried go
+   * first, so a visit that keeps failing cannot hold up the others; failures are logged and
+   * tried again later. An earlier day's visit is healed only when the bill alone is missing
+   * (the last week): a token is for its own day and is never issued late.
    */
-  private async finishStuck() {
+  async finishStuck() {
     const today = this.queue.today();
     const billOnly = { date: { $gte: daysBefore(today, BILL_RETRY_DAYS), $lt: today }, opNumber: { $exists: true }, tokenId: { $exists: true }, billId: { $exists: false } };
     const stuck = await this.visits
       .find({ status: 'paid', finishingUntil: { $not: { $gt: this.now() } }, $or: [{ date: today, ...UNFINISHED }, billOnly] })
-      .sort({ paidAt: 1, _id: 1 })
-      .limit(FINISH_PER_LIST)
+      // Never tried sorts first (a missing date sorts before any date).
+      .sort({ finishTriedAt: 1, paidAt: 1, _id: 1 })
+      .limit(FINISH_PER_PASS)
       .select('_id')
       .exec();
     await Promise.all(stuck.map((v) => this.takeOver(v._id).catch((err: Error) => this.logger.warn(`Visit ${v._id}: could not finish (${err.message})`))));
@@ -534,6 +542,8 @@ export class OpVisitsService {
 
   private async view(visit: OpVisitDocument, trackingBase?: string): Promise<VisitView> {
     const token = visit.tokenId ? await this.queue.tokenById(visit.tokenId) : null;
+    // Paid with its token but never put on a bill, and older than the heal goes back: no longer retried by itself.
+    const billByHand = visit.status === 'paid' && !!visit.tokenId && !visit.billId && visit.date < daysBefore(this.queue.today(), BILL_RETRY_DAYS);
     return {
       id: String(visit._id),
       status: visit.status,
@@ -551,6 +561,7 @@ export class OpVisitsService {
       opNumber: visit.opNumber,
       billNumber: visit.billNumber,
       receiptNumber: visit.receiptNumber,
+      ...(billByHand ? { billByHand } : {}),
       token: token ? await this.tokenView(token, trackingBase ?? (await this.trackingBase())) : undefined,
       kioskName: visit.kioskName,
       via: visit.via,

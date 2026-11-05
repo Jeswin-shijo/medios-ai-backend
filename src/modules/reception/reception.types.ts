@@ -78,6 +78,8 @@ export interface VisitView {
   billNumber?: string;
   /** The Revenue receipt (RC-…) of the kiosk payment. */
   receiptNumber?: string;
+  /** Paid with a token but never put on a bill, and past the days the bill is retried: staff add the payment by hand on the Revenue page. */
+  billByHand?: boolean;
   token?: KioskTokenView;
   kioskName: string;
   via: string;

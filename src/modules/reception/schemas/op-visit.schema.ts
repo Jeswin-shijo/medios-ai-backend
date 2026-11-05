@@ -119,6 +119,13 @@ export class OpVisit {
   @Prop()
   finishingUntil?: Date;
 
+  /**
+   * When a heal (the minute pass, the staff list or a kiosk poll) last took this paid visit over to finish it. The heal takes
+   * the least recently tried first, so a visit that keeps failing cannot hold up the others.
+   */
+  @Prop()
+  finishTriedAt?: Date;
+
   @Prop({ required: true })
   kioskId: string;
 

@@ -409,6 +409,51 @@ describe('OpVisitsService', () => {
     assert.equal(await m().Payment.countDocuments({ mode: 'kiosk' }), 8);
   });
 
+  test('a visit whose bill keeps failing goes to the back of the line, so the others are still finished (R33)', async () => {
+    (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: () => undefined };
+    const record = revenue.record.bind(revenue);
+    revenue.record = async (visit) => {
+      if (visit.uhid.startsWith('F')) throw new Error('bill refused');
+      return record(visit);
+    };
+    // Five paid visits whose bill step always fails, paid before one that would go through.
+    for (let i = 1; i <= 5; i++) {
+      await markPaid((await visitWith(`F${i}`, 'UPI')).id, clock);
+      advance(1);
+    }
+    const newer = await visitWith('N1', 'UPI');
+    await markPaid(newer.id, clock);
+    advance(31);
+
+    await service.finishStuck(); // the five failing ones, oldest first: each gets its token, none its bill
+    assert.equal(await m().OpVisit.countDocuments({ uhid: /^F/, tokenId: { $exists: true }, billId: { $exists: false } }), 5);
+    assert.equal((await m().OpVisit.findById(newer.id).lean())!.tokenId, undefined);
+    await service.finishStuck(); // the one not yet tried goes first
+    const done = (await m().OpVisit.findById(newer.id).lean())!;
+    assert.ok(done.tokenId && done.billId, 'the newer visit is finished');
+    // Each try is stamped, so the next pass starts with the least recently tried.
+    const tried = await m().OpVisit.find({ uhid: /^F/ }).lean();
+    assert.ok(tried.every((v) => v.finishTriedAt));
+  });
+
+  test('past the retry window a visit missing only its bill says it must be added by hand (R33)', async () => {
+    const set = { status: 'paid', paidAt: clock, transactionId: 'T-OLD', confirmedBy: 'Gateway', finishingUntil: clock, tokenLabel: 'G-004' };
+    const inside = await visitWith('U1', 'UPI');
+    await m().OpVisit.updateOne({ _id: inside.id }, { $set: { ...set, date: '2026-09-19', opNumber: 'OP-20260919-0001', tokenId: '64b000000000000000000004' } });
+    const outside = await visitWith('U2', 'UPI');
+    await m().OpVisit.updateOne({ _id: outside.id }, { $set: { ...set, date: '2026-09-18', opNumber: 'OP-20260918-0001', tokenId: '64b000000000000000000005' } });
+    (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: () => undefined };
+    const record = revenue.record;
+    revenue.record = async () => {
+      throw new Error('bill refused');
+    };
+    const rows = await service.list({ status: 'needs-attention' });
+    revenue.record = record;
+    const byId = new Map(rows.map((v) => [v.id, v]));
+    assert.equal(byId.get(inside.id)?.billByHand, undefined, 'still retried by itself');
+    assert.equal(byId.get(outside.id)?.billByHand, true);
+  });
+
   test('cash confirm is refused once the patient switched to UPI', async () => {
     const visit = await visitWith('U1', 'CASH');
     await service.pay(kiosk, visit.id, 'UPI');
