@@ -13,6 +13,7 @@ let displayKey = '';
 let displayId = '';
 let doctor = null;
 let doctorBody = null;
+let clinicDay = '';
 
 async function call(method, path, { body, auth, headers } = {}) {
   const h = { ...CLIENT, ...headers };
@@ -55,6 +56,46 @@ async function pollPaid(visitId, tries = 20) {
   return v;
 }
 
+/** Books an appointment today with the test doctor, at the first free time of the day (each slot is taken once). */
+async function bookToday(patient) {
+  const start = Math.floor(Math.random() * 96);
+  for (let i = 0; i < 96; i++) {
+    const minutes = ((start + i) % 96) * 15;
+    const h = Math.floor(minutes / 60);
+    const time = `${String(h % 12 || 12).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+    const r = await admin('POST', '/appointments', {
+      uhid: patient.uhid, patientName: patient.name, age: patient.age, gender: patient.gender, date: clinicDay, time,
+      type: 'Consultation', condition: 'E2E check', status: 'Scheduled', doctorId: doctor.id, doctorName: doctor.name, departmentCode: doctor.departmentCode,
+    });
+    if (r.status === 409) continue;
+    if (r.status >= 300) throw new Error(`book an appointment failed: ${r.status} ${JSON.stringify(r.json)}`);
+    return r.data.id ?? r.data._id;
+  }
+  throw new Error('the test doctor has no free time today');
+}
+
+/**
+ * The Revenue Agent has the paid visit (R26): one consultation line (the appointment's own check-in charge, or the visit's),
+ * the kiosk payment for the fee, and nothing due. `appointmentId` set: the visit checked that appointment in.
+ */
+async function checkRevenue(paid, appointmentId) {
+  // Revenue's own check-in hook runs on its own; give it time to (wrongly) add a second line.
+  if (appointmentId) await sleep(1000);
+  const found = await must('find the bill', admin('GET', `/revenue/bills?q=${encodeURIComponent(paid?.billNumber ?? '')}`));
+  const row = (found ?? []).find((b) => b.number === paid?.billNumber);
+  if (!ok('the visit is on a Revenue bill', !!row, paid?.billNumber)) return;
+  const view = await must('open the bill', admin('GET', `/revenue/bills/${row._id}`));
+  const consult = view.lines.filter((l) => l.category === 'consultation');
+  const own = appointmentId ? { type: 'opd-fee', ref: appointmentId } : { type: 'op-visit', ref: paid.id };
+  ok(`one consultation line, ${own.type === 'opd-fee' ? "the appointment's check-in charge" : "the visit's own"}`,
+    consult.length === 1 && consult[0].source.type === own.type && consult[0].source.ref === own.ref && consult[0].amount === 300, consult);
+  ok(`bill kind is ${appointmentId ? 'opd' : 'walk-in'}`, view.bill.kind === (appointmentId ? 'opd' : 'walk-in') && (!appointmentId || String(view.bill.appointment) === appointmentId), view.bill.kind);
+  const kioskPay = view.payments.filter((p) => p.source === `op-visit:${paid.id}`);
+  ok('one kiosk payment of 300 with its receipt', kioskPay.length === 1 && kioskPay[0].mode === 'kiosk' && kioskPay[0].amount === 300 && kioskPay[0].receiptNumber === paid.receiptNumber, kioskPay);
+  ok('balance 0', view.bill.totals.balance === 0, view.bill.totals);
+  return kioskPay[0];
+}
+
 async function section(title, fn) {
   console.log(`\n${title}`);
   try { await fn(); } catch (err) { ok(`${title}: ${err.message}`, false); }
@@ -82,6 +123,7 @@ async function setup() {
     doctor = await must('create test doctor', admin('POST', '/opd/doctors', body));
   }
   doctor.id = doctor.id ?? doctor._id;
+  clinicDay = (await must('kiosk config', kiosk('GET', '/reception/kiosk/config'))).clinic.date;
 }
 
 async function main() {
@@ -91,7 +133,7 @@ async function main() {
   let step1Token = '';
   const rekha = { uhid: 'MHK202500324' };
 
-  await section('1. Card path with UPI', async () => {
+  await section('1. Card path with UPI, checking in an appointment with that doctor', async () => {
     const id = await kiosk('POST', '/reception/kiosk/identify/card', { cardId: '04:a1:b2:c3' });
     ok('card tap finds Rekha S', id.status === 200 && id.data.patient?.uhid === rekha.uhid, id.json);
     ok('phone is masked', /^•{5} \d{5}$/.test(id.data.patient?.phone ?? ''), id.data.patient?.phone);
@@ -101,6 +143,7 @@ async function main() {
     ok('test doctor is listed and bookable', !!listed && listed.availability?.bookable === true, listed);
     const v = await kiosk('POST', '/reception/kiosk/visits', { session, doctorId: doctor.id });
     ok('visit started awaiting payment', v.status === 201 && v.data.status === 'awaiting-payment', v.json);
+    const appointmentId = await bookToday(id.data.patient);
     const pay = await kiosk('POST', `/reception/kiosk/visits/${v.data.id}/pay`, { method: 'UPI' });
     ok('UPI payment has am=300.00', pay.status === 200 && /am=300\.00/.test(pay.data.upiUri ?? ''), pay.data?.upiUri);
     const done = await kiosk('POST', `/reception/kiosk/visits/${v.data.id}/sample-complete`);
@@ -110,7 +153,11 @@ async function main() {
     ok('OP number', /^OP-20260926-\d{4}$/.test(paid?.opNumber ?? ''), paid?.opNumber);
     ok('token label', LABEL.test(paid?.token?.label ?? ''), paid?.token?.label);
     ok('track link', (paid?.token?.trackUrl ?? '').includes('/track#'), paid?.token?.trackUrl);
-    ok('bill number on the visit', !!paid?.billNumber, paid?.billNumber);
+    ok('bill and receipt numbers on the visit', /^BL-\d{4,}$/.test(paid?.billNumber ?? '') && /^RC-\d{4,}$/.test(paid?.receiptNumber ?? ''), { bill: paid?.billNumber, receipt: paid?.receiptNumber });
+    const appt = await admin('GET', `/appointments/${appointmentId}`);
+    ok('the appointment with that doctor is Checked In', appt.data?.status === 'Checked In', appt.data?.status);
+    const kioskPay = await checkRevenue(paid, appointmentId);
+    ok('the payment names UPI and SAMPLE', /^UPI · .+ · SAMPLE$/.test(kioskPay?.reference ?? ''), kioskPay?.reference);
     step1Token = paid?.token?.label;
     const track = await call('GET', `/queue/track/${paid?.token?.trackCode}`);
     ok('public tracking page has no patient name', track.status === 200 && !('patientName' in (track.data ?? {})) && !JSON.stringify(track.data).includes('Rekha'), track.data);
@@ -124,12 +171,12 @@ async function main() {
   });
 
   let otpToken = '';
-  await section('3. OTP path with cash', async () => {
+  await section('3. OTP path with cash, checking in an appointment with that doctor', async () => {
     const pts = await must('list patients', admin('GET', '/patients?limit=100'));
     const list = Array.isArray(pts) ? pts : pts.patients ?? pts.items ?? pts.data ?? [];
     const digits = (p) => String(p.phone ?? '').replace(/\D/g, '').slice(-10);
     const candidates = list.filter((p) => p.uhid !== rekha.uhid && digits(p).length === 10);
-    let picked = null; let visit = null;
+    let picked = null; let visit = null; let summary = null;
     for (const p of candidates.slice(0, 8)) {
       const phone = digits(p);
       const sent = await kiosk('POST', '/reception/kiosk/otp/send', { phone });
@@ -139,9 +186,10 @@ async function main() {
       const mine = ver.data.patients.find((x) => x.patient.uhid === p.uhid);
       if (!mine) continue;
       const v = await kiosk('POST', '/reception/kiosk/visits', { session: mine.session, doctorId: doctor.id });
-      if (v.status === 201) { picked = p; visit = v.data; ok('code sent and verified for a seeded patient', true); break; }
+      if (v.status === 201) { picked = p; visit = v.data; summary = mine.patient; ok('code sent and verified for a seeded patient', true); break; }
     }
     if (!picked) throw new Error('no seeded patient without a token was found');
+    const appointmentId = await bookToday(summary);
     const cash = await kiosk('POST', `/reception/kiosk/visits/${visit.id}/pay`, { method: 'CASH' });
     ok('cash choice gives a payment code', cash.status === 200 && /^\d{4}$/.test(cash.data.paymentCode ?? ''), cash.json);
     const wait = await admin('GET', '/reception/visits?status=awaiting-cash');
@@ -151,13 +199,17 @@ async function main() {
     const paid = await pollPaid(visit.id);
     ok('kiosk sees paid with a token', paid?.status === 'paid' && LABEL.test(paid?.token?.label ?? ''), paid);
     otpToken = paid?.token?.label;
-    const inv = await admin('GET', `/billing/invoices?uhid=${picked.uhid}`);
-    const invs = Array.isArray(inv.data) ? inv.data : inv.data?.invoices ?? inv.data?.items ?? [];
-    ok('bill is visible in billing', invs.some((i) => JSON.stringify(i).includes(paid?.billNumber ?? '\u0000')), { count: invs.length, bill: paid?.billNumber });
+    const appt = await admin('GET', `/appointments/${appointmentId}`);
+    ok('the appointment with that doctor is Checked In', appt.data?.status === 'Checked In', appt.data?.status);
+    const pay = await checkRevenue(paid, appointmentId);
+    ok('the payment says cash at the counter', pay?.reference === 'Cash at counter', pay?.reference);
+    const old = await admin('GET', `/billing/invoices?uhid=${picked.uhid}`);
+    const olds = Array.isArray(old.data) ? old.data : [];
+    ok('no old invoice is written for the visit', !olds.some((i) => JSON.stringify(i).includes(paid?.opNumber ?? '\u0000')), olds.length);
   });
 
   let newToken = '';
-  await section('4. New patient with card payment', async () => {
+  await section('4. New patient with card payment (a walk-in)', async () => {
     const suffix = String(Math.floor(Math.random() * 1e5)).padStart(5, '0');
     const reg = await kiosk('POST', '/reception/kiosk/register', { name: `E2E Patient ${suffix}`, phone: `90000${suffix}`, gender: 'Female', age: 31 });
     ok('registered at the kiosk', (reg.status === 200 || reg.status === 201) && !!reg.data.patient?.uhid, reg.json);
@@ -169,6 +221,8 @@ async function main() {
     const paid = await pollPaid(v.data.id);
     ok('visit is paid with a token', paid?.status === 'paid' && LABEL.test(paid?.token?.label ?? ''), paid?.status);
     newToken = paid?.token?.label;
+    const kioskPay = await checkRevenue(paid);
+    ok('the payment names the card and SAMPLE', /^Card · .+ · SAMPLE$/.test(kioskPay?.reference ?? ''), kioskPay?.reference);
   });
 
   await section('5. Cancelling', async () => {

@@ -3,14 +3,13 @@ import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, isValidObjectId, Model, mongo } from 'mongoose';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { clinicNow, displayDate, displayDateTime, parseIsoDay } from '../../common/utils/clinic-time';
-import { BillingService } from '../billing/billing.service';
-import { BillInvoice, BillInvoiceDocument } from '../billing/schemas/bill.schema';
+import { clinicNow, displayDateTime, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import { doctorAvailability } from '../opd/availability';
 import { OpdService } from '../opd/opd.service';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { QueueService } from '../queue/queue.service';
 import { QueueTokenDocument } from '../queue/schemas/queue-token.schema';
+import { RevenueKioskService } from '../revenue/revenue-kiosk.service';
 import { SettingsService } from '../settings/settings.service';
 import { formatOpNumber, newSecret, paymentCode } from './format';
 import { RECEPTION_CLOCK, ReceptionIdentityService } from './identity.service';
@@ -33,10 +32,12 @@ const SETTLE_WAIT_MS = 5 * 1000;
 const SETTLE_POLL_MS = 50;
 /** How many stuck paid visits one staff list call finishes. */
 const FINISH_PER_LIST = 5;
+/** How many days back a paid visit still missing only its bill is put on one (the Revenue Agent's reconcile window). */
+const BILL_RETRY_DAYS = 7;
 /** Tries at creating a visit when a request for the same patient races it. */
 const CREATE_ATTEMPTS = 3;
 
-/** The bill's payment mode. */
+/** The method as the receipt names it. */
 const MODE: Record<PaymentMethod, string> = { UPI: 'UPI', CASH: 'Cash', CARD: 'Card' };
 /** The method as written in a sentence. */
 const SAID: Record<PaymentMethod, string> = { UPI: 'UPI', CASH: 'cash', CARD: 'card' };
@@ -51,8 +52,22 @@ const visitNotFound = () => new NotFoundException('Visit not found');
 
 const kioskActor = (kiosk: KioskRef) => `Kiosk: ${kiosk.name}`;
 const after = (from: Date, ms: number) => new Date(from.getTime() + ms);
+/** The clinic day `n` days before `day` (YYYY-MM-DD). */
+const daysBefore = (day: string, n: number) => {
+  const d = parseIsoDay(day);
+  d.setDate(d.getDate() - n);
+  return isoDate(d);
+};
+/**
+ * How the patient paid, for the Revenue receipt: the payment's mode is `kiosk`, so the real method and its reference
+ * go here, and sample mode says so.
+ */
+const paymentReference = (visit: OpVisit) =>
+  visit.method === 'CASH'
+    ? 'Cash at counter'
+    : [MODE[visit.method!], visit.transactionId || visit.orderId, visit.provider === 'sample' ? 'SAMPLE' : ''].filter(Boolean).join(' · ');
 const isDuplicate = (err: unknown) => err instanceof mongo.MongoServerError && err.code === 11000;
-/** Paid and given everything payment brings. */
+/** Paid and given everything payment brings: the OP number, the token and the bill. */
 const isFinished = (visit: OpVisit) => Boolean(visit.opNumber && visit.tokenId && visit.billId);
 /** The query form of "not finished". */
 const UNFINISHED: FilterQuery<OpVisit> = { $or: [{ opNumber: { $exists: false } }, { billId: { $exists: false } }, { tokenId: { $exists: false } }] };
@@ -65,8 +80,8 @@ export type VisitListStatus = 'awaiting-cash' | 'paid' | 'needs-attention' | 'al
  * and a bookable doctor, then paid by UPI, card (both through the payment provider) or
  * cash (confirmed by staff). Payment is one atomic switch from awaiting-payment to paid,
  * so exactly one completion wins against any other completion, a cancel or expiry; the
- * winner then adds the OP number, the paid bill and the doctor-wise token. A patient has
- * at most one open visit.
+ * winner then adds the OP number, the doctor-wise token and the bill, which the Revenue
+ * Agent keeps (R26). A patient has at most one open visit.
  */
 @Injectable()
 export class OpVisitsService {
@@ -76,11 +91,10 @@ export class OpVisitsService {
     @InjectModel(OpVisit.name) private readonly visits: Model<OpVisitDocument>,
     @InjectModel(OpSequence.name) private readonly sequences: Model<OpSequenceDocument>,
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
-    @InjectModel(BillInvoice.name) private readonly bills: Model<BillInvoiceDocument>,
     private readonly identity: ReceptionIdentityService,
     private readonly opd: OpdService,
     private readonly queue: QueueService,
-    private readonly billing: BillingService,
+    private readonly revenue: RevenueKioskService,
     private readonly settings: SettingsService,
     private readonly config: ConfigService,
     @Optional() @Inject(PAYMENT_PROVIDER) private readonly payments: PaymentProvider | null,
@@ -183,7 +197,7 @@ export class OpVisitsService {
     return this.completeWith(visitId, { actor: kioskActor(kiosk), transactionId: `SAMPLE-${method}-${newSecret(6)}` }, [method]);
   }
 
-  /** The kiosk's own visit; a paid one is returned with its OP number, token and bill. */
+  /** The kiosk's own visit; a paid one is returned with its OP number, token and bill (once recorded). */
   async getForKiosk(kiosk: KioskRef, visitId: string): Promise<VisitView> {
     const visit = await this.kioskVisit(kiosk, visitId);
     if (visit.status !== 'paid') return this.view(visit);
@@ -288,18 +302,27 @@ export class OpVisitsService {
   }
 
   /**
-   * Adds the OP number, the bill and then the token to a paid visit, storing each as it
-   * goes so a later request picks up where this stopped; the bill comes first so a
-   * recorded payment always has one. Only the holder of the visit's finishing lease runs
-   * this, and it gives the lease up at the end, done or failed, so a retry need not wait.
+   * Adds the OP number, the token and then the bill to a paid visit, storing each as it
+   * goes so a later request picks up where this stopped. The bill comes last: a paid visit
+   * always gets its token (R8) whatever the Revenue Agent does, and the bill needs to know
+   * whether the token checked in an appointment. A failed bill is logged and left for a
+   * later request (the staff list heals it); it never fails the payment. Only the holder of
+   * the visit's finishing lease runs this, and it gives the lease up at the end, done or
+   * failed, so a retry need not wait.
    */
   private async finish(visit: OpVisitDocument): Promise<OpVisitDocument> {
     const by = visit.confirmedBy || 'System';
     let current = visit;
     try {
       if (!current.opNumber) current = await this.assignOpNumber(current, by);
-      if (!current.billId) current = await this.createBill(current, by);
       if (!current.tokenId) current = await this.issueToken(current, by);
+      if (!current.billId) {
+        try {
+          current = await this.recordBill(current, by);
+        } catch (err) {
+          this.logger.warn(`Visit ${visit._id}: paid and given its token, but not yet on a bill (${(err as Error).message}); tried again later`);
+        }
+      }
       return current;
     } finally {
       // Only our own lease: if this ran past it, another request may hold a newer one.
@@ -321,13 +344,17 @@ export class OpVisitsService {
   }
 
   /**
-   * Today's paid visits left without their bill or token (finishing failed, or the server
+   * Today's paid visits left without their token or bill (finishing failed, or the server
    * stopped part-way) and whose lease has run out: a few are finished on each call, so the
    * staff list, polled all day, heals them. Failures are logged and tried again next call.
+   * An earlier day's visit is healed only when the bill alone is missing (the last week):
+   * a token is for its own day and is never issued late.
    */
   private async finishStuck() {
+    const today = this.queue.today();
+    const billOnly = { date: { $gte: daysBefore(today, BILL_RETRY_DAYS), $lt: today }, opNumber: { $exists: true }, tokenId: { $exists: true }, billId: { $exists: false } };
     const stuck = await this.visits
-      .find({ date: this.queue.today(), status: 'paid', ...UNFINISHED, finishingUntil: { $not: { $gt: this.now() } } })
+      .find({ status: 'paid', finishingUntil: { $not: { $gt: this.now() } }, $or: [{ date: today, ...UNFINISHED }, billOnly] })
       .sort({ paidAt: 1, _id: 1 })
       .limit(FINISH_PER_LIST)
       .select('_id')
@@ -369,31 +396,31 @@ export class OpVisitsService {
     return this.store(visit, 'tokenId', { tokenId: String(token._id), tokenLabel: token.label }, event, by);
   }
 
-  /** A paid bill numbered from the OP number, so a repeat finds the one already made instead of adding another. */
-  private async createBill(visit: OpVisitDocument, by: string) {
-    const method = visit.method!;
-    const billNumber = visit.opNumber!.replace(/^OP-/, 'OPB-');
-    let bill: BillInvoiceDocument;
-    try {
-      bill = await this.billing.create({
-        billNumber,
-        uhid: visit.uhid,
-        patientName: visit.patientName,
-        billDate: displayDate(clinicNow(visit.paidAt)),
-        visitType: 'OPD',
-        createdBy: by,
-        paymentMode: MODE[method],
-        items: [{ service: `OP Consultation – ${visit.doctorName}`, category: 'Consultation', qty: 1, unitPrice: visit.fee, amount: visit.fee }] as BillInvoice['items'],
-        subtotal: visit.fee,
-        totalAmount: visit.fee,
-        paidAmount: visit.fee,
-      });
-    } catch (err) {
-      const made = isDuplicate(err) ? await this.bills.findOne({ billNumber }).exec() : null;
-      if (!made) throw err;
-      bill = made;
-    }
-    return this.store(visit, 'billId', { billId: String(bill._id), billNumber }, `Bill ${billNumber}: ₹${visit.fee} paid by ${SAID[method]}`, by);
+  /**
+   * Puts the visit on a Revenue bill (R26): its consultation and the kiosk payment, once per visit, so a repeat or a
+   * heal never records twice. When the token checked in the patient's appointment with this doctor, the consultation is
+   * that appointment's own check-in charge; otherwise the visit's own line, on the bill Revenue picks for the day.
+   */
+  private async recordBill(visit: OpVisitDocument, by: string) {
+    const token = visit.tokenId ? await this.queue.tokenById(visit.tokenId) : null;
+    const appointmentId = token?.appointmentId && token.doctorId === visit.doctorId ? token.appointmentId : undefined;
+    const record = await this.revenue.record({
+      visitId: String(visit._id),
+      uhid: visit.uhid,
+      doctorId: visit.doctorId,
+      doctorName: visit.doctorName,
+      fee: visit.fee,
+      day: visit.date,
+      appointmentId,
+      reference: paymentReference(visit),
+      by,
+      at: clinicNow(visit.paidAt ?? this.now()),
+    });
+    const event = record.receiptNumber
+      ? `Bill ${record.billNumber}: ₹${visit.fee} paid by ${SAID[visit.method!]}, receipt ${record.receiptNumber}`
+      : `Bill ${record.billNumber}: consultation with nothing to pay`;
+    const set: Partial<OpVisit> = { billId: record.billId, billNumber: record.billNumber, ...(record.receiptNumber ? { receiptNumber: record.receiptNumber } : {}) };
+    return this.store(visit, 'billId', set, event, by);
   }
 
   /** Saves one finishing step unless it is already saved; returns the visit as stored. */
@@ -489,6 +516,7 @@ export class OpVisitsService {
       transactionId: visit.transactionId,
       opNumber: visit.opNumber,
       billNumber: visit.billNumber,
+      receiptNumber: visit.receiptNumber,
       token: token ? await this.tokenView(token, trackingBase ?? (await this.trackingBase())) : undefined,
       kioskName: visit.kioskName,
       via: visit.via,

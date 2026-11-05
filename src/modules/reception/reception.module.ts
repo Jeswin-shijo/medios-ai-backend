@@ -2,10 +2,10 @@ import { Logger, Module, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AppointmentsModule } from '../appointments/appointments.module';
-import { BillingModule } from '../billing/billing.module';
 import { OpdModule } from '../opd/opd.module';
 import { PatientsModule } from '../patients/patients.module';
 import { QueueModule } from '../queue/queue.module';
+import { RevenueModule } from '../revenue/revenue.module';
 import { SettingsModule } from '../settings/settings.module';
 import { ReceptionIdentityService } from './identity.service';
 import { KioskController } from './kiosk.controller';
@@ -28,9 +28,10 @@ import { OpVisitsService } from './visits.service';
     ]),
     PatientsModule,
     AppointmentsModule,
-    BillingModule,
     OpdModule,
     QueueModule,
+    // Kiosk payments are Revenue payments (R26). Revenue imports nothing of the kiosk, so there is no cycle.
+    RevenueModule,
     SettingsModule,
   ],
   controllers: [KioskController, ReceptionController],

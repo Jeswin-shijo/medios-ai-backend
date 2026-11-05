@@ -34,6 +34,7 @@ export class Payment {
   @Prop({ default: '' })
   reference: string;
 
+  /** The record the money came from, one payment each: `op-visit:<id>` for a payment taken at the reception kiosk. */
   @Prop({ type: String })
   source?: string;
 
@@ -54,3 +55,5 @@ export class Payment {
 }
 
 export const PaymentSchema = SchemaFactory.createForClass(Payment);
+// A kiosk visit is paid once, whatever retries or replays bring it back.
+PaymentSchema.index({ source: 1 }, { unique: true, partialFilterExpression: { source: { $type: 'string' } } });

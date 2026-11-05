@@ -60,7 +60,10 @@ export interface VisitView {
   paidAtDisplay?: string;
   transactionId?: string;
   opNumber?: string;
+  /** The Revenue bill (BL-…) the visit is on; OPB-… for a visit paid before the Revenue Agent billed the kiosk. */
   billNumber?: string;
+  /** The Revenue receipt (RC-…) of the kiosk payment. */
+  receiptNumber?: string;
   token?: KioskTokenView;
   kioskName: string;
   via: string;

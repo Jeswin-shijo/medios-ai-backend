@@ -9,7 +9,17 @@ import { OpdService } from '../opd/opd.service';
 import { SettingsService } from '../settings/settings.service';
 import { AppointmentEvents } from '../appointments/appointment-events';
 import { PatientsService } from '../patients/patients.service';
-import { BillingService } from '../billing/billing.service';
+import { AgentRegistry } from '../coordinator/agent-registry';
+import { CoordinatorEvents } from '../coordinator/coordinator-events';
+import { MessagesService } from '../coordinator/messages.service';
+import { PriceListService } from '../revenue/price-list.service';
+import { RevenueBillsService } from '../revenue/revenue-bills.service';
+import { RevenueCoordinatorRegistration } from '../revenue/revenue-coordinator.registration';
+import { FinalBillService } from '../revenue/revenue-final.service';
+import { RevenueKioskService } from '../revenue/revenue-kiosk.service';
+import { RevenueOpdService } from '../revenue/revenue-opd.service';
+import { PaymentsService } from '../revenue/revenue-payments.service';
+import { RevenueSettingsService } from '../revenue/revenue-settings.service';
 import { ReceptionIdentityService } from './identity.service';
 import { OpVisitsService } from './visits.service';
 import { PaymentProvider, SamplePaymentProvider } from './providers/payment-provider';
@@ -43,20 +53,47 @@ describe('OpVisitsService', () => {
   const m = () => models();
   let service: OpVisitsService;
   let queue: QueueService;
+  let revenue: RevenueKioskService;
+  let revenueOpd: RevenueOpdService;
   let clock: Date;
   let docA: string;
   let docB: string;
   let docDone: string;
 
+  /** The Revenue Agent as the app wires it, on the same appointment events as the queue. */
+  const buildRevenue = (settings: SettingsService, appointmentEvents: AppointmentEvents) => {
+    const registry = new AgentRegistry();
+    const messages = new MessagesService(m().AgentMessage, registry, new CoordinatorEvents());
+    const reg = new RevenueCoordinatorRegistration(registry, m().Bill, m().Refund, m().TaskAlertItem, messages);
+    const bills = new RevenueBillsService(m().Bill, m().ChargeLine, m().Payment, m().Refund, m().Correction, m().Estimate, m().CoordinatorCounter, m().Patient);
+    const prices = new PriceListService(m().PriceItem, m().Ward, m().OpDoctor);
+    const revenueSettings = new RevenueSettingsService(settings);
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m().Bill, m().ChargeLine, m().TaskAlertItem, m().PharmacyOrder, m().PharmacyLine, m().LabRequest, m().LabLine, m().Admission, m().Appointment);
+    const payments = new PaymentsService(reg, revenueSettings, bills, final, m().Payment);
+    revenueOpd = new RevenueOpdService(appointmentEvents, prices, bills, m().Appointment, m().Patient, m().ChargeLine, final);
+    reg.onModuleInit();
+    return new RevenueKioskService(revenueOpd, bills, payments, m().Patient, m().ChargeLine, m().Payment);
+  };
+
   const build = (payments: PaymentProvider | null) => {
     const settings = new SettingsService(m().HospitalSettings);
     const opd = new OpdService(m().Department, m().OpDoctor, settings);
-    queue = new QueueService(m().QueueToken, m().QueueSequence, m().Appointment, m().Patient, settings, new QueueEvents(), new AppointmentEvents(), opd);
+    const appointmentEvents = new AppointmentEvents();
+    queue = new QueueService(m().QueueToken, m().QueueSequence, m().Appointment, m().Patient, settings, new QueueEvents(), appointmentEvents, opd);
     const cards = new PatientCardsService(m().PatientCard, m().Patient, queue);
     const config = { get: (key: string) => (key === 'jwt.secret' ? 'test-secret-test-secret-test-secret-1234' : key === 'reception.publicWebUrl' ? 'https://web.example' : undefined) } as unknown as ConfigService;
     const now = () => clock;
     const identity = new ReceptionIdentityService(m().ReceptionSession, m().OtpChallenge, m().Patient, m().Appointment, new PatientsService(m().Patient), cards, queue, settings, config, null, now);
-    return new OpVisitsService(m().OpVisit, m().OpSequence, m().Patient, m().BillInvoice, identity, opd, queue, new BillingService(m().BillInvoice), settings, config, payments, now);
+    revenue = buildRevenue(settings, appointmentEvents);
+    return new OpVisitsService(m().OpVisit, m().OpSequence, m().Patient, identity, opd, queue, revenue, settings, config, payments, now);
+  };
+
+  /** The visit's Revenue records: its consultation lines, its kiosk payment(s), and the bill they sit on. */
+  const revenueOf = async (visitId: string) => {
+    const payments = await m().Payment.find({ source: `op-visit:${visitId}` }).lean();
+    const bill = payments[0] ? await m().Bill.findById(payments[0].bill).lean() : null;
+    const lines = bill ? await m().ChargeLine.find({ bill: bill._id, category: 'consultation' }).lean() : [];
+    return { payments, bill, lines };
   };
 
   const advance = (seconds: number) => {
@@ -134,26 +171,29 @@ describe('OpVisitsService', () => {
     assert.equal(paid.token?.doctorName, 'Dr. A');
     assert.equal(paid.token?.room, 'Room 101');
     assert.match(paid.token!.trackUrl, /^https:\/\/web\.example\/track#.+/);
-    assert.equal(paid.billNumber, 'OPB-20260926-0001');
+    assert.equal(paid.billNumber, 'BL-0001');
+    assert.equal(paid.receiptNumber, 'RC-0001');
     assert.equal(paid.paidAt, clock.toISOString());
     assert.equal(paid.paidAtDisplay, '26 Sep 2026, 10:00 AM');
     assert.deepEqual(await service.list({ status: 'awaiting-cash' }), []);
     assert.deepEqual((await service.list({ status: 'paid' })).map((v) => v.opNumber), ['OP-20260926-0001']);
 
-    const bills = await m().BillInvoice.find({}).lean();
-    assert.equal(bills.length, 1);
-    const bill = bills[0];
-    assert.equal(bill.billNumber, 'OPB-20260926-0001');
-    assert.equal(bill.uhid, 'U1');
-    assert.equal(bill.status, 'Paid');
-    assert.equal(bill.paymentMode, 'Cash');
-    assert.equal(bill.visitType, 'OPD');
-    assert.equal(bill.createdBy, 'Anita');
-    assert.equal(bill.billDate, '26 Sep 2026');
-    assert.deepEqual([bill.subtotal, bill.totalAmount, bill.paidAmount, bill.balanceDue], [300, 300, 300, 0]);
+    // The Revenue Agent has it (no appointment: a walk-in bill), and no old invoice is written.
+    assert.equal(await m().BillInvoice.countDocuments({}), 0);
+    const { payments, bill, lines } = await revenueOf(visit.id);
+    assert.equal(bill!.number, 'BL-0001');
+    assert.equal(bill!.kind, 'walk-in');
+    assert.equal(bill!.patientUhid, 'U1');
+    assert.equal(bill!.day, '2026-09-26');
+    assert.deepEqual([bill!.totals.charges, bill!.totals.payments, bill!.totals.balance], [300, 300, 0]);
     assert.deepEqual(
-      bill.items.map(({ service: s, category, qty, unitPrice, amount }) => ({ service: s, category, qty, unitPrice, amount })),
-      [{ service: 'OP Consultation – Dr. A', category: 'Consultation', qty: 1, unitPrice: 300, amount: 300 }],
+      lines.map(({ name, category, qty, unitPrice, amount, source }) => ({ name, category, qty, unitPrice, amount, source })),
+      [{ name: 'Consultation - Dr. A', category: 'consultation', qty: 1, unitPrice: 300, amount: 300, source: { type: 'op-visit', ref: visit.id } }],
+    );
+    assert.equal(payments.length, 1);
+    assert.deepEqual(
+      { receipt: payments[0].receiptNumber, amount: payments[0].amount, mode: payments[0].mode, kind: payments[0].kind, reference: payments[0].reference, by: payments[0].by.name },
+      { receipt: 'RC-0001', amount: 300, mode: 'kiosk', kind: 'settlement', reference: 'Cash at counter', by: 'Anita' },
     );
 
     const tokens = await m().QueueToken.find({}).lean();
@@ -162,7 +202,7 @@ describe('OpVisitsService', () => {
     assert.equal(tokens[0].issuedBy, 'Anita');
     const stored = await m().OpVisit.findById(visit.id).lean();
     assert.equal(stored!.tokenId, String(tokens[0]._id));
-    assert.equal(stored!.billId, String(bill._id));
+    assert.equal(stored!.billId, String(bill!._id));
     assert.equal(stored!.confirmedBy, 'Anita');
 
     // Paid is final: no cancel, and a second confirm changes nothing.
@@ -178,13 +218,17 @@ describe('OpVisitsService', () => {
       assert.equal(r.status, 'paid');
       assert.equal(r.opNumber, 'OP-20260926-0001');
       assert.equal(r.token?.label, 'G-001');
-      assert.equal(r.billNumber, 'OPB-20260926-0001');
+      assert.equal(r.billNumber, 'BL-0001');
+      assert.equal(r.receiptNumber, 'RC-0001');
       assert.equal(r.transactionId, results[0].transactionId);
     }
     assert.equal(await m().QueueToken.countDocuments({}), 1);
-    assert.equal(await m().BillInvoice.countDocuments({}), 1);
+    const { payments, lines } = await revenueOf(visit.id);
+    assert.deepEqual([payments.length, lines.length], [1, 1]);
+    assert.equal(payments[0].reference, `UPI · ${results[0].transactionId} · SAMPLE`);
+    assert.equal(await m().Payment.countDocuments({}), 1);
     const events = (await m().OpVisit.findById(visit.id).lean())!.history.map((h) => h.event);
-    assert.deepEqual(events.slice(2), [`Payment received (${results[0].transactionId})`, 'OP number OP-20260926-0001', 'Bill OPB-20260926-0001: ₹300 paid by UPI', 'Token G-001 issued']);
+    assert.deepEqual(events.slice(2), [`Payment received (${results[0].transactionId})`, 'OP number OP-20260926-0001', 'Token G-001 issued', 'Bill BL-0001: ₹300 paid by UPI, receipt RC-0001']);
 
     // The losers took no OP number: the next visit gets the next one.
     const next = await visitWith('U2', 'CARD');
@@ -214,7 +258,7 @@ describe('OpVisitsService', () => {
 
       const stored = await m().OpVisit.findById(visit.id).lean();
       const tokens = await m().QueueToken.countDocuments({ uhid });
-      const bills = await m().BillInvoice.countDocuments({ uhid });
+      const bills = await m().Payment.countDocuments({ source: `op-visit:${visit.id}` });
       if (stored!.status === 'paid') {
         assert.equal(confirmed.status, 'fulfilled');
         assert.equal(cancelled.status, 'rejected');
@@ -248,7 +292,11 @@ describe('OpVisitsService', () => {
     assert.equal(again.token?.label, desk.token.label);
     assert.equal(again.billNumber, paid.billNumber);
     assert.equal(await m().QueueToken.countDocuments({}), 1);
-    assert.equal(await m().BillInvoice.countDocuments({}), 1);
+    assert.equal(await m().Payment.countDocuments({}), 1);
+    // The desk token is not Dr. B's: the visit's own consultation is charged and paid.
+    const { lines, bill } = await revenueOf(visit.id);
+    assert.deepEqual(lines.map((l) => [l.name, l.amount, l.source.type]), [['Consultation - Dr. B', 450, 'op-visit']]);
+    assert.equal(bill!.totals.balance, 0);
   });
 
   test('a repeat completion finishes a visit a stopped request left half-done', async () => {
@@ -268,19 +316,29 @@ describe('OpVisitsService', () => {
     const healed = await repeat;
     assert.equal(healed.opNumber, 'OP-20260926-0001');
     assert.equal(healed.token?.label, 'G-001');
-    assert.equal(healed.billNumber, 'OPB-20260926-0001');
+    assert.equal(healed.billNumber, 'BL-0001');
+    assert.equal((await revenueOf(visit.id)).payments.length, 1);
 
-    // Another stopped after creating the bill but before storing it (and before the token).
+    // Another stopped after its OP number and token, before the bill.
     const second = await visitWith('U2', 'UPI');
     await markPaid(second.id, clock, { opNumber: 'OP-20260926-0002' });
     await m().OpSequence.updateOne({ date: '2026-09-26' }, { $set: { last: 2 } });
-    await m().BillInvoice.create({ billNumber: 'OPB-20260926-0002', uhid: 'U2', patientName: 'Patient U2', subtotal: 300, totalAmount: 300, paidAmount: 300 } as any);
+    const token = await queue.issue({ uhid: 'U2', doctorId: docA }, 'Gateway', 'kiosk');
+    await m().OpVisit.updateOne({ _id: second.id }, { $set: { tokenId: String(token.token._id), tokenLabel: token.token.label } });
     const again = await service.complete(second.id, { actor: 'Gateway', transactionId: 'T2' });
     assert.equal(again.opNumber, 'OP-20260926-0002');
-    assert.equal(again.billNumber, 'OPB-20260926-0002');
     assert.equal(again.token?.label, 'G-002');
-    assert.equal(await m().BillInvoice.countDocuments({ uhid: 'U2' }), 1);
+    assert.equal(again.billNumber, 'BL-0002');
     assert.equal((await m().OpSequence.findOne({}).lean())!.last, 2);
+
+    // And one stopped after the Revenue Agent took its payment, before the visit stored the bill: it is not paid twice.
+    await m().OpVisit.updateOne({ _id: second.id }, { $unset: { billId: 1, billNumber: 1, receiptNumber: 1 } });
+    const third = await service.complete(second.id, { actor: 'Gateway', transactionId: 'T2' });
+    assert.equal(third.billNumber, again.billNumber);
+    assert.equal(third.receiptNumber, again.receiptNumber);
+    const { payments, lines } = await revenueOf(second.id);
+    assert.deepEqual([payments.length, lines.length], [1, 1]);
+    assert.equal(await m().QueueToken.countDocuments({ uhid: 'U2' }), 1);
   });
 
   test('doctor deactivated between booking and payment still gets a token and a bill', async () => {
@@ -291,8 +349,8 @@ describe('OpVisitsService', () => {
     assert.equal(paid.opNumber, 'OP-20260926-0001');
     assert.equal(paid.token?.label, 'G2-001');
     assert.equal(paid.token?.doctorName, 'Dr. B');
-    assert.equal(paid.billNumber, 'OPB-20260926-0001');
-    assert.equal(await m().BillInvoice.countDocuments({ uhid: 'U1' }), 1);
+    assert.equal(paid.billNumber, 'BL-0001');
+    assert.equal((await revenueOf(paid.id)).payments.length, 1);
     assert.deepEqual(await service.list({ status: 'awaiting-cash' }), []);
   });
 
@@ -305,12 +363,12 @@ describe('OpVisitsService', () => {
       throw new Error('queue unavailable');
     };
 
-    // The payment is recorded with its OP number and bill even though the token failed.
+    // The payment is recorded with its OP number even though the token failed; the bill waits for the token.
     await assert.rejects(service.sampleComplete(kiosk, visit.id), /queue unavailable/);
     const polled = await service.getForKiosk(kiosk, visit.id);
     assert.equal(polled.status, 'paid');
     assert.equal(polled.opNumber, 'OP-20260926-0001');
-    assert.equal(polled.billNumber, 'OPB-20260926-0001');
+    assert.equal(polled.billNumber, undefined);
     assert.equal(polled.token, undefined);
     assert.equal(warnings.length, 1);
     // The staff list keeps working, shows it as needing attention, and logs the failed retry.
@@ -321,8 +379,8 @@ describe('OpVisitsService', () => {
     assert.deepEqual(await service.list({ status: 'needs-attention' }), []);
     const [healed] = await service.list({ status: 'paid' });
     assert.equal(healed.token?.label, 'G-001');
-    assert.equal(healed.billNumber, 'OPB-20260926-0001');
-    assert.equal(await m().BillInvoice.countDocuments({}), 1);
+    assert.equal(healed.billNumber, 'BL-0001');
+    assert.equal(await m().Payment.countDocuments({}), 1);
     assert.equal((await m().OpSequence.findOne({}).lean())!.last, 1);
   });
 
@@ -336,7 +394,7 @@ describe('OpVisitsService', () => {
     assert.deepEqual(await service.list({ status: 'needs-attention' }), []); // finished before listing
     const [listed] = await service.list({ status: 'paid' });
     assert.equal(listed.token?.label, 'G-001');
-    assert.equal(listed.billNumber, 'OPB-20260926-0001');
+    assert.equal(listed.billNumber, 'BL-0001');
 
     // At most five are finished per call.
     for (let i = 0; i < 7; i++) await markPaid((await visitWith(`S${i}`, 'UPI')).id, clock);
@@ -344,7 +402,7 @@ describe('OpVisitsService', () => {
     assert.equal(await m().OpVisit.countDocuments({ status: 'paid', tokenId: { $exists: true } }), 1 + 5);
     await service.list({});
     assert.equal(await m().OpVisit.countDocuments({ status: 'paid', tokenId: { $exists: true } }), 1 + 7);
-    assert.equal(await m().BillInvoice.countDocuments({}), 8);
+    assert.equal(await m().Payment.countDocuments({ mode: 'kiosk' }), 8);
   });
 
   test('cash confirm is refused once the patient switched to UPI', async () => {
@@ -391,7 +449,7 @@ describe('OpVisitsService', () => {
     const [listed] = await service.list({ status: 'all' });
     assert.equal(listed.status, 'expired');
     assert.equal(await m().QueueToken.countDocuments({}), 0);
-    assert.equal(await m().BillInvoice.countDocuments({}), 0);
+    assert.equal(await m().Payment.countDocuments({}), 0);
 
     // No method chosen: open for 15 minutes.
     const open = await service.create(kiosk, await sessionFor('U2'), docA);
@@ -454,7 +512,10 @@ describe('OpVisitsService', () => {
     assert.notEqual((await m().OpVisit.findById(visit.id).lean())!.orderId, stored!.orderId);
     const paid = await service.sampleComplete(kiosk, visit.id);
     assert.match(paid.transactionId!, /^SAMPLE-CARD-/);
-    assert.equal((await m().BillInvoice.findOne({}).lean())!.paymentMode, 'Card');
+    // Revenue keeps the kiosk mode; the method, its reference and SAMPLE are in the reference text.
+    const [payment] = (await revenueOf(paid.id)).payments;
+    assert.equal(payment.mode, 'kiosk');
+    assert.equal(payment.reference, `Card · ${paid.transactionId} · SAMPLE`);
   });
 
   test('a method turned off, or without a payment provider, is refused', async () => {
@@ -478,7 +539,7 @@ describe('OpVisitsService', () => {
     process.env.CLINIC_DATE = '2026-09-27';
     const nextDay = await paid('U3');
     assert.equal(nextDay.opNumber, 'OP-20260927-0001');
-    assert.equal(nextDay.billNumber, 'OPB-20260927-0001');
+    assert.equal((await revenueOf(nextDay.id)).bill!.day, '2026-09-27');
     assert.equal((await m().OpVisit.findById(nextDay.id).lean())!.date, '2026-09-27');
   });
 
@@ -525,5 +586,117 @@ describe('OpVisitsService', () => {
     assert.match(waiting[0].paymentCode!, /^\d{4}$/);
     assert.equal((await service.list({})).length, 3);
     assert.deepEqual(await service.list({ date: '2026-09-25' }), []);
+  });
+
+  // ---------------------------------------------------------------- the Revenue Agent (R26)
+
+  /** Today's appointment for the patient with the doctor, as Scheduling books it. */
+  const appointmentFor = (uhid: string, doctorId: string, doctorName: string, time = '10:30 AM') =>
+    m().Appointment.create({ uhid, patientName: `Patient ${uhid}`, age: 30, gender: 'Male', phone: '9876543210', date: '2026-09-26', time, type: 'Consultation', condition: 'Review', status: 'Scheduled', doctorId, doctorName } as any);
+
+  test("a visit that checks in the patient's appointment pays that appointment's own consultation; the check-in hook adds nothing", async () => {
+    const appointment = await appointmentFor('U1', docA, 'Dr. A');
+    revenueOpd.onModuleInit(); // the async check-in hook, as in the app
+    try {
+      const visit = await visitWith('U1', 'UPI');
+      const paid = await service.sampleComplete(kiosk, visit.id);
+      assert.equal(paid.token?.label, 'G-001');
+      assert.equal((await m().Appointment.findById(appointment._id).lean())!.status, 'Checked In');
+      await new Promise((resolve) => setTimeout(resolve, 100)); // the hook has run by now
+      await revenueOpd.onStatusChange({ id: String(appointment._id), status: 'Checked In' }); // and arrives once more
+
+      const all = await m().ChargeLine.find({}).lean();
+      assert.deepEqual(all.map((l) => [l.source.type, l.source.ref, l.amount]), [['opd-fee', String(appointment._id), 300]]);
+      const { payments, bill } = await revenueOf(visit.id);
+      assert.equal(payments.length, 1);
+      assert.deepEqual([payments[0].mode, payments[0].amount, payments[0].kind], ['kiosk', 300, 'settlement']);
+      assert.equal(payments[0].reference, `UPI · ${paid.transactionId} · SAMPLE`);
+      assert.equal(String(payments[0].bill), String(all[0].bill));
+      assert.equal(bill!.kind, 'opd');
+      assert.equal(String(bill!.appointment), String(appointment._id));
+      assert.deepEqual([bill!.totals.charges, bill!.totals.payments, bill!.totals.balance], [300, 300, 0]);
+      assert.equal(await m().Bill.countDocuments({}), 1);
+      assert.deepEqual([paid.billNumber, paid.receiptNumber], [bill!.number, payments[0].receiptNumber]);
+    } finally {
+      revenueOpd.onModuleDestroy();
+    }
+  });
+
+  test("a visit with another doctor than the appointment's leaves the appointment alone and charges the visit's doctor", async () => {
+    const appointment = await appointmentFor('U1', docA, 'Dr. A');
+    const visit = await visitWith('U1', 'CASH', docB);
+    const paid = await service.confirmCash(visit.id, 'Anita');
+    assert.equal(paid.token?.label, 'G2-001');
+    assert.equal((await m().Appointment.findById(appointment._id).lean())!.status, 'Scheduled');
+    assert.equal(await m().ChargeLine.countDocuments({ 'source.type': 'opd-fee' }), 0);
+    const { payments, bill, lines } = await revenueOf(visit.id);
+    assert.deepEqual(lines.map((l) => [l.name, l.amount, l.source.type, l.source.ref]), [['Consultation - Dr. B', 450, 'op-visit', visit.id]]);
+    assert.deepEqual(payments.map((p) => [p.amount, p.reference, p.by.name]), [[450, 'Cash at counter', 'Anita']]);
+    assert.equal(bill!.kind, 'walk-in');
+    assert.equal(bill!.totals.balance, 0);
+  });
+
+  test('a Revenue failure never holds back the token; the payment is recorded on a later try', async () => {
+    const warnings: string[] = [];
+    (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: (message) => warnings.push(message) };
+    const record = revenue.record;
+    revenue.record = async () => {
+      throw new Error('revenue unavailable');
+    };
+
+    const visit = await visitWith('U1', 'UPI');
+    const paid = await service.sampleComplete(kiosk, visit.id);
+    assert.equal(paid.status, 'paid');
+    assert.equal(paid.token?.label, 'G-001');
+    assert.equal(paid.billNumber, undefined);
+    assert.ok(warnings.some((w) => w.includes('revenue unavailable')));
+    assert.equal((await service.getForKiosk(kiosk, visit.id)).token?.label, 'G-001');
+    // Shown to the desk until it is recorded, and tried again on each list.
+    assert.deepEqual((await service.list({ status: 'needs-attention' })).map((v) => v.id), [visit.id]);
+    assert.equal(await m().Payment.countDocuments({}), 0);
+
+    revenue.record = record;
+    assert.deepEqual(await service.list({ status: 'needs-attention' }), []);
+    const healed = await service.getForKiosk(kiosk, visit.id);
+    assert.equal(healed.billNumber, 'BL-0001');
+    assert.equal(healed.receiptNumber, 'RC-0001');
+    assert.equal((await revenueOf(visit.id)).bill!.totals.balance, 0);
+    assert.equal(await m().Payment.countDocuments({}), 1);
+    assert.equal(await m().QueueToken.countDocuments({}), 1);
+  });
+
+  test('a paid visit that holds an old invoice from before the Revenue Agent is never billed again', async () => {
+    for (const [uhid, date] of [['L1', '2026-09-26'], ['L2', '2026-09-25']]) {
+      const visit = await visitWith(uhid, 'UPI');
+      await m().OpVisit.updateOne(
+        { _id: visit.id },
+        { $set: { date, status: 'paid', paidAt: clock, confirmedBy: 'Gateway', finishingUntil: clock, opNumber: `OP-${date.replace(/-/g, '')}-0009`, tokenId: '64b000000000000000000001', tokenLabel: 'G-009', billId: '64b000000000000000000002', billNumber: `OPB-${date.replace(/-/g, '')}-0009` } },
+      );
+    }
+    advance(31);
+    await service.list({});
+    assert.deepEqual(await service.list({ status: 'needs-attention' }), []);
+    assert.equal(await m().Payment.countDocuments({}), 0);
+    assert.equal(await m().ChargeLine.countDocuments({}), 0);
+    assert.equal(await m().Bill.countDocuments({}), 0);
+  });
+
+  test("an earlier day's visit that missed only its bill is recorded on that day's bill, with no new token", async () => {
+    const visit = await visitWith('U1', 'UPI');
+    const tokenId = '64b000000000000000000003';
+    const set = { status: 'paid', paidAt: clock, transactionId: 'T-OLD', confirmedBy: 'Gateway', finishingUntil: clock, opNumber: 'OP-20260925-0004', tokenId, tokenLabel: 'G-004' };
+    await m().OpVisit.updateOne({ _id: visit.id }, { $set: { ...set, date: '2026-09-25' } });
+    // One from longer ago than the retry window is left alone.
+    const old = await visitWith('U2', 'UPI');
+    await m().OpVisit.updateOne({ _id: old.id }, { $set: { ...set, date: '2026-09-18', opNumber: 'OP-20260918-0001' } });
+
+    await service.list({});
+    const { payments, bill } = await revenueOf(visit.id);
+    assert.equal(payments.length, 1);
+    assert.equal(bill!.day, '2026-09-25');
+    assert.equal(bill!.totals.balance, 0);
+    assert.equal((await m().OpVisit.findById(visit.id).lean())!.billNumber, bill!.number);
+    assert.equal(await m().QueueToken.countDocuments({}), 0);
+    assert.equal((await revenueOf(old.id)).payments.length, 0);
   });
 });

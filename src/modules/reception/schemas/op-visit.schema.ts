@@ -25,7 +25,8 @@ export const VisitEventSchema = SchemaFactory.createForClass(VisitEvent);
 
 /**
  * A patient's outpatient visit booked at the reception kiosk: the doctor and fee
- * chosen, then the payment. Paying gives it an OP number, a token and a paid bill.
+ * chosen, then the payment. Paying gives it an OP number, a token and its place on a
+ * Revenue bill (the consultation and the kiosk payment).
  */
 @Schema({ timestamps: true })
 export class OpVisit {
@@ -97,11 +98,19 @@ export class OpVisit {
   @Prop()
   tokenLabel?: string;
 
+  /**
+   * The visit's bill: the Revenue Agent's bill (BL-…) holding its consultation and payment. Visits paid before the
+   * Revenue Agent took over kiosk billing hold the old invoice (OPB-…), which is history and never billed again.
+   */
   @Prop()
   billId?: string;
 
   @Prop()
   billNumber?: string;
+
+  /** The Revenue receipt (RC-…) of the kiosk payment; none when there was nothing to pay. */
+  @Prop()
+  receiptNumber?: string;
 
   /**
    * While set and in the future, a request is giving this paid visit its OP number,

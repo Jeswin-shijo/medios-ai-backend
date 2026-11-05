@@ -180,8 +180,8 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Which bill a charge goes on (spec 4.1). */
-  async forCharge(input: { patientId: string; caseId?: string | null }): Promise<BillDocument> {
+  /** Which bill a charge goes on (spec 4.1). `day` (YYYY-MM-DD, default the clinic day) picks the OPD or walk-in bill. */
+  async forCharge(input: { patientId: string; caseId?: string | null; day?: string }): Promise<BillDocument> {
     const patient = oid(input.patientId, 'patientId');
     if (input.caseId && isValidObjectId(input.caseId)) {
       const onCase = await this.bills
@@ -190,7 +190,7 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
         .exec();
       if (onCase) return onCase;
     }
-    const day = isoDate(clinicNow());
+    const day = input.day ?? isoDate(clinicNow());
     const opd = await this.bills.findOne({ patient, kind: 'opd', day, state: { $in: ACTIVE_BILL_STATES } }).sort({ openedAt: -1 }).exec();
     if (opd) return opd;
     return this.open({ kind: 'walk-in', patientId: input.patientId, day });
