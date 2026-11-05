@@ -26,10 +26,10 @@ export interface KioskVisitInput {
   day: string;
   /** The appointment the visit's token checked in, with the same doctor: its own check-in charge is the consultation. */
   appointmentId?: string;
-  /** How the patient paid, for the receipt: `Cash at counter`, `UPI · <ref> · SAMPLE`. */
+  /** How the patient paid, for the receipt: `Cash at counter · <who took it>`, `UPI · <ref> · SAMPLE`. */
   reference: string;
-  /** Who took the payment: the kiosk, or the staff member who took the cash. */
-  by: string;
+  /** The kiosk device the visit was booked and paid on: the payment's `by` (R33). */
+  by: { id: string; name: string };
   /** When the money came in (clinic clock). */
   at: Date;
 }

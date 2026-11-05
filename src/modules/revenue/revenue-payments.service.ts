@@ -22,12 +22,12 @@ export interface PaymentInput {
 /** A payment the reception kiosk took. */
 export interface KioskPaymentInput {
   amount: number;
-  /** How the patient paid, as the receipt shows it: `Cash at counter`, `UPI · <ref> · SAMPLE`. */
+  /** How the patient paid, as the receipt shows it: `Cash at counter · <who took it>`, `UPI · <ref> · SAMPLE`. */
   reference: string;
   /** One payment per source: `op-visit:<id>`. */
   source: string;
-  /** Who took it: the kiosk, or the staff member who took the cash at the counter. */
-  by: string;
+  /** The kiosk device the visit was booked and paid on (R33). */
+  by: { id: string; name: string };
   /** When the money came in (clinic clock). */
   at: Date;
 }
@@ -94,7 +94,7 @@ export class PaymentsService {
         reference: input.reference.trim().slice(0, 80),
         source: input.source,
         kind: 'settlement',
-        by: { id: '', name: input.by },
+        by: { id: input.by.id, name: input.by.name },
         at: input.at,
       });
     } catch (e) {

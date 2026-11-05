@@ -196,8 +196,9 @@ describe('OpVisitsService', () => {
     );
     assert.equal(payments.length, 1);
     assert.deepEqual(
-      { receipt: payments[0].receiptNumber, amount: payments[0].amount, mode: payments[0].mode, kind: payments[0].kind, reference: payments[0].reference, by: payments[0].by.name },
-      { receipt: 'RC-0001', amount: 300, mode: 'kiosk', kind: 'settlement', reference: 'Cash at counter', by: 'Anita' },
+      { receipt: payments[0].receiptNumber, amount: payments[0].amount, mode: payments[0].mode, kind: payments[0].kind, reference: payments[0].reference, by: { id: payments[0].by.id, name: payments[0].by.name } },
+      // Recorded by the kiosk device (R33); the reference says who took the cash at the counter.
+      { receipt: 'RC-0001', amount: 300, mode: 'kiosk', kind: 'settlement', reference: 'Cash at counter · Anita', by: { id: 'k1', name: 'Kiosk: Front kiosk' } },
     );
 
     const tokens = await m().QueueToken.find({}).lean();
@@ -684,7 +685,7 @@ describe('OpVisitsService', () => {
     assert.equal(await m().ChargeLine.countDocuments({ 'source.type': 'opd-fee' }), 0);
     const { payments, bill, lines } = await revenueOf(visit.id);
     assert.deepEqual(lines.map((l) => [l.name, l.amount, l.source.type, l.source.ref]), [['Consultation - Dr. B', 450, 'op-visit', visit.id]]);
-    assert.deepEqual(payments.map((p) => [p.amount, p.reference, p.by.name]), [[450, 'Cash at counter', 'Anita']]);
+    assert.deepEqual(payments.map((p) => [p.amount, p.reference, p.by.id, p.by.name]), [[450, 'Cash at counter · Anita', 'k1', 'Kiosk: Front kiosk']]);
     assert.equal(bill!.kind, 'walk-in');
     assert.equal(bill!.totals.balance, 0);
   });

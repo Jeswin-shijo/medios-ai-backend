@@ -440,7 +440,7 @@ describe('RevenueReconcileService', () => {
       const visit = await m.OpVisit.create({ date: day, uhid: patient.uhid, patientName: patient.name, doctorId: 'd1', doctorName: 'Dr. A', fee: 300, status: 'paid', provider: 'cash', kioskId: 'k1', kioskName: 'Front kiosk', via: 'card', expiresAt: new Date(), tokenId: String(token._id) });
       const bill = await bills.open({ kind: 'walk-in', patientId: String(patient._id), day });
       await bills.addCharge(String(bill._id), { code: 'opd:d1', name: 'Consultation - Dr. A', category: 'consultation', qty: 1, unitPrice: 300, source: { type: 'op-visit', ref: String(visit._id) }, by: { name: 'Revenue Agent' } });
-      await payments.recordKiosk(String(bill._id), { amount: 300, reference: 'Cash at counter', source: `op-visit:${visit._id}`, by: 'Kiosk: Front kiosk', at: clinicNow() });
+      await payments.recordKiosk(String(bill._id), { amount: 300, reference: 'Cash at counter', source: `op-visit:${visit._id}`, by: { id: 'k1', name: 'Kiosk: Front kiosk' }, at: clinicNow() });
       await age(m.Bill, bill._id);
       return { bill, token };
     };

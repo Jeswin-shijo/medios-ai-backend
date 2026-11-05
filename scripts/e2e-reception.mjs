@@ -101,6 +101,7 @@ async function checkRevenue(paid, appointmentId) {
   ok(`bill kind is ${appointmentId ? 'opd' : 'walk-in'}`, view.bill.kind === (appointmentId ? 'opd' : 'walk-in') && (!appointmentId || String(view.bill.appointment) === appointmentId), view.bill.kind);
   const kioskPay = view.payments.filter((p) => p.source === `op-visit:${paid.id}`);
   ok('one kiosk payment of 300 with its receipt', kioskPay.length === 1 && kioskPay[0].mode === 'kiosk' && kioskPay[0].amount === 300 && kioskPay[0].receiptNumber === paid.receiptNumber, kioskPay);
+  ok('the payment is recorded by the kiosk device', kioskPay[0]?.by?.id === kioskId && /^Kiosk: /.test(kioskPay[0]?.by?.name ?? ''), kioskPay[0]?.by);
   ok('balance 0', view.bill.totals.balance === 0, view.bill.totals);
   return kioskPay[0];
 }
@@ -216,7 +217,7 @@ async function main() {
     const appt = await admin('GET', `/appointments/${appointmentId}`);
     ok('the appointment with that doctor is Checked In', appt.data?.status === 'Checked In', appt.data?.status);
     const pay = await checkRevenue(paid, appointmentId);
-    ok('the payment says cash at the counter', pay?.reference === 'Cash at counter', pay?.reference);
+    ok('the payment says cash at the counter, and who took it', /^Cash at counter · .+$/.test(pay?.reference ?? ''), pay?.reference);
     const old = await admin('GET', `/billing/invoices?uhid=${picked.uhid}`);
     const olds = Array.isArray(old.data) ? old.data : [];
     ok('no old invoice is written for the visit', !olds.some((i) => JSON.stringify(i).includes(paid?.opNumber ?? '\u0000')), olds.length);

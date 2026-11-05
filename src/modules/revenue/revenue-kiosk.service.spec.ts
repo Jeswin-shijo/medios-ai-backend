@@ -37,7 +37,7 @@ describe('RevenueKioskService', () => {
     fee: 300,
     day: today(),
     reference: 'UPI · SAMPLE-UPI-ab12cd · SAMPLE',
-    by: 'Kiosk: Front kiosk',
+    by: { id: 'k1', name: 'Kiosk: Front kiosk' },
     at: clinicNow(),
     ...extra,
   });
@@ -85,7 +85,7 @@ describe('RevenueKioskService', () => {
     assert.equal(payment.amount, 300);
     assert.equal(payment.source, `op-visit:${input.visitId}`);
     assert.equal(payment.reference, 'UPI · SAMPLE-UPI-ab12cd · SAMPLE');
-    assert.equal(payment.by.name, 'Kiosk: Front kiosk');
+    assert.deepEqual({ id: payment.by.id, name: payment.by.name }, { id: 'k1', name: 'Kiosk: Front kiosk' });
     assert.equal(String(payment.bill), String(line.bill));
     // The charge was made before the money landed (ids made in order), so the bill was never in credit.
     assert.ok(String(line._id) < String(payment._id));

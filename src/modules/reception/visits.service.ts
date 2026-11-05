@@ -65,11 +65,11 @@ const daysBefore = (day: string, n: number) => {
 };
 /**
  * How the patient paid, for the Revenue receipt: the payment's mode is `kiosk`, so the real method and its reference
- * go here, and sample mode says so.
+ * go here, and sample mode says so. The payment is the kiosk's (R33), so cash names the staff member who took it.
  */
 const paymentReference = (visit: OpVisit) =>
   visit.method === 'CASH'
-    ? 'Cash at counter'
+    ? ['Cash at counter', visit.confirmedBy].filter(Boolean).join(' · ')
     : [MODE[visit.method!], visit.transactionId || visit.orderId, visit.provider === 'sample' ? 'SAMPLE' : ''].filter(Boolean).join(' · ');
 const isDuplicate = (err: unknown) => err instanceof mongo.MongoServerError && err.code === 11000;
 /** Paid and given everything payment brings: the OP number, the token and the bill. */
@@ -444,7 +444,8 @@ export class OpVisitsService {
       day: visit.date,
       appointmentId,
       reference: paymentReference(visit),
-      by,
+      // The kiosk device records the payment (R33); who confirmed it stays in the visit's history.
+      by: { id: visit.kioskId, name: kioskActor({ id: visit.kioskId, name: visit.kioskName }) },
       at: clinicNow(visit.paidAt ?? this.now()),
     });
     const event = record.receiptNumber
