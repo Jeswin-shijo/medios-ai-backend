@@ -7,7 +7,7 @@ import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { OpdService } from '../opd/opd.service';
 import { QueueDisplaysService } from '../queue/queue-displays.service';
 import { SettingsService } from '../settings/settings.service';
-import { CardDto, CreateVisitDto, DoctorsQueryDto, PayDto, RegisterDto, SendOtpDto, VerifyOtpDto } from './dto/reception.dto';
+import { CardDto, CreateVisitDto, KioskDoctorsQueryDto, KioskRegisterDto, PayDto, SendOtpDto, VerifyOtpDto } from './dto/reception.dto';
 import { ReceptionIdentityService } from './identity.service';
 import { ReceptionSettings, resolveReceptionSettings } from './reception-settings';
 import { KioskRef } from './reception.types';
@@ -115,7 +115,7 @@ export class KioskController {
 
   @Get('doctors')
   @ApiOperation({ summary: "Active doctors of a department with today's availability (OP sessions, queue and leave)" })
-  async doctors(@Headers('authorization') authorization: string | undefined, @Query() query: DoctorsQueryDto) {
+  async doctors(@Headers('authorization') authorization: string | undefined, @Query() query: KioskDoctorsQueryDto) {
     await this.kiosk(authorization);
     return this.visits.kioskDoctors(query.department);
   }
@@ -145,7 +145,7 @@ export class KioskController {
   @Post('register')
   @Throttle({ default: { limit: 20, ttl: MINUTE } })
   @ApiOperation({ summary: 'Register a new patient at the kiosk' })
-  async register(@Headers('authorization') authorization: string | undefined, @Body() dto: RegisterDto) {
+  async register(@Headers('authorization') authorization: string | undefined, @Body() dto: KioskRegisterDto) {
     return this.identity.register(await this.kiosk(authorization), dto);
   }
 

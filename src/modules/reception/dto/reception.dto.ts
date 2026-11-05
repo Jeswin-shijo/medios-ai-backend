@@ -28,10 +28,11 @@ export class VerifyOtpDto extends SendOtpDto {
   code: string;
 }
 
-export class RegisterDto {
-  @ApiProperty()
+/** A new patient registered at the kiosk (named apart from the staff sign-up's RegisterDto: Swagger needs unique names). */
+export class KioskRegisterDto {
+  @ApiProperty({ description: '2 to 80 letters' })
   @IsString()
-  @MaxLength(200)
+  @MaxLength(80, { message: 'Enter the full name (2 to 80 letters).' })
   name: string;
 
   @ApiProperty()
@@ -81,7 +82,7 @@ export class PayDto {
   method: PaymentMethod;
 }
 
-export class DoctorsQueryDto {
+export class KioskDoctorsQueryDto {
   @ApiPropertyOptional({ description: 'Department code' })
   @IsOptional()
   @IsString()
