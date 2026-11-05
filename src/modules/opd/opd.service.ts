@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { isValidObjectId, Model } from 'mongoose';
 import { Department, DepartmentDocument } from './schemas/department.schema';
 import { OpDoctor, OpDoctorDocument } from './schemas/op-doctor.schema';
 import { DepartmentInput, DoctorInput } from './dto/opd.dto';
@@ -81,8 +81,9 @@ export class OpdService {
     return this.doctors.find(filter).sort({ name: 1 }).exec();
   }
 
+  /** The doctor; a malformed or unknown id is a 404, while a database error still surfaces. */
   async getDoctor(id: string): Promise<OpDoctorDocument> {
-    const doctor = await this.doctors.findById(id).exec().catch(() => null); // a malformed id is just "not found"
+    const doctor = isValidObjectId(id) ? await this.doctors.findById(id).exec() : null;
     if (!doctor) throw new NotFoundException('Doctor not found');
     return doctor;
   }
@@ -106,8 +107,9 @@ export class OpdService {
   /** The doctor the kiosk uses by default: the one named in settings if active, else the first active one. */
   async defaultDoctor(): Promise<OpDoctorDocument | null> {
     const settings = resolveReceptionSettings((await this.settings.getSettings()).reception);
-    if (settings.defaultDoctorId) {
-      const chosen = await this.doctors.findById(settings.defaultDoctorId).exec().catch(() => null);
+    // A stored id that is not an id at all is skipped; a database error is not hidden.
+    if (settings.defaultDoctorId && isValidObjectId(settings.defaultDoctorId)) {
+      const chosen = await this.doctors.findById(settings.defaultDoctorId).exec();
       if (chosen?.active) return chosen;
     }
     const departments = await this.listDepartments();

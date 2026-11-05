@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model, mongo, UpdateQuery } from 'mongoose';
+import { FilterQuery, isValidObjectId, Model, mongo, UpdateQuery } from 'mongoose';
 import { QueueToken, QueueTokenDocument, TokenStatus } from './schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceDocument } from './schemas/queue-sequence.schema';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
@@ -261,8 +261,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  /** The token; a malformed or unknown id is just "not found", while a database error still surfaces. */
   async tokenById(id: string): Promise<QueueTokenDocument | null> {
-    return this.tokens.findById(id).exec().catch(() => null); // a malformed id is just "not found"
+    if (!isValidObjectId(id)) return null;
+    return this.tokens.findById(id).exec();
   }
 
   /** The token the patient holds today (waiting, called or skipped), if any. */
@@ -375,7 +377,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
   /** An appointment's doctor while they see patients; null for an unknown or inactive one (the default doctor's line takes the token). */
   private async activeDoctor(doctorId: string) {
-    const doctor = await this.opd.getDoctor(doctorId).catch(() => null);
+    const doctor = await this.opd.getDoctor(doctorId).catch((err: unknown) => {
+      if (err instanceof NotFoundException) return null;
+      throw err;
+    });
     return doctor?.active ? doctor : null;
   }
 

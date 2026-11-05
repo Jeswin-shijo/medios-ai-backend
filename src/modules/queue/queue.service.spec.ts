@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { describe, test, before, beforeEach, after, afterEach } from 'node:test';
+import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { QueueService } from './queue.service';
 import { QueueEvents } from './queue-events';
@@ -137,6 +138,33 @@ describe('QueueService doctor-wise tokens', () => {
     await queue.cancel(String(token._id));
     assert.equal(await queue.activeTokenFor('U1'), null);
     assert.equal(String((await queue.tokenById(String(token._id)))!._id), String(token._id));
+  });
+
+  test('tokenById: a malformed or unknown id is not found, but a real database error is not hidden', async () => {
+    assert.equal(await queue.tokenById('not-an-id'), null);
+    assert.equal(await queue.tokenById(String(new Types.ObjectId())), null);
+    const failing = new Proxy(m().QueueToken, { get: (model, key, self) => (key === 'findById' ? () => ({ exec: () => Promise.reject(new Error('database down')) }) : Reflect.get(model, key, self)) });
+    const settings = new SettingsService(m().HospitalSettings);
+    const broken = new QueueService(failing, m().QueueSequence, m().Appointment, m().Patient, settings, new QueueEvents(), new AppointmentEvents(), new OpdService(m().Department, m().OpDoctor, settings));
+    await assert.rejects(broken.tokenById(String(new Types.ObjectId())), /database down/);
+  });
+
+  test("an appointment whose doctor is gone joins the default line; a failing doctor look-up is not hidden", async () => {
+    await patient('U1');
+    await m().Appointment.create({ uhid: 'U1', patientName: 'Patient U1', age: 30, gender: 'Male', date: queue.today(), time: '10:00 AM', status: 'Scheduled', doctorId: String(new Types.ObjectId()) } as any);
+    assert.equal((await queue.issue({ uhid: 'U1' }, 'Tester')).token.label, 'G-001');
+    await patient('U2');
+    await m().Appointment.create({ uhid: 'U2', patientName: 'Patient U2', age: 30, gender: 'Male', date: queue.today(), time: '10:15 AM', status: 'Scheduled', doctorId: docB } as any);
+    const opd = (queue as unknown as { opd: OpdService }).opd;
+    const getDoctor = opd.getDoctor.bind(opd);
+    opd.getDoctor = async () => {
+      throw new Error('database down');
+    };
+    try {
+      await assert.rejects(queue.issue({ uhid: 'U2' }, 'Tester'), /database down/);
+    } finally {
+      opd.getDoctor = getDoctor;
+    }
   });
 
   test("waitingCountsBySeries counts each doctor's waiting tokens", async () => {
