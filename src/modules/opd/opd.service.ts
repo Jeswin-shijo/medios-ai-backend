@@ -30,6 +30,9 @@ function assertSessions(sessions: SessionInput[]) {
   }
 }
 
+/** "Dr. Shajin" for a doctor named "Dr. Shajin" or "Shajin": a leading title is dropped first, as normaliseName does. */
+const withTitle = (name: string) => `Dr. ${name.replace(/^\s*dr\b\.?\s*/i, '')}`;
+
 /** The fields actually sent: a DTO instance carries explicit `undefined` for every field left out. */
 function defined<T extends object>(dto: T): Partial<T> {
   return Object.fromEntries(Object.entries(dto).filter(([, v]) => v !== undefined)) as Partial<T>;
@@ -136,7 +139,7 @@ export class OpdService {
   private async rethrowPrefixClash(error: any, tokenPrefix: string): Promise<never> {
     if (error?.code === 11000) {
       const clash = await this.doctors.findOne({ active: true, tokenPrefix }).exec();
-      throw new ConflictException(`Token letters "${tokenPrefix}" are already used by Dr. ${clash?.name ?? 'another doctor'}`);
+      throw new ConflictException(`Token letters "${tokenPrefix}" are already used by ${clash ? withTitle(clash.name) : 'another doctor'}`);
     }
     throw error;
   }
@@ -156,7 +159,7 @@ export class OpdService {
       const clash = await this.doctors
         .findOne({ active: true, tokenPrefix: doctor.tokenPrefix, ...(selfId ? { _id: { $ne: selfId } } : {}) })
         .exec();
-      if (clash) throw new ConflictException(`Token letters "${doctor.tokenPrefix}" are already used by Dr. ${clash.name}`);
+      if (clash) throw new ConflictException(`Token letters "${doctor.tokenPrefix}" are already used by ${withTitle(clash.name)}`);
     }
   }
 }

@@ -40,12 +40,12 @@ export interface DoctorSlotsInput {
   notBefore: Date | null;
 }
 
-/** Free slot starts (minutes since midnight) for a doctor on a day, sorted and unique. */
 /** Whether a doctor with this leave is away on the clinic day `date` (YYYY-MM-DD): whole days, both ends included. */
 export function onLeaveOn(leave: { from: string; to: string }[], date: string): boolean {
   return leave.some((l) => l.from <= date && date <= l.to);
 }
 
+/** Free slot starts (minutes since midnight) for a doctor on a day, sorted and unique. */
 export function doctorSlots(input: DoctorSlotsInput): number[] {
   const { date, sessions, slotMinutes, leave, takenMinutes, notBefore } = input;
   if (onLeaveOn(leave, date)) return [];

@@ -130,7 +130,7 @@ export class KioskController {
   @Post('otp/send')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 10, ttl: MINUTE } })
-  @ApiOperation({ summary: 'Send a code to a mobile number (the answer is the same for known and unknown numbers)' })
+  @ApiOperation({ summary: 'Send a code to a mobile number; `found` in the answer says whether a patient has that number (no code is sent when none does)' })
   async sendOtp(@Headers('authorization') authorization: string | undefined, @Body() dto: SendOtpDto) {
     return this.identity.sendOtp(await this.kiosk(authorization), dto.phone);
   }

@@ -58,6 +58,18 @@ describe('OpdService', () => {
     assert.equal(second.tokenPrefix, 'G');
   });
 
+  test('a doctor whose name already says "Dr." is named once in the token-letters refusal (R33)', async () => {
+    await opd.createDoctor(doctor({ name: 'Dr. Shajin' }));
+    const said = (e: any) => {
+      assert.ok(e instanceof ConflictException);
+      assert.equal(e.message, 'Token letters "G" are already used by Dr. Shajin');
+      return true;
+    };
+    await assert.rejects(opd.createDoctor(doctor({ name: 'Other', room: 'Room 102' })), said);
+    // The same words when another desk won the race for the letters.
+    await assert.rejects((opd as any).rethrowPrefixClash({ code: 11000 }, 'G'), said);
+  });
+
   test('updateDoctor lets a doctor keep their own token letters', async () => {
     const d = await opd.createDoctor(doctor());
     const updated = await opd.updateDoctor(String(d._id), { fee: 400 });
