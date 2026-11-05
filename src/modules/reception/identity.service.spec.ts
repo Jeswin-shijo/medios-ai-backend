@@ -170,6 +170,27 @@ describe('ReceptionIdentityService', () => {
     await service.sendOtp(kiosk, '9876543210');
   });
 
+  test("a send refused by the limit leaves the patient's current code working", async () => {
+    await patient('U1');
+    for (let i = 0; i < 3; i++) {
+      await service.sendOtp(kiosk, '9876543210');
+      advance(31);
+    }
+    await rejectsWith(service.sendOtp(kiosk, '9876543210'), 'OTP_LIMIT');
+    assert.equal(sent.length, 3);
+    const result = await service.verifyOtp(kiosk, '9876543210', sent[2].code);
+    assert.deepEqual(result.patients.map((p) => p.patient.uhid), ['U1']);
+  });
+
+  test("a send refused by the kiosk's hourly limit leaves the patient's current code working", async () => {
+    await patient('U1');
+    await service.sendOtp(kiosk, '9876543210');
+    for (let i = 0; i < 29; i++) await service.sendOtp(kiosk, `90000000${String(i).padStart(2, '0')}`);
+    advance(31);
+    await rejectsWith(service.sendOtp(kiosk, '9876543210'), 'OTP_LIMIT');
+    await service.verifyOtp(kiosk, '9876543210', sent[0].code);
+  });
+
   test('otp limit: thirty sends per kiosk per hour', async () => {
     for (let i = 0; i < 30; i++) await service.sendOtp(kiosk, `90000000${String(i).padStart(2, '0')}`);
     await rejectsWith(service.sendOtp(kiosk, '9111111111'), 'OTP_LIMIT');

@@ -112,6 +112,10 @@ export class ReceptionIdentityService {
       return { found: false, resendAfterSeconds: OTP_RESEND_SECONDS };
     }
 
+    // Checked before an older code is closed, so a send the limits refuse leaves the patient's current code working.
+    const [sentForNumber, sentForKiosk] = await Promise.all([this.numberSends(phone10, now), this.kioskSends(kiosk.id, now)]);
+    if (sentForNumber >= OTP_PER_NUMBER || sentForKiosk >= OTP_PER_KIOSK) throw limitError();
+
     // The unique index on open codes lets one send per number through; the rest get OTP_WAIT.
     // Only codes already past the resend gap are closed, so a racing send cannot close ours.
     await this.challenges.updateMany(
@@ -127,11 +131,8 @@ export class ReceptionIdentityService {
       throw err;
     }
 
-    // Counted after our own row is in, so concurrent sends cannot all slip under the limit.
-    const [forNumber, forKiosk] = await Promise.all([
-      this.challenges.countDocuments({ phone10, found: true, sentAt: { $gt: new Date(now.getTime() - OTP_PER_NUMBER_WINDOW_MS) } }),
-      this.kioskSends(kiosk.id, now),
-    ]);
+    // Counted again after our own row is in, so concurrent sends cannot all slip under the limit.
+    const [forNumber, forKiosk] = await Promise.all([this.numberSends(phone10, now), this.kioskSends(kiosk.id, now)]);
     if (forNumber > OTP_PER_NUMBER || forKiosk > OTP_PER_KIOSK) {
       await this.challenges.deleteOne({ _id: mine._id });
       throw limitError();
@@ -139,6 +140,10 @@ export class ReceptionIdentityService {
 
     await this.sms.sendOtp(phone10, code);
     return { found: true, resendAfterSeconds: OTP_RESEND_SECONDS, sampleCode: this.sms.name === 'sample' ? code : undefined };
+  }
+
+  private numberSends(phone10: string, now: Date) {
+    return this.challenges.countDocuments({ phone10, found: true, sentAt: { $gt: new Date(now.getTime() - OTP_PER_NUMBER_WINDOW_MS) } });
   }
 
   private kioskSends(kioskId: string, now: Date) {
