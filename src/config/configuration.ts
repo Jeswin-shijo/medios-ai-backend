@@ -75,6 +75,13 @@ export default () => ({
     apiKey: process.env.ANTHROPIC_API_KEY || '',
     timeoutMs: int(process.env.AI_TIMEOUT_MS, 8000),
   },
+  reception: {
+    // Reception kiosk: 'sample' (nothing is sent or charged; screens say SAMPLE) or 'none'.
+    smsProvider: (process.env.SMS_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
+    paymentProvider: (process.env.PAYMENT_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
+    // Public web address for patient tracking links, when Settings does not give one.
+    publicWebUrl: (process.env.PUBLIC_WEB_URL || '').trim().replace(/\/+$/, ''),
+  },
   swagger: {
     enabled: process.env.SWAGGER_ENABLED ? process.env.SWAGGER_ENABLED === 'true' : !isProduction,
   },

@@ -63,6 +63,13 @@ export function validateEnv(config: Record<string, unknown>) {
   if (toolsSecret !== undefined && toolsSecret !== '' && String(toolsSecret).length < 24) {
     errors.push('CALL_TOOLS_SECRET must be 24+ random characters; it authenticates the inbound agent\'s mid-call tools.');
   }
+  for (const name of ['SMS_PROVIDER', 'PAYMENT_PROVIDER']) {
+    const value = String(config[name] ?? (production ? 'none' : 'sample')).toLowerCase();
+    if (!['none', 'sample'].includes(value)) errors.push(`${name} must be none or sample.`);
+  }
+  if (config.PUBLIC_WEB_URL !== undefined && config.PUBLIC_WEB_URL !== '' && !/^https?:\/\/\S+$/.test(String(config.PUBLIC_WEB_URL))) {
+    errors.push('PUBLIC_WEB_URL must be an http(s) address.');
+  }
   if (config.CLINIC_DATE !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(config.CLINIC_DATE))) {
     errors.push('CLINIC_DATE must be YYYY-MM-DD.');
   }

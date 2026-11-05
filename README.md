@@ -107,6 +107,9 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `CALL_TOOLS_SECRET` | — | 24+ characters; turns on the inbound agent's mid-call tools (only while `CALL_PROVIDER` is `snapserve`, or `simulated` in development), which must send it as `X-Webhook-Secret` |
 | `SNAPSERVE_SIGNING_SECRET` | — | Optional: when set, post-call webhooks must also carry a valid `X-SnapServe-Signature` |
 | `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
+| `PAYMENT_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk payments: `sample` (simulated, marked SAMPLE) or `none` |
+| `SMS_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk OTP and tracking messages: `sample` or `none` |
+| `PUBLIC_WEB_URL` | unset | Base address of the web app, used for the public `/track` links (http or https) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 
@@ -115,6 +118,8 @@ The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 ```bash
 npm run seed
 ```
+
+The seed reads `MONGODB_URI` from `.env` (or the environment), prints the database it is wiping, and refuses to run when no URI is set.
 
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
 - Logins, all with password **`Admin@123`**: **`doctor@medios.ai`** (doctor), **`admin@medios.ai`** (admin, can create accounts), **`nurse@`**, **`frontdesk@`** (staff), **`pharmacy@`** (pharmacist) and **`lab@medios.ai`** (lab). Change these before any real use.
@@ -280,7 +285,7 @@ MONGODB_URI=... npm run import-beds -- path/to/beds.csv
 - Every imported bed starts free. The script prints every problem it finds (`Row N: ...`, N counting data rows without the header) and changes nothing if there are any.
 - It refuses to run while any bed is occupied or held (`Beds are in use (N occupied or held)...`), and also while any admission, bed suggestion or Bed Agent request exists (`Admission history exists. Importing replaces all beds and would delete 4 admissions, 2 bed suggestions, 10 bed requests and 168 hourly snapshots...`); it changes nothing in either case. `--force` replaces the wards and beds anyway.
 - Every import that goes ahead also deletes all admissions, bed suggestions, Bed Agent requests and hourly bed snapshots, because they point at or describe the old beds, and marks the requests' open alerts in Tasks & Alerts as Completed. Hourly snapshots alone never stop an import: the API takes one at every start.
-- It prints the database host (never the full address). Like `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
+- It prints the database host (never the full address). Unlike `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
 
 ---
 
@@ -424,6 +429,27 @@ Check-in gives the patient a numbered token for the day. Staff call tokens to a 
 - `printSlips` per kiosk: the kiosk prints an 80 mm slip after each new token. The tap response carries the current value, so switching it applies from the next tap.
 - Taps at the front desk use `POST /api/queue/cards/tap` with a staff session. An unknown card answers 404, and the web app then offers to link it.
 - The seed links three demo cards: `04A1B2C3` (Rekha S), `0004567890` (David Raj) and `04C8D9E0F1A2B3` (Selvi A). Cards linked by hand survive a reseed.
+
+---
+
+## 🧾 Reception Kiosk
+
+A patient registers or books an OP visit on a tablet kiosk, pays, and gets a token. The modules are `src/modules/reception` (kiosk and staff routes, providers) and `src/modules/opd` (departments, OP doctors, availability).
+
+- **Departments and OP doctors** are managed in the web app under Settings > Departments. They are the same records the Scheduling Agent books appointments with.
+- **Kiosk devices** are added in Token Queue > Displays & Settings. Creating one shows a setup QR for the tablet app (it carries the address and the key once).
+- **Cash payments** are confirmed by staff on the Token Queue. The token is issued on confirmation.
+- **Tracking page.** A patient can follow a visit on the public `/track` page of the web app. Links use `PUBLIC_WEB_URL`.
+- **Sample providers.** With `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample`, payments are simulated and OTP codes are shown on the kiosk. In production this is allowed but logs a loud warning. Never use it with real patients.
+- **Collections:** `opvisits`, `opsequences`, `receptionsessions`, `otpchallenges`, plus the shared `departments` and `opdoctors`.
+
+**End-to-end check.** With a local API running (sample providers), run:
+
+```bash
+API=http://localhost:4500/api npm run e2e:reception
+```
+
+It exercises every kiosk path and creates an all-day "Dr. E2E Test" doctor. Reseed (`npm run seed`) before running it again.
 
 ---
 

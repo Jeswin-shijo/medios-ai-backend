@@ -61,3 +61,10 @@ services:
       # Optional, for testing real calls: comma-separated numbers; no other number is dialled.
       - key: CALL_ALLOWED_NUMBERS
         sync: false
+      # Reception kiosk: simulated payments and SMS for the demo only. Never use with real patients (see DEPLOY.md).
+      - key: PAYMENT_PROVIDER
+        value: sample
+      - key: SMS_PROVIDER
+        value: sample
+      - key: PUBLIC_WEB_URL
+        value: https://medi-os-ai.vercel.app

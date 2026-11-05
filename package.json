@@ -17,6 +17,7 @@
     "preseed": "node scripts/seed-guard.js",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
     "import-beds": "ts-node -r tsconfig-paths/register src/database/import-beds.ts",
+    "e2e:reception": "node scripts/e2e-reception.mjs",
     "create-user": "ts-node -r tsconfig-paths/register src/database/create-user.ts"
   },
   "dependencies": {
