@@ -7,6 +7,10 @@ export type DischargeOrderDocument = DischargeOrder & Document;
 
 export const ORDER_STATES = ['ordered', 'ready', 'left', 'cancelled'] as const;
 export type OrderState = (typeof ORDER_STATES)[number];
+/** An order in progress: given, the patient not yet gone. */
+export const OPEN_ORDER_STATES: OrderState[] = ['ordered', 'ready'];
+/** An order that holds its plan: in progress, or the patient has left. The unique index allows one per plan. */
+export const LIVE_ORDER_STATES: OrderState[] = ['ordered', 'ready', 'left'];
 
 export const LINE_STATES = ['done', 'waiting', 'not-needed', 'needs-person'] as const;
 export type LineState = (typeof LINE_STATES)[number];
@@ -177,5 +181,5 @@ export class DischargeOrder {
 
 export const DischargeOrderSchema = SchemaFactory.createForClass(DischargeOrder);
 // One order per plan that is not cancelled. `left` counts too, so a plan whose patient has left is never ordered again.
-DischargeOrderSchema.index({ plan: 1 }, { unique: true, partialFilterExpression: { state: { $in: ['ordered', 'ready', 'left'] } } });
+DischargeOrderSchema.index({ plan: 1 }, { unique: true, partialFilterExpression: { state: { $in: LIVE_ORDER_STATES } } });
 DischargeOrderSchema.index({ state: 1, windowAt: 1 });

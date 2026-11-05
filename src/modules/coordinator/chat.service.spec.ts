@@ -18,6 +18,7 @@ import { CoordinatorEvents } from './coordinator-events';
 import { EscalationsService } from './escalations.service';
 import { MessagesService } from './messages.service';
 import { PHARMACY_CLOCKS, PHARMACY_MESSAGE_TYPES } from '../pharmacy/pharmacy-coordinator.registration';
+import { DISCHARGE_MESSAGE_TYPES } from '../discharge/discharge-coordinator.registration';
 
 const status = async () => ({ open: 1, capacity: 4, onTimePct: null });
 const actor: Actor = { id: 'u1', name: 'Dr Test', role: UserRole.DOCTOR };
@@ -200,6 +201,27 @@ describe('ChatService', () => {
       assert.ok(!/MHK\d{9}/i.test(blob), 'a UHID reached the AI');
       assert.ok(!/\b[a-f\d]{24}\b/i.test(blob), 'an id reached the AI');
     }
+  });
+
+  test('the Ask box says the agent is running once registered', async () => {
+    const last = () => ai.tasks[ai.tasks.length - 1].input as any;
+    assert.match((await service.ask(actor, 'Check discharge status')).answer, /^The Discharge Agent arrives in a later phase\./);
+    assert.equal(last().facts.dischargeAgentBuilt, false);
+
+    let inProgress = 3;
+    registry.register({ key: 'discharge', messageTypes: DISCHARGE_MESSAGE_TYPES, status: async () => ({ open: inProgress, capacity: null, onTimePct: null }) });
+    const res = await service.ask(actor, 'Check discharge status');
+    assert.equal(res.answer, 'The Discharge Agent is running: 3 discharges in progress. Open the Discharge Agent page for each checklist.');
+    assert.deepEqual(last().facts, { dischargesInProgress: 3, dischargeAgentBuilt: true });
+    inProgress = 1;
+    assert.equal((await service.ask(actor, 'Check discharge status')).answer, 'The Discharge Agent is running: 1 discharge in progress. Open the Discharge Agent page for each checklist.');
+
+    // About one patient: the case, then the page, no longer "a later phase".
+    await openCase();
+    const one = await service.ask(actor, 'Discharge status for MHK202577777');
+    assert.match(one.answer, /Zarathustra Quillfeather \(MHK202577777\) is open\. No admission is linked\. Open the Discharge Agent page for the checklist\.$/);
+    assert.equal(last().facts.dischargeAgentBuilt, true);
+    assert.ok(!JSON.stringify(last()).includes('Zarathustra'));
   });
 
   test('a question that fails or is not text is still logged, and an AI that is off leaves aiInput empty', async () => {

@@ -260,21 +260,28 @@ export class ChatService {
   }
 
   private async discharge(intent: ChatIntent): Promise<Draft> {
+    const built = this.registry.isBuilt('discharge');
     if (!intent.ref) {
+      if (built) {
+        const inProgress = (await this.registry.get('discharge')!.status()).open;
+        const template = `The Discharge Agent is running: ${plural(inProgress, 'discharge')} in progress. Open the Discharge Agent page for each checklist.`;
+        return { template, facts: { dischargesInProgress: inProgress, dischargeAgentBuilt: built }, useAi: true };
+      }
       const open = await this.cases.countOpen('ipd');
       const template = `The Discharge Agent arrives in a later phase. There ${open === 1 ? 'is' : 'are'} ${plural(open, 'patient')} with an open inpatient case. Ask about one patient by UHID.`;
       // The example is added after the AI: an example UHID must never be part of what it is sent.
-      return { template, facts: { openInpatientCases: open, dischargeAgentBuilt: false }, useAi: true, suffix: " For example: 'Discharge status for MHK202500323'." };
+      return { template, facts: { openInpatientCases: open, dischargeAgentBuilt: built }, useAi: true, suffix: " For example: 'Discharge status for MHK202500323'." };
     }
     const found = await this.lookup(intent.ref);
     if ('reply' in found) return plain(found.reply);
     if (!found.case) return plain('There is no case for the patient.', { patient: found.patient });
     const c = found.case;
     const admissionLinked = !!c.refs?.admissionId;
-    const template = `The case for the patient is ${c.state}. ${admissionLinked ? 'An admission is linked.' : 'No admission is linked.'} The Discharge Agent arrives in a later phase.`;
+    const next = built ? 'Open the Discharge Agent page for the checklist.' : 'The Discharge Agent arrives in a later phase.';
+    const template = `The case for the patient is ${c.state}. ${admissionLinked ? 'An admission is linked.' : 'No admission is linked.'} ${next}`;
     return {
       template,
-      facts: { caseState: c.state, admissionLinked },
+      facts: { caseState: c.state, admissionLinked, dischargeAgentBuilt: built },
       useAi: true,
       patient: found.patient,
       case: { id: String(c._id), number: c.number },
