@@ -114,7 +114,7 @@ export class Patient {
   @Prop({ default: 'OPD', enum: ['OPD', 'IPD'] })
   visitType: string;
 
-  @Prop({ default: 'Today', enum: ['Today', 'Admitted', 'Follow-up', 'Discharged'] })
+  @Prop({ default: 'Today', enum: ['Today', 'Admitted', 'Follow-up', 'Discharged', 'Deceased', 'Left without discharge'] })
   status: string;
 
   @Prop({ default: 'General Medicine' })

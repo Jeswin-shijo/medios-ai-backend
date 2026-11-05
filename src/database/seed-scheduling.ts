@@ -543,6 +543,9 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   // Billing in charge has no rostered person in this demo, so the admin holds it and no roster gap shows.
   await titles.updateOne({ key: 'billing-in-charge' }, { $set: { holders: [new Types.ObjectId(admin.id)] } });
 
+  // Ward nurse in charge: the demo nurse holds it, so no roster gap shows for it either.
+  await titles.updateOne({ key: 'ward-nurse-in-charge' }, { $set: { holders: [new Types.ObjectId(nurseAt.id)] } });
+
   // ---- Outpatients and appointments ---------------------------------------------------------------------------
   const prefix = `MHK${new Date(nowMs).getFullYear()}`;
   const lastUhid = await patientsModel.findOne({ uhid: { $regex: `^${prefix}\\d{5}$` } }).sort({ uhid: -1 }).select('uhid').lean<any>();

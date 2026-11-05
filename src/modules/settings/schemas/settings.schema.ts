@@ -67,6 +67,10 @@ export class HospitalSettings {
   /** Revenue: price, deposit and approval settings (see RevenueSettingsService). */
   @Prop({ type: Object, default: {} })
   revenue: Record<string, unknown>;
+
+  /** Discharge: leave and summary targets, reminder time, warning signs (see the Discharge settings service). */
+  @Prop({ type: Object, default: {} })
+  discharge: Record<string, unknown>;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);
