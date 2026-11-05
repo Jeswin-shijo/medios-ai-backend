@@ -642,6 +642,29 @@ describe('OpVisitsService', () => {
     assert.equal(bill!.totals.balance, 0);
   });
 
+  test("an appointment whose doctor was made inactive moves to the visit's doctor, whose fee is the consultation (R32)", async () => {
+    const appointment = await appointmentFor('U1', docB, 'Dr. B');
+    await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+    revenueOpd.onModuleInit(); // the async check-in hook, as in the app
+    try {
+      const visit = await visitWith('U1', 'CASH', docA);
+      const paid = await service.confirmCash(visit.id, 'Anita');
+      assert.equal(paid.token?.label, 'G-001');
+      const moved = (await m().Appointment.findById(appointment._id).lean())!;
+      assert.deepEqual([moved.status, moved.doctorId, moved.doctorName], ['Checked In', docA, 'Dr. A']);
+      await new Promise((resolve) => setTimeout(resolve, 100)); // the hook has run by now
+      // One consultation: the appointment's own check-in charge, at Dr. A's fee (Dr. B's is 450), paid by the kiosk.
+      const all = await m().ChargeLine.find({}).lean();
+      assert.deepEqual(all.map((l) => [l.source.type, l.source.ref, l.name, l.amount]), [['opd-fee', String(appointment._id), 'Consultation - Dr. A', 300]]);
+      const { payments, bill } = await revenueOf(visit.id);
+      assert.deepEqual(payments.map((p) => p.amount), [300]);
+      assert.equal(String(bill!.appointment), String(appointment._id));
+      assert.equal(bill!.totals.balance, 0);
+    } finally {
+      revenueOpd.onModuleDestroy();
+    }
+  });
+
   test('a Revenue failure never holds back the token; the payment is recorded on a later try', async () => {
     const warnings: string[] = [];
     (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: (message) => warnings.push(message) };

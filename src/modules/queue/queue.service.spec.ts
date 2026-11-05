@@ -6,7 +6,10 @@ import { QueueService } from './queue.service';
 import { QueueEvents } from './queue-events';
 import { OpdService } from '../opd/opd.service';
 import { SettingsService } from '../settings/settings.service';
-import { AppointmentEvents, AppointmentStatusChange } from '../appointments/appointment-events';
+import { AppointmentEvents, AppointmentSlotFreed, AppointmentStatusChange } from '../appointments/appointment-events';
+
+const responseOf = (error: unknown) => (error as { getResponse(): Record<string, any> }).getResponse();
+const statusOf = (error: unknown) => (error as { getStatus(): number }).getStatus();
 
 describe('QueueService doctor-wise tokens', () => {
   let queue: QueueService;
@@ -149,10 +152,16 @@ describe('QueueService doctor-wise tokens', () => {
     await assert.rejects(broken.tokenById(String(new Types.ObjectId())), /database down/);
   });
 
-  test("an appointment whose doctor is gone joins the default line; a failing doctor look-up is not hidden", async () => {
+  test("an appointment whose doctor is gone is refused like an inactive one's; a failing doctor look-up is not hidden", async () => {
     await patient('U1');
     await m().Appointment.create({ uhid: 'U1', patientName: 'Patient U1', age: 30, gender: 'Male', date: queue.today(), time: '10:00 AM', status: 'Scheduled', doctorId: String(new Types.ObjectId()) } as any);
-    assert.equal((await queue.issue({ uhid: 'U1' }, 'Tester')).token.label, 'G-001');
+    await assert.rejects(queue.issue({ uhid: 'U1' }, 'Tester'), (e) => {
+      assert.equal(responseOf(e).code, 'DOCTOR_INACTIVE');
+      assert.match(responseOf(e).message, /^This appointment's doctor is not seeing patients now/);
+      return true;
+    });
+    // With a doctor chosen, the patient is checked in on that doctor's line.
+    assert.equal((await queue.issue({ uhid: 'U1', doctorId: docA }, 'Tester')).token.label, 'G-001');
     await patient('U2');
     await m().Appointment.create({ uhid: 'U2', patientName: 'Patient U2', age: 30, gender: 'Male', date: queue.today(), time: '10:15 AM', status: 'Scheduled', doctorId: docB } as any);
     const opd = (queue as unknown as { opd: OpdService }).opd;
@@ -204,13 +213,87 @@ describe('QueueService doctor-wise tokens', () => {
       assert.equal((await m().Appointment.findById(appt._id))!.status, 'Scheduled');
     });
 
-    test('an inactive doctor sends the appointment to the default line, unchecked', async () => {
+    test("an inactive doctor's appointment is refused with DOCTOR_INACTIVE, naming the doctor, unless a doctor is chosen", async () => {
       await patient('U1');
       const appt = await booked('U1', docB);
       await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
-      const { token } = await queue.issue({ appointmentId: String(appt._id) }, 'Tester');
-      assert.equal(token.series, docA);
+      const inactive = (e: unknown) => {
+        assert.equal(statusOf(e), 409);
+        assert.equal(responseOf(e).code, 'DOCTOR_INACTIVE');
+        assert.equal(responseOf(e).message, 'This appointment is with Dr. B, who is not seeing patients now. Check it in with another doctor on the Token Queue.');
+        return true;
+      };
+      await assert.rejects(queue.issue({ appointmentId: String(appt._id) }, 'Tester'), inactive);
+      // A card tap or a UHID check-in finds the same appointment and is refused the same way.
+      await assert.rejects(queue.issue({ uhid: 'U1' }, 'Tester'), inactive);
+      assert.equal(await m().QueueToken.countDocuments({}), 0);
       assert.equal((await m().Appointment.findById(appt._id))!.status, 'Scheduled');
+      // Joining a line without checking the appointment in is not refused.
+      const { token } = await queue.issue({ uhid: 'U1', skipAppointment: true }, 'Tester');
+      assert.equal(token.series, docA);
+      assert.equal(token.appointmentId, undefined);
+      assert.equal((await m().Appointment.findById(appt._id))!.status, 'Scheduled');
+      // A repeat tap by a patient who now holds a token gets that token back, as any repeat does.
+      const again = await queue.issue({ uhid: 'U1' }, 'Tester');
+      assert.deepEqual([again.existing, String(again.token._id)], [true, String(token._id)]);
+    });
+
+    test("with an active doctor chosen, an inactive doctor's appointment moves to that doctor, slot and all, and is checked in on their line", async () => {
+      await patient('U1');
+      const date = queue.today();
+      const appt = await m().Appointment.create({ uhid: 'U1', patientName: 'P', date, time: '10:00 AM', status: 'Scheduled', gender: 'Male', age: 30, doctorId: docB, doctorName: 'Dr. B', departmentCode: 'general-medicine', slotKey: `${docB}|${date}|10:00 AM` } as any);
+      await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+      const events = (queue as unknown as { appointmentEvents: AppointmentEvents }).appointmentEvents;
+      const checkedInWith: (string | undefined)[] = [];
+      const freed: AppointmentSlotFreed[] = [];
+      const subs = [
+        // What Revenue reads when it prices the visit at check-in.
+        events.statusChanges$.subscribe((c) => void m().Appointment.findById(c.id).lean().then((a: any) => checkedInWith.push(`${c.status}:${a?.doctorId}`))),
+        events.slotFreed$.subscribe((s) => freed.push(s)),
+      ];
+      try {
+        const { token } = await queue.issue({ appointmentId: String(appt._id), doctorId: docA }, 'Tester');
+        assert.equal(token.series, docA);
+        assert.equal(token.label, 'G-001');
+        assert.equal(token.appointmentId, String(appt._id));
+        const moved = (await m().Appointment.findById(appt._id).lean()) as any;
+        assert.deepEqual(
+          [moved.status, moved.doctorId, moved.doctorName, moved.departmentCode, moved.slotKey],
+          ['Checked In', docA, 'Dr. A', 'general-medicine', `${docA}|${date}|10:00 AM`],
+        );
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepEqual(checkedInWith, [`Checked In:${docA}`]);
+        // Dr. B's slot is freed for the waitlist, as Scheduling's own move does.
+        assert.deepEqual(freed, [{ id: String(appt._id), doctorId: docB, date, time: '10:00 AM' }]);
+      } finally {
+        subs.forEach((s) => s.unsubscribe());
+      }
+    });
+
+    test('a chosen doctor who already holds that time still takes the appointment, without a slot', async () => {
+      await patient('U1');
+      await patient('U2');
+      const date = queue.today();
+      const appt = await m().Appointment.create({ uhid: 'U1', patientName: 'P', date, time: '10:00 AM', status: 'Scheduled', gender: 'Male', age: 30, doctorId: docB, doctorName: 'Dr. B', slotKey: `${docB}|${date}|10:00 AM` } as any);
+      const theirs = await m().Appointment.create({ uhid: 'U2', patientName: 'Q', date, time: '10:00 AM', status: 'Scheduled', gender: 'Male', age: 30, doctorId: docA, doctorName: 'Dr. A', slotKey: `${docA}|${date}|10:00 AM` } as any);
+      await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+      const { token } = await queue.issue({ appointmentId: String(appt._id), doctorId: docA }, 'Tester');
+      assert.equal(token.series, docA);
+      const moved = (await m().Appointment.findById(appt._id).lean()) as any;
+      assert.deepEqual([moved.status, moved.doctorId, moved.slotKey], ['Checked In', docA, undefined]);
+      assert.equal(((await m().Appointment.findById(theirs._id).lean()) as any).slotKey, `${docA}|${date}|10:00 AM`);
+    });
+
+    test("an inactive chosen doctor (a paid kiosk visit) takes no appointment from another inactive doctor", async () => {
+      await patient('U1');
+      const appt = await booked('U1', docB);
+      const c = await m().OpDoctor.create({ name: 'Dr. C', departmentCode: 'general-medicine', room: 'Room 101', tokenPrefix: 'G3', fee: 300, active: false } as any);
+      await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+      const { token } = await queue.issue({ uhid: 'U1', doctorId: String(c._id), allowInactiveDoctor: true }, 'Tester');
+      assert.equal(token.series, String(c._id));
+      assert.equal(token.appointmentId, undefined);
+      const left = (await m().Appointment.findById(appt._id).lean()) as any;
+      assert.deepEqual([left.status, left.doctorId], ['Scheduled', docB]);
     });
 
     test("with two appointments today, the asked doctor's one is checked in", async () => {

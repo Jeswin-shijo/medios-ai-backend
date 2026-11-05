@@ -11,12 +11,21 @@ import { AppointmentEvents, AppointmentStatusChange } from '../appointments/appo
 import { Subscription } from 'rxjs';
 import { displayName, QueueSettings, resolveQueueSettings } from './queue-settings';
 import { OpdService } from '../opd/opd.service';
+import { OpDoctorDocument } from '../opd/schemas/op-doctor.schema';
+import { isDuplicateKey, releaseStaleSlot, slotKeyOf } from '../appointments/slot-key';
 import { formatTokenLabel, newSecret } from '../reception/format';
-import { clinicNow, clockMinutes, displayTime, isoDate } from '../../common/utils/clinic-time';
+import { clinicNow, clockLabel, clockMinutes, displayTime, isoDate } from '../../common/utils/clinic-time';
 
 /** Appointment statuses a token can still check in. */
 const CHECKABLE = ['Scheduled', 'Checked In', 'Waiting'];
 const SEEING = [...CHECKABLE, 'In Consultation'];
+
+/** R32: the appointment's doctor no longer sees patients, so it waits for a doctor to be chosen (`doctorId`). */
+const doctorInactive = (name: string) =>
+  new ConflictException({
+    message: `${name ? `This appointment is with ${name}, who is` : "This appointment's doctor is"} not seeing patients now. Check it in with another doctor on the Token Queue.`,
+    code: 'DOCTOR_INACTIVE',
+  });
 
 const activeKey = (date: string, uhid: string) => `${date}:${uhid}`;
 const isDuplicate = (err: unknown, field: string) =>
@@ -54,7 +63,10 @@ export interface IssueRequest {
   appointmentId?: string;
   priority?: boolean;
   note?: string;
-  /** The doctor's line to join; when omitted, the appointment's own doctor, else the default doctor. */
+  /**
+   * The doctor's line to join; when omitted, the appointment's own doctor, else the default doctor. An appointment whose
+   * own doctor no longer sees patients needs one, and moves to it when that doctor is active (R32).
+   */
   doctorId?: string;
   /** Join the line without checking in the patient's appointment. */
   skipAppointment?: boolean;
@@ -299,16 +311,29 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     const ownerOf = (a: AppointmentDocument) => a.doctorId || (defaultDoctor ? String(defaultDoctor._id) : '');
     const found = await this.appointmentFor(req, date, asked ? (a) => ownerOf(a) === String(asked._id) : undefined);
     const uhid = req.uhid?.trim() || found!.uhid;
+    const checking = req.skipAppointment !== true ? found : null;
+    // The appointment's own doctor: null when it names none; `seeing` only while that doctor sees patients.
+    const own = found?.doctorId ? await this.knownDoctor(found.doctorId) : null;
+    const seeing = own?.active ? own : null;
+    // R32: an appointment whose doctor no longer sees patients (inactive, or gone) is never checked in silently on
+    // another line: without a doctor chosen it is refused (below); with an active one chosen it moves to that doctor.
+    const ownAway = !!found?.doctorId && !seeing;
+    const moveTo = checking && ownAway && asked?.active ? asked : null;
     // The line: the doctor asked for, else the appointment's own doctor while they see patients, else the default doctor.
-    const doctor = asked ?? (found?.doctorId ? await this.activeDoctor(found.doctorId) : null) ?? defaultDoctor;
-    // Only the appointment's own doctor's line checks it in (any line does when the hospital has no doctors).
-    const appointment = req.skipAppointment !== true && found && (!doctor || ownerOf(found) === String(doctor._id)) ? found : null;
+    const doctor = asked ?? seeing ?? defaultDoctor;
+    // Only the appointment's own doctor's line checks it in (any line does when the hospital has no doctors), or the line of
+    // the doctor it moves to.
+    const appointment = checking && (moveTo || !doctor || ownerOf(checking) === String(doctor._id)) ? checking : null;
 
     const patient = await this.patients.findOne({ uhid }).exec();
     if (!patient && !found) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
 
     const held = await this.tokens.findOne({ activeKey: activeKey(date, uhid) }).exec();
     if (held) return { token: await this.reclaim(held), existing: true };
+
+    if (checking && ownAway && !asked) throw doctorInactive(own?.name || checking.doctorName);
+    // Before the token, so a failed move leaves nothing half done; the check-in below then prices the new doctor's fee.
+    if (moveTo) await this.moveAppointment(checking!, moveTo);
 
     const settings = await this.queueSettings();
     const series = doctor ? String(doctor._id) : '';
@@ -375,13 +400,40 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return doctor;
   }
 
-  /** An appointment's doctor while they see patients; null for an unknown or inactive one (the default doctor's line takes the token). */
-  private async activeDoctor(doctorId: string) {
-    const doctor = await this.opd.getDoctor(doctorId).catch((err: unknown) => {
+  /** An appointment's doctor, active or not; null for one that is gone. A failing look-up is not hidden. */
+  private knownDoctor(doctorId: string): Promise<OpDoctorDocument | null> {
+    return this.opd.getDoctor(doctorId).catch((err: unknown) => {
       if (err instanceof NotFoundException) return null;
       throw err;
     });
-    return doctor?.active ? doctor : null;
+  }
+
+  /**
+   * R32: the appointment of a doctor who no longer sees patients moves to the doctor chosen at check-in, as Scheduling moves
+   * one: it takes that doctor's slot at the same time, and the old slot is announced as freed for the waitlist. A time the
+   * chosen doctor already holds leaves it without a slot, as Scheduling's backfill leaves a clash: the patient is here, so the
+   * check-in goes ahead.
+   */
+  private async moveAppointment(appointment: AppointmentDocument, doctor: OpDoctorDocument) {
+    const from = { doctorId: appointment.doctorId!, date: appointment.date, time: appointment.time };
+    const fields = { doctorId: String(doctor._id), doctorName: doctor.name, departmentCode: doctor.departmentCode };
+    const minutes = clockMinutes(appointment.time);
+    const key = minutes === Number.MAX_SAFE_INTEGER ? null : slotKeyOf(fields.doctorId, appointment.date, clockLabel(minutes));
+    // Guarded on the doctor it had, so a change made meanwhile is not overwritten.
+    const where = { _id: appointment._id, doctorId: from.doctorId };
+    let moved: AppointmentDocument | null = null;
+    let withoutSlot = !key;
+    if (key) {
+      await releaseStaleSlot(this.appointments, key);
+      try {
+        moved = await this.appointments.findOneAndUpdate(where, { $set: { ...fields, slotKey: key } }, { new: true }).exec();
+      } catch (err) {
+        if (!isDuplicateKey(err)) throw err;
+        withoutSlot = true;
+      }
+    }
+    if (withoutSlot) moved = await this.appointments.findOneAndUpdate(where, { $set: fields, $unset: { slotKey: 1 } }, { new: true }).exec();
+    if (moved) this.appointmentEvents.slotFreed({ id: String(appointment._id), ...from });
   }
 
   private async departmentName(code: string) {
