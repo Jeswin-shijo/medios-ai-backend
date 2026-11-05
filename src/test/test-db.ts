@@ -67,6 +67,11 @@ import { Payment, PaymentDocument, PaymentSchema } from '../modules/revenue/sche
 import { Refund, RefundDocument, RefundSchema } from '../modules/revenue/schemas/refund.schema';
 import { Correction, CorrectionDocument, CorrectionSchema } from '../modules/revenue/schemas/correction.schema';
 import { RevenueSnapshot, RevenueSnapshotDocument, RevenueSnapshotSchema } from '../modules/revenue/schemas/revenue-snapshot.schema';
+import { ClinicalDocument, ClinicalDocumentDocument, ClinicalDocumentSchema } from '../modules/documents/schemas/document.schema';
+import { DischargePlan, DischargePlanDocument, DischargePlanSchema } from '../modules/discharge/schemas/discharge-plan.schema';
+import { DischargeOrder, DischargeOrderDocument, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
+import { DischargeSummary, DischargeSummaryDocument, DischargeSummarySchema } from '../modules/discharge/schemas/discharge-summary.schema';
+import { DischargeSnapshot, DischargeSnapshotDocument, DischargeSnapshotSchema } from '../modules/discharge/schemas/discharge-snapshot.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
 // MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
@@ -159,6 +164,11 @@ export function models() {
     Refund: model(Refund, RefundSchema) as Model<RefundDocument>,
     Correction: model(Correction, CorrectionSchema) as Model<CorrectionDocument>,
     RevenueSnapshot: model(RevenueSnapshot, RevenueSnapshotSchema) as Model<RevenueSnapshotDocument>,
+    ClinicalDocument: model(ClinicalDocument, ClinicalDocumentSchema) as Model<ClinicalDocumentDocument>,
+    DischargePlan: model(DischargePlan, DischargePlanSchema) as Model<DischargePlanDocument>,
+    DischargeOrder: model(DischargeOrder, DischargeOrderSchema) as Model<DischargeOrderDocument>,
+    DischargeSummary: model(DischargeSummary, DischargeSummarySchema) as Model<DischargeSummaryDocument>,
+    DischargeSnapshot: model(DischargeSnapshot, DischargeSnapshotSchema) as Model<DischargeSnapshotDocument>,
   };
 }
 

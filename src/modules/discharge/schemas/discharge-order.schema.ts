@@ -1,0 +1,181 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
+import { ActorRef, ActorRefSchema } from '../../revenue/schemas/actor-ref';
+import { CONDITIONS, Condition, DISCHARGE_KINDS, DischargeKind, LINE_KEYS, LineKey } from '../discharge-catalogue';
+
+export type DischargeOrderDocument = DischargeOrder & Document;
+
+export const ORDER_STATES = ['ordered', 'ready', 'left', 'cancelled'] as const;
+export type OrderState = (typeof ORDER_STATES)[number];
+
+export const LINE_STATES = ['done', 'waiting', 'not-needed', 'needs-person'] as const;
+export type LineState = (typeof LINE_STATES)[number];
+
+/** One checklist line. `by`, `at` and `note` record a hand tick, a "not needed" or the no-bill override; `detail` is the panel's short text. */
+@Schema({ _id: false })
+export class DischargeLineEntry {
+  @Prop({ type: String, required: true, enum: LINE_KEYS }) key: LineKey;
+  @Prop({ type: String, required: true, enum: LINE_STATES }) state: LineState;
+  @Prop({ type: ActorRefSchema }) by?: ActorRef;
+  /** Clinic clock. */
+  @Prop({ type: Date }) at?: Date;
+  @Prop() note?: string;
+  /** For the panel, such as "₹2,340 due · 1 line needs a price". */
+  @Prop() detail?: string;
+}
+export const DischargeLineEntrySchema = SchemaFactory.createForClass(DischargeLineEntry);
+
+/** The outcome of the Scheduling follow-up order. */
+@Schema({ _id: false })
+export class DischargeFollowUp {
+  @Prop({ required: true }) followUpId: string;
+  @Prop({ type: String, required: true, enum: ['booked', 'waitlisted'] }) status: 'booked' | 'waitlisted';
+  @Prop() appointmentId?: string;
+  @Prop() date?: string;
+  @Prop() time?: string;
+}
+export const DischargeFollowUpSchema = SchemaFactory.createForClass(DischargeFollowUp);
+
+@Schema({ _id: false })
+export class DischargeCancel {
+  @Prop({ type: ActorRefSchema, required: true }) by: ActorRef;
+  @Prop({ required: true }) reason: string;
+  /** Clinic clock. */
+  @Prop({ type: Date, required: true }) at: Date;
+}
+export const DischargeCancelSchema = SchemaFactory.createForClass(DischargeCancel);
+
+/** Who pressed Start now, and when (clinic clock). */
+@Schema({ _id: false })
+export class DischargeStartNow {
+  @Prop({ type: ActorRefSchema, required: true }) by: ActorRef;
+  @Prop({ type: Date, required: true }) at: Date;
+}
+export const DischargeStartNowSchema = SchemaFactory.createForClass(DischargeStartNow);
+
+@Schema({ _id: false })
+export class GatePass {
+  /** GP-0001. */
+  @Prop({ required: true }) number: string;
+  /** Every print, the first included (clinic clock). */
+  @Prop({ type: [Date], default: [] }) printedAt: Date[];
+  @Prop({ type: ActorRefSchema, required: true }) by: ActorRef;
+}
+export const GatePassSchema = SchemaFactory.createForClass(GatePass);
+
+/** Who received the body (Died). */
+@Schema({ _id: false })
+export class BodyReceiver {
+  @Prop({ required: true }) name: string;
+  @Prop({ required: true }) relationship: string;
+}
+export const BodyReceiverSchema = SchemaFactory.createForClass(BodyReceiver);
+
+/** The doctor's discharge order and its checklist. Times are on the clinic clock unless marked real. */
+@Schema({ timestamps: true })
+export class DischargeOrder {
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true })
+  plan: Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true })
+  admission: Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId })
+  case?: Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: true })
+  patient: Types.ObjectId;
+
+  @Prop({ type: String, required: true, enum: DISCHARGE_KINDS })
+  kind: DischargeKind;
+
+  @Prop({ type: String, required: true, enum: ORDER_STATES, default: 'ordered' })
+  state: OrderState;
+
+  @Prop({ type: Date, required: true })
+  plannedLeaveAt: Date;
+
+  /** When the discharge window opens: the later of the order time and the planned leaving time less the target; Start now sets it to now. */
+  @Prop({ type: Date, required: true })
+  windowAt: Date;
+
+  /** Real time `discharge.window-opened` was sent. */
+  @Prop({ type: Date })
+  windowOpenedAt?: Date;
+
+  @Prop({ type: DischargeStartNowSchema })
+  startedNow?: DischargeStartNow;
+
+  @Prop({ required: true })
+  diagnosis: string;
+
+  /** Not asked for Died. */
+  @Prop({ type: String, enum: CONDITIONS })
+  condition?: Condition;
+
+  @Prop({ type: Date })
+  timeOfDeath?: Date;
+
+  @Prop()
+  causeOfDeath?: string;
+
+  @Prop()
+  receivingHospital?: string;
+
+  @Prop()
+  transferReason?: string;
+
+  /** The doctor's note for the summary. Never sent to the AI. */
+  @Prop({ default: '' })
+  note: string;
+
+  /** The Pharmacy take-home order. */
+  @Prop({ type: MongooseSchema.Types.ObjectId })
+  takeHomeOrder?: Types.ObjectId;
+
+  @Prop({ default: false })
+  noTakeHome: boolean;
+
+  @Prop({ type: DischargeFollowUpSchema })
+  followUp?: DischargeFollowUp;
+
+  @Prop({ default: false })
+  noFollowUp: boolean;
+
+  /** Lab request ids the doctor marked "follow up later". */
+  @Prop({ type: [String], default: [] })
+  followUpLater: string[];
+
+  @Prop({ type: [DischargeLineEntrySchema], default: [] })
+  lines: DischargeLineEntry[];
+
+  @Prop({ type: ActorRefSchema, required: true })
+  orderedBy: ActorRef;
+
+  @Prop({ type: Date, required: true })
+  orderedAt: Date;
+
+  @Prop({ type: DischargeCancelSchema })
+  cancelled?: DischargeCancel;
+
+  @Prop({ type: GatePassSchema })
+  gatePass?: GatePass;
+
+  @Prop({ type: Date })
+  leftAt?: Date;
+
+  @Prop({ type: ActorRefSchema })
+  leftBy?: ActorRef;
+
+  @Prop({ type: BodyReceiverSchema })
+  bodyReceiver?: BodyReceiver;
+
+  /** The message types sent for this order; the one-minute pass re-sends one a record says is due but is missing here. */
+  @Prop({ type: [String], default: [] })
+  announced: string[];
+}
+
+export const DischargeOrderSchema = SchemaFactory.createForClass(DischargeOrder);
+// One order per plan that is not cancelled. `left` counts too, so a plan whose patient has left is never ordered again.
+DischargeOrderSchema.index({ plan: 1 }, { unique: true, partialFilterExpression: { state: { $in: ['ordered', 'ready', 'left'] } } });
+DischargeOrderSchema.index({ state: 1, windowAt: 1 });
