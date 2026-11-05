@@ -19,21 +19,34 @@ export function normalizeCardId(raw: string): string {
 
 const CARD_NOT_REGISTERED = 'This card is not registered. Please go to the front desk.';
 
+/** The hex UID with its bytes in the other order. */
+const reverseBytes = (hex: string) => hex.match(/../g)!.reverse().join('');
+
 /**
  * Every form another reader may have typed for the same card. A desk USB reader
  * types the UID as a decimal number (often zero-padded to 10 digits, in either
- * byte order); an NFC tablet reads it as hex. Original first, no duplicates.
+ * byte order); an NFC tablet reads it as hex (4 or 7 bytes). A read is taken as hex
+ * where it can be, and digits also as a decimal number, so every form of one card
+ * finds every other (R33). Original first (an exact match wins), no duplicates.
  */
 export function cardIdCandidates(raw: string): string[] {
   const id = normalizeCardId(raw);
   const out = [id];
-  if (/^[0-9A-F]+$/.test(id) && id.length % 2 === 0 && id.length >= 8 && id.length <= 14) {
-    const bytes = id.match(/../g)!;
-    const reversed = [...bytes].reverse().join('');
-    out.push(reversed);
-    for (const hex of [id, reversed]) {
-      const dec = BigInt(`0x${hex}`).toString();
+  /** The UID in hex, its other byte order, and the decimal forms of both. */
+  const withForms = (hex: string) => {
+    const reversed = reverseBytes(hex);
+    out.push(hex, reversed);
+    for (const h of [hex, reversed]) {
+      const dec = BigInt(`0x${h}`).toString();
       out.push(dec, dec.padStart(10, '0'));
+    }
+  };
+  if (/^[0-9A-F]+$/.test(id) && id.length % 2 === 0 && id.length >= 8 && id.length <= 14) withForms(id);
+  // Digits may be a USB reader's decimal UID: its 4- and 7-byte hex forms where the number fits.
+  if (/^[0-9]+$/.test(id) && id.length <= 17) {
+    const n = BigInt(id);
+    for (const bytes of [4, 7]) {
+      if (n > 0n && n < 1n << BigInt(bytes * 8)) withForms(n.toString(16).toUpperCase().padStart(bytes * 2, '0'));
     }
   }
   return [...new Set(out)];
