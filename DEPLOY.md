@@ -120,7 +120,10 @@ The Beds screen suggests where to admit a patient. The rules always work; AI onl
 
 ## 8. Reception kiosk (before real patients)
 
-1. **Payments and SMS.** `render.yaml` sets `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample` for the demo. In sample mode payments are simulated and OTP codes appear on the kiosk, so it must **never** be used with real patients (the API logs a loud warning in production). Connect a real payment gateway and SMS provider first, then switch the settings.
+1. **Payments and SMS.** Real UPI, card-machine and SMS providers are **not built yet**: only `sample` and `none` exist.
+   - `render.yaml` sets `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample` **for the client demo only**. In sample mode payments are simulated and OTP codes appear on the kiosk, so it must **never** be used with real patients (the API logs a loud warning in production).
+   - **The safe production setting is `none`** for both, which is also what a production API uses when they are unset (development defaults to `sample`): the kiosk takes cash only, confirmed by staff at the counter, and "Find my record" by mobile number is off (patients use their card, or the front desk).
+   - Switch to a real provider only once one is built and connected (for example Razorpay or Pine Labs, and an SMS service).
 2. **HTTPS.** The API must be served over HTTPS: kiosk keys travel in request headers.
 3. **`PUBLIC_WEB_URL`** must be the web app's address (set to `https://medi-os-ai.vercel.app` for the demo); the tracking links use it.
 4. **Tablet setup.** In the web app, open Token Queue > Displays & Settings, create a kiosk device and scan its setup QR from the tablet app. Removing the device revokes its key.

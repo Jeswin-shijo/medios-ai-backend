@@ -326,7 +326,8 @@ function wire() {
  */
 export async function seedScheduling(clinicDay: string, nowMs: number = Date.now()): Promise<void> {
   if (Math.abs(Date.now() - nowMs) > 5 * MIN) throw new Error('Scheduling seed: nowMs must be the clock now (a test pins Date to it): the live services stamp their records with it.');
-  // The services read "today" from CLINIC_DATE; the seed does not read .env, so the clinic day is pinned while it runs.
+  // The services read "today" from CLINIC_DATE, which the seed may run without (it reads .env only when MONGODB_URI is not
+  // passed), so the clinic day is pinned while it runs.
   const savedClinic = process.env.CLINIC_DATE;
   process.env.CLINIC_DATE = clinicDay;
   try {
