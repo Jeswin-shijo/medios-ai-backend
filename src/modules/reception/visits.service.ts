@@ -4,18 +4,20 @@ import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, isValidObjectId, Model, mongo } from 'mongoose';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { clinicNow, displayDateTime, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
-import { doctorAvailability } from '../opd/availability';
+import { Availability, doctorAvailability } from '../opd/availability';
 import { OpdService } from '../opd/opd.service';
+import { OpDoctorDocument } from '../opd/schemas/op-doctor.schema';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { QueueService } from '../queue/queue.service';
 import { QueueTokenDocument } from '../queue/schemas/queue-token.schema';
 import { RevenueKioskService } from '../revenue/revenue-kiosk.service';
+import { SchedulingDoctorsService } from '../scheduling/scheduling-doctors.service';
 import { SettingsService } from '../settings/settings.service';
 import { formatOpNumber, newSecret, paymentCode } from './format';
 import { RECEPTION_CLOCK, ReceptionIdentityService } from './identity.service';
 import { PAYMENT_PROVIDER, PaymentProvider } from './providers/payment-provider';
 import { resolveReceptionSettings } from './reception-settings';
-import { KioskRef, KioskTokenView, VisitView } from './reception.types';
+import { KioskDoctorView, KioskRef, KioskTokenView, VisitView } from './reception.types';
 import { OpSequence, OpSequenceDocument } from './schemas/op-sequence.schema';
 import { OpVisit, OpVisitDocument, PAYMENT_METHODS, PaymentMethod, VisitStatus } from './schemas/op-visit.schema';
 import { resolveTrackingBase, toKioskTokenView } from './token-view';
@@ -95,6 +97,7 @@ export class OpVisitsService {
     private readonly opd: OpdService,
     private readonly queue: QueueService,
     private readonly revenue: RevenueKioskService,
+    private readonly scheduling: SchedulingDoctorsService,
     private readonly settings: SettingsService,
     private readonly config: ConfigService,
     @Optional() @Inject(PAYMENT_PROVIDER) private readonly payments: PaymentProvider | null,
@@ -102,6 +105,23 @@ export class OpVisitsService {
   ) {}
 
   // ---------------------------------------------------------------- kiosk
+
+  /** The active doctors of a department (all when none is given) with today's availability, as the kiosk lists them. */
+  async kioskDoctors(departmentCode?: string): Promise<KioskDoctorView[]> {
+    const [doctors, departments] = await Promise.all([this.opd.listDoctors({ activeOnly: true, departmentCode }), this.opd.listDepartments()]);
+    const names = new Map(departments.map((d) => [d.code, d.name]));
+    const availability = await this.availabilityOf(doctors);
+    return doctors.map((d) => ({
+      id: String(d._id),
+      name: d.name,
+      qualifications: d.qualifications,
+      department: names.get(d.departmentCode) ?? d.departmentCode,
+      departmentCode: d.departmentCode,
+      fee: d.fee,
+      room: d.room,
+      availability: availability.get(String(d._id))!,
+    }));
+  }
 
   async create(kiosk: KioskRef, session: string, doctorId: string): Promise<VisitView> {
     const { uhid, via } = await this.identity.resolveSession(kiosk, session);
@@ -116,8 +136,7 @@ export class OpVisitsService {
     if (!patient) throw new NotFoundException('Patient not found');
 
     const doctor = await this.opd.getDoctor(doctorId);
-    const waiting = (await this.queue.waitingCountsBySeries()).get(String(doctor._id)) ?? 0;
-    const availability = doctorAvailability(doctor.sessions, clinicNow(this.now()), waiting, doctor.avgConsultMinutes);
+    const availability = (await this.availabilityOf([doctor])).get(String(doctor._id))!;
     if (!doctor.active || !availability.bookable) {
       throw new ConflictException({ message: `${doctor.name} cannot be booked now. Please choose another doctor.`, code: 'DOCTOR_NOT_BOOKABLE' });
     }
@@ -436,6 +455,17 @@ export class OpVisitsService {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /**
+   * Today's availability of each doctor at the kiosk: their OP sessions and queue, and Scheduling's leave (R27), so the
+   * list and booking agree. A doctor on leave today is off, the state the tablet already greys out.
+   */
+  private async availabilityOf(doctors: OpDoctorDocument[]): Promise<Map<string, Availability>> {
+    const now = clinicNow(this.now());
+    const ids = doctors.map((d) => String(d._id));
+    const [waiting, onLeave] = await Promise.all([this.queue.waitingCountsBySeries(), this.scheduling.doctorsOnLeave(isoDate(now), ids)]);
+    return new Map(doctors.map((d, i) => [ids[i], doctorAvailability(d.sessions, now, waiting.get(ids[i]) ?? 0, d.avgConsultMinutes, onLeave.has(ids[i]))]));
+  }
 
   /** A patient sent to the counter must pay there, or have staff cancel it, before starting again. */
   private async refuseIfCashPending(uhid: string) {

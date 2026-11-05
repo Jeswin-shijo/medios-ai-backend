@@ -20,6 +20,7 @@ import { RevenueKioskService } from '../revenue/revenue-kiosk.service';
 import { RevenueOpdService } from '../revenue/revenue-opd.service';
 import { PaymentsService } from '../revenue/revenue-payments.service';
 import { RevenueSettingsService } from '../revenue/revenue-settings.service';
+import { SchedulingDoctorsService } from '../scheduling/scheduling-doctors.service';
 import { ReceptionIdentityService } from './identity.service';
 import { OpVisitsService } from './visits.service';
 import { PaymentProvider, SamplePaymentProvider } from './providers/payment-provider';
@@ -85,7 +86,8 @@ describe('OpVisitsService', () => {
     const now = () => clock;
     const identity = new ReceptionIdentityService(m().ReceptionSession, m().OtpChallenge, m().Patient, m().Appointment, new PatientsService(m().Patient), cards, queue, settings, config, null, now);
     revenue = buildRevenue(settings, appointmentEvents);
-    return new OpVisitsService(m().OpVisit, m().OpSequence, m().Patient, identity, opd, queue, revenue, settings, config, payments, now);
+    const scheduling = new SchedulingDoctorsService(m().DoctorProfile, m().Appointment, opd);
+    return new OpVisitsService(m().OpVisit, m().OpSequence, m().Patient, identity, opd, queue, revenue, scheduling, settings, config, payments, now);
   };
 
   /** The visit's Revenue records: its consultation lines, its kiosk payment(s), and the bill they sit on. */
@@ -698,5 +700,45 @@ describe('OpVisitsService', () => {
     assert.equal((await m().OpVisit.findById(visit.id).lean())!.billNumber, bill!.number);
     assert.equal(await m().QueueToken.countDocuments({}), 0);
     assert.equal((await revenueOf(old.id)).payments.length, 0);
+  });
+
+  // ---------------------------------------------------------------- Scheduling leave (R27)
+
+  const leave = (doctorId: string, from: string, to: string) => m().DoctorProfile.create({ doctorId, slotMinutes: 15, leave: [{ from, to, reason: 'Conference' }] });
+  const availabilityOf = async (doctorId: string) => (await service.kioskDoctors('general-medicine')).find((d) => d.id === doctorId)?.availability;
+
+  test('a doctor on leave today is listed as on leave and cannot be booked at the kiosk', async () => {
+    await leave(docB, '2026-09-26', '2026-09-26');
+    const listed = await service.kioskDoctors('general-medicine');
+    assert.deepEqual(
+      listed.map((d) => [d.name, d.availability.state, d.availability.label, d.availability.bookable]),
+      [
+        ['Dr. A', 'now', 'Available now', true],
+        ['Dr. B', 'off', 'On leave today', false],
+        ['Dr. Early', 'done', 'Finished for today', false],
+      ],
+    );
+    assert.deepEqual(Object.keys(listed[0]).sort(), ['availability', 'department', 'departmentCode', 'fee', 'id', 'name', 'qualifications', 'room']);
+    await rejectsWith(service.create(kiosk, await sessionFor('U1'), docB), 'DOCTOR_NOT_BOOKABLE');
+    assert.equal(await m().OpVisit.countDocuments({}), 0);
+    assert.equal((await service.create(kiosk, await sessionFor('U1'), docA)).status, 'awaiting-payment');
+  });
+
+  test('leave over several days that include today makes the doctor not bookable', async () => {
+    await leave(docB, '2026-09-25', '2026-09-28');
+    assert.deepEqual(await availabilityOf(docB), { state: 'off', label: 'On leave today', bookable: false });
+    await rejectsWith(service.create(kiosk, await sessionFor('U1'), docB), 'DOCTOR_NOT_BOOKABLE');
+  });
+
+  test('leave from tomorrow, or that ended yesterday, leaves the doctor bookable today', async () => {
+    await leave(docB, '2026-09-27', '2026-09-30');
+    assert.equal((await availabilityOf(docB))?.bookable, true);
+    await m().DoctorProfile.updateOne({ doctorId: docB }, { $set: { leave: [{ from: '2026-09-20', to: '2026-09-25', reason: '' }] } });
+    assert.deepEqual(await availabilityOf(docB), { state: 'now', label: 'Available now', bookable: true });
+    assert.equal((await service.create(kiosk, await sessionFor('U1'), docB)).status, 'awaiting-payment');
+    // Tomorrow, the first leave day, the same doctor is off.
+    process.env.CLINIC_DATE = '2026-09-27';
+    await m().DoctorProfile.updateOne({ doctorId: docB }, { $set: { leave: [{ from: '2026-09-27', to: '2026-09-30', reason: '' }] } });
+    assert.equal((await availabilityOf(docB))?.state, 'off');
   });
 });

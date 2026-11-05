@@ -437,6 +437,7 @@ Check-in gives the patient a numbered token for the day. Staff call tokens to a 
 A patient registers or books an OP visit on a tablet kiosk, pays, and gets a token. The modules are `src/modules/reception` (kiosk and staff routes, providers) and `src/modules/opd` (departments, OP doctors, availability).
 
 - **Departments and OP doctors** are managed in the web app under Settings > Departments. They are the same records the Scheduling Agent books appointments with.
+- **Availability** at the kiosk comes from the doctor's OP sessions, their queue and Scheduling's leave: a doctor on leave today is listed as "On leave today" and cannot be booked (`DOCTOR_NOT_BOOKABLE`). The kiosk's doctor list and visit booking use the same rule.
 - **Doctor-wise tokens.** Each OP doctor has their own line and numbers (`G-024`). A token joins the doctor asked for; without one, the doctor of the appointment being checked in, else the reception default doctor. An appointment is checked in only on its own doctor's line.
 - **Kiosk devices** are added in Token Queue > Displays & Settings. Creating one shows a setup QR for the tablet app (it carries the address and the key once).
 - **Cash payments** are confirmed by staff on the Token Queue. The token is issued on confirmation.

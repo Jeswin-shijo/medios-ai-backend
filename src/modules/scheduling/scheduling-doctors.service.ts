@@ -7,7 +7,7 @@ import { Appointment, AppointmentDocument } from '../appointments/schemas/appoin
 import { OpdService } from '../opd/opd.service';
 import { OpDoctorDocument } from '../opd/schemas/op-doctor.schema';
 import { UserRole } from '../users/schemas/user.schema';
-import { doctorSlots } from './scheduling-time';
+import { doctorSlots, onLeaveOn } from './scheduling-time';
 import { DoctorProfile, DoctorProfileDocument } from './schemas/doctor-profile.schema';
 
 export const DEFAULT_SLOT_MINUTES = 15;
@@ -77,6 +77,13 @@ export class SchedulingDoctorsService {
         leave: (p?.leave ?? []).map((l) => ({ from: l.from, to: l.to, reason: l.reason ?? '' })),
       };
     });
+  }
+
+  /** Which of these doctors are on leave on the clinic day `date` (YYYY-MM-DD), in one read: the kiosk's doctor list asks (R27). */
+  async doctorsOnLeave(date: string, doctorIds: string[]): Promise<Set<string>> {
+    if (!doctorIds.length) return new Set();
+    const profiles = await this.profiles.find({ doctorId: { $in: doctorIds } }).select('doctorId leave').lean().exec();
+    return new Set(profiles.filter((p) => onLeaveOn(p.leave ?? [], date)).map((p) => String(p.doctorId)));
   }
 
   async profile(doctorId: string): Promise<{ slotMinutes: number; leave: LeaveRange[] }> {

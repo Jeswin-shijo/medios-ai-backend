@@ -4,10 +4,8 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../../common/decorators/public.decorator';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
-import { Availability, doctorAvailability } from '../opd/availability';
 import { OpdService } from '../opd/opd.service';
 import { QueueDisplaysService } from '../queue/queue-displays.service';
-import { QueueService } from '../queue/queue.service';
 import { SettingsService } from '../settings/settings.service';
 import { CardDto, CreateVisitDto, DoctorsQueryDto, PayDto, RegisterDto, SendOtpDto, VerifyOtpDto } from './dto/reception.dto';
 import { ReceptionIdentityService } from './identity.service';
@@ -75,7 +73,6 @@ export class KioskController {
     private readonly identity: ReceptionIdentityService,
     private readonly visits: OpVisitsService,
     private readonly opd: OpdService,
-    private readonly queue: QueueService,
     private readonly settings: SettingsService,
     private readonly config: ConfigService,
   ) {}
@@ -117,29 +114,10 @@ export class KioskController {
   }
 
   @Get('doctors')
-  @ApiOperation({ summary: "Active doctors of a department with today's availability" })
+  @ApiOperation({ summary: "Active doctors of a department with today's availability (OP sessions, queue and leave)" })
   async doctors(@Headers('authorization') authorization: string | undefined, @Query() query: DoctorsQueryDto) {
     await this.kiosk(authorization);
-    const [doctors, departments, waiting] = await Promise.all([
-      this.opd.listDoctors({ activeOnly: true, departmentCode: query.department }),
-      this.opd.listDepartments(),
-      this.queue.waitingCountsBySeries(),
-    ]);
-    const names = new Map(departments.map((d) => [d.code, d.name]));
-    const now = clinicNow();
-    return doctors.map((d) => {
-      const availability: Availability = doctorAvailability(d.sessions, now, waiting.get(String(d._id)) ?? 0, d.avgConsultMinutes);
-      return {
-        id: String(d._id),
-        name: d.name,
-        qualifications: d.qualifications,
-        department: names.get(d.departmentCode) ?? d.departmentCode,
-        departmentCode: d.departmentCode,
-        fee: d.fee,
-        room: d.room,
-        availability,
-      };
-    });
+    return this.visits.kioskDoctors(query.department);
   }
 
   @Post('identify/card')

@@ -1,3 +1,4 @@
+import type { Availability } from '../opd/availability';
 import type { PaymentMethod, VisitStatus } from './schemas/op-visit.schema';
 
 /** The kiosk device making a request. */
@@ -30,6 +31,19 @@ export interface KioskTokenView {
   trackUrl: string;
   issuedAt: string;
   appointmentTime?: string;
+}
+
+/** A doctor as the kiosk lists them, with today's availability. */
+export interface KioskDoctorView {
+  id: string;
+  name: string;
+  qualifications: string;
+  department: string;
+  departmentCode: string;
+  /** Whole rupees. */
+  fee: number;
+  room: string;
+  availability: Availability;
 }
 
 export interface IdentifyResult {

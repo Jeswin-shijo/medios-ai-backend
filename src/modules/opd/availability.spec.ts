@@ -43,6 +43,12 @@ test('no session today is off', () => {
   assert.deepEqual(a, { state: 'off', label: 'Not in today', bookable: false });
 });
 
+test('a doctor on leave is off for the day, even inside a session (R27)', () => {
+  assert.deepEqual(doctorAvailability(sessions, sat(10), 0, 10, true), { state: 'off', label: 'On leave today', bookable: false });
+  assert.deepEqual(doctorAvailability([], sat(10), 0, 10, true), { state: 'off', label: 'On leave today', bookable: false });
+  assert.equal(doctorAvailability(sessions, sat(10), 0, 10, false).state, 'now');
+});
+
 test('shortTime formats 12-hour times', () => {
   assert.equal(shortTime('16:00'), '4:00 PM');
   assert.equal(shortTime('09:30'), '9:30 AM');

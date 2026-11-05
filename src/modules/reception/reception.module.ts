@@ -6,6 +6,7 @@ import { OpdModule } from '../opd/opd.module';
 import { PatientsModule } from '../patients/patients.module';
 import { QueueModule } from '../queue/queue.module';
 import { RevenueModule } from '../revenue/revenue.module';
+import { SchedulingModule } from '../scheduling/scheduling.module';
 import { SettingsModule } from '../settings/settings.module';
 import { ReceptionIdentityService } from './identity.service';
 import { KioskController } from './kiosk.controller';
@@ -32,6 +33,8 @@ import { OpVisitsService } from './visits.service';
     QueueModule,
     // Kiosk payments are Revenue payments (R26). Revenue imports nothing of the kiosk, so there is no cycle.
     RevenueModule,
+    // A doctor on leave is not bookable at the kiosk (R27); the call agent reads Scheduling the same way.
+    SchedulingModule,
     SettingsModule,
   ],
   controllers: [KioskController, ReceptionController],

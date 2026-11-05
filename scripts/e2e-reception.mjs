@@ -255,7 +255,24 @@ async function main() {
     ok('wrong kiosk key gives 401 KIOSK_REVOKED, in the words tablets match', k.status === 401 && errCode(k) === 'KIOSK_REVOKED' && /kiosk (key|link)/i.test(k.json?.message ?? ''), k.json);
   });
 
-  await section('7. Waiting-room display', async () => {
+  await section('7. A doctor on leave today (Scheduling)', async () => {
+    const set = await admin('PUT', `/scheduling/doctors/${doctor.id}/profile`, { leave: [{ from: clinicDay, to: clinicDay, reason: 'E2E leave' }] });
+    ok('leave saved for today', set.status === 200, set.json);
+    try {
+      const docs = await kiosk('GET', '/reception/kiosk/doctors?department=gen-med');
+      const listed = (docs.data || []).find((d) => d.id === doctor.id);
+      ok('the kiosk lists the doctor as on leave, not bookable', listed?.availability?.state === 'off' && listed.availability.label === 'On leave today' && listed.availability.bookable === false, listed?.availability);
+      const suffix = String(Math.floor(Math.random() * 1e5)).padStart(5, '0');
+      const reg = await kiosk('POST', '/reception/kiosk/register', { name: `E2E Leave ${suffix}`, phone: `90002${suffix}`, gender: 'Female', age: 52 });
+      const v = await kiosk('POST', '/reception/kiosk/visits', { session: reg.data?.session, doctorId: doctor.id });
+      ok('booking that doctor is refused with DOCTOR_NOT_BOOKABLE', v.status === 409 && errCode(v) === 'DOCTOR_NOT_BOOKABLE', v.json);
+    } finally {
+      const clear = await admin('PUT', `/scheduling/doctors/${doctor.id}/profile`, { leave: [] });
+      ok('leave cleared', clear.status === 200, clear.json);
+    }
+  });
+
+  await section('8. Waiting-room display', async () => {
     const snap = await call('GET', '/queue/display/state', { auth: `Display ${displayKey}` });
     const upcoming = snap.data?.upcoming ?? [];
     for (const [name, label] of [['Rekha S', step1Token], ['OTP patient', otpToken], ['new patient', newToken]]) {
@@ -276,7 +293,7 @@ async function cleanup() {
 
 console.log('Reception kiosk end-to-end');
 try { await main(); } catch (err) { ok(`setup: ${err.message}`, false); }
-console.log('\n8. Cleanup');
+console.log('\n9. Cleanup');
 try { await cleanup(); } catch (err) { ok(`cleanup: ${err.message}`, false); }
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
