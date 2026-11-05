@@ -109,7 +109,7 @@ describe('RevenueOverviewService', () => {
     assert.equal(o.day, DAY_ISO);
     assert.equal(o.cards.collectedToday.value, 4500);
     assert.equal(o.cards.collectedToday.display, '₹4,500');
-    assert.deepEqual(o.byMode, { cash: 1300, upi: 2500, card: 700 });
+    assert.deepEqual(o.byMode, { cash: 1300, upi: 2500, card: 700, kiosk: 0 });
     assert.equal(o.cards.openBills.value, 2, 'open a, final b with a balance; not final c at zero, not settled d');
     assert.equal(o.cards.depositsDue.value, 1);
     assert.equal(o.cards.finalWaiting.value, 1);
@@ -119,6 +119,15 @@ describe('RevenueOverviewService', () => {
     assert.equal(o.recent.filter((p: any) => p.cancelled).length, 1);
   });
 
+
+  test('payments taken at the reception kiosk count in the collections by mode', async () => {
+    const b = await bill({ kind: 'walk-in', erVisit: undefined, day: DAY_ISO });
+    await pay(b, 300, 'kiosk', { kind: 'settlement', source: 'op-visit:v1' });
+    await pay(b, 200, 'cash');
+    const o = await svc().overview();
+    assert.equal(o.cards.collectedToday.value, 500);
+    assert.deepEqual(o.byMode, { cash: 200, upi: 0, card: 0, kiosk: 300 });
+  });
   test('needsAction lists bills with a deposit, top-up, final or refund task, oldest first; needsPrice and recent follow the brief', async () => {
     const a = await bill();
     const b = await bill({ kind: 'admission', admission: new Types.ObjectId(), erVisit: undefined });
