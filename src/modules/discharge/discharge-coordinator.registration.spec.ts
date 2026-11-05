@@ -68,9 +68,9 @@ describe('DischargeRegistration', () => {
       plan: new Types.ObjectId(), admission: new Types.ObjectId(), patient: patientId, kind: 'home', state, plannedLeaveAt: T0, windowAt: T0,
       diagnosis: 'Acute appendicitis, operated', orderedBy: DOCTOR, orderedAt: T0, ...extra,
     });
-  /** A discharge.window-opened payload for an order, with its two due times (real time). */
-  const opened = (orderId: string, leaveDueAt: Date, summaryDueAt: Date) => ({
-    orderId, admissionId: String(new Types.ObjectId()), bedLabel: 'GWA-12', kind: 'home', plannedLeaveAt: new Date(Date.now() + 2 * H), leaveDueAt, summaryDueAt,
+  /** A discharge.window-opened payload for an order: its two due times (real time), and whether the summary is already signed. */
+  const opened = (orderId: string, leaveDueAt: Date, summaryDueAt: Date, summarySigned = false) => ({
+    orderId, admissionId: String(new Types.ObjectId()), bedLabel: 'GWA-12', kind: 'home', plannedLeaveAt: new Date(Date.now() + 2 * H), leaveDueAt, summaryDueAt, summarySigned,
   });
   const completed = (orderId: string) => ({ planId: String(new Types.ObjectId()), orderId, admissionId: String(new Types.ObjectId()), bedLabel: 'GWA-12', kind: 'home', leftAt: new Date() });
   const cancelled = (orderId: string) => ({ orderId, admissionId: String(new Types.ObjectId()), bedLabel: 'GWA-12' });
@@ -109,6 +109,7 @@ describe('DischargeRegistration', () => {
       'discharge.ordered': { orderId: 'string', planId: 'string', admissionId: 'string', bedLabel: 'string', kind: 'string', plannedLeaveAt: 'date' },
       'discharge.window-opened': {
         orderId: 'string', admissionId: 'string', bedLabel: 'string', kind: 'string', plannedLeaveAt: 'date', leaveDueAt: 'date', summaryDueAt: 'date',
+        summarySigned: 'boolean',
       },
       'discharge.summary-signed': { orderId: 'string', summaryId: 'string', bedLabel: 'string', kind: 'string' },
       'discharge.ready': { orderId: 'string', bedLabel: 'string', kind: 'string' },
@@ -159,6 +160,11 @@ describe('DischargeRegistration', () => {
     assert.equal(summary.dueFrom!({ leaveDueAt: new Date(0), summaryDueAt: due })!.getTime(), due.getTime());
     assert.equal(leave.dueFrom!({ leaveDueAt: 'not a date' }), null, 'an unusable due time falls back to the minutes');
     assert.equal(summary.dueFrom!({}), null);
+    // R20: a window that opens on a summary already signed starts no summary clock; every stop still matches.
+    assert.equal(leave.match, undefined);
+    assert.equal(summary.match!('discharge.window-opened', { summarySigned: true }), false);
+    assert.equal(summary.match!('discharge.window-opened', { summarySigned: false }), true);
+    for (const stop of summary.stopOn) assert.equal(summary.match!(stop, { summarySigned: true }), true, stop);
 
     // The rules (A6): the locked one reuses the placeholder's key; the switch has no settingPath.
     assert.deepEqual(def().rules, [
@@ -211,8 +217,9 @@ describe('DischargeRegistration', () => {
 
   test('window-opened starts both clocks with dueAt from the payload, and completed stops them', async () => {
     const a = String(new Types.ObjectId());
-    const leaveDueAt = new Date(Date.now() + 2 * H);
-    const summaryDueAt = new Date(Date.now() + H);
+    // Not the 120 and 60 minute fallbacks, so the payload's due times are told apart from them.
+    const leaveDueAt = new Date(Date.now() + 3 * H);
+    const summaryDueAt = new Date(Date.now() + 90 * MIN);
     await reg.send('discharge.window-opened', caseId, opened(a, leaveDueAt, summaryDueAt), 'GWA-12: Discharge window opened (Home)');
     let rows = await clocksOf(a);
     assert.deepEqual(rows.map((c) => [c.def, c.state, String(c.case), c.dueAt.getTime(), c.detail]), [
@@ -236,9 +243,26 @@ describe('DischargeRegistration', () => {
     assert.deepEqual((await clocksOf(b)).map((c) => c.state), ['met', 'met']);
   });
 
+  test('window-opened with summarySigned true starts only the leave clock', async () => {
+    const a = String(new Types.ObjectId());
+    // Signed in the evening, before the window opens: the stop finds no clock.
+    await reg.send('discharge.summary-signed', caseId, { orderId: a, summaryId: 's1', bedLabel: 'GWA-12', kind: 'home' }, 'GWA-12: Summary signed (Home)');
+    assert.equal(await m.Clock.countDocuments({ ref: a }), 0);
+    // The window opens next morning on the signed summary.
+    const leaveDueAt = new Date(Date.now() + 3 * H);
+    await reg.send('discharge.window-opened', caseId, opened(a, leaveDueAt, new Date(Date.now() + 90 * MIN), true), 'GWA-12: Discharge window opened (Home)');
+    assert.deepEqual((await clocksOf(a)).map((c) => [c.def, c.state, c.dueAt.getTime()]), [['discharge-leave', 'running', leaveDueAt.getTime()]]);
+    assert.equal(await m.Clock.countDocuments({ def: 'discharge-summary' }), 0);
+    // Past the summary's due time nothing escalates to the duty doctor, and the leave clock still stops.
+    assert.equal(await clocks.checkDue(new Date(Date.now() + 2 * H)), 0);
+    await reg.send('discharge.completed', caseId, completed(a), 'GWA-12: Patient left (Home)');
+    assert.deepEqual((await clocksOf(a)).map((c) => [c.def, c.state]), [['discharge-leave', 'met']]);
+    assert.equal(await m.Escalation.countDocuments(), 0);
+  });
+
   test('cancelled stops both clocks', async () => {
     const a = String(new Types.ObjectId());
-    await reg.send('discharge.window-opened', caseId, opened(a, new Date(Date.now() + 2 * H), new Date(Date.now() + H)), 'GWA-12: Discharge window opened (Home)');
+    await reg.send('discharge.window-opened', caseId, opened(a, new Date(Date.now() + 3 * H), new Date(Date.now() + 90 * MIN)), 'GWA-12: Discharge window opened (Home)');
     await reg.send('discharge.cancelled', caseId, cancelled(a), 'GWA-12: Discharge order cancelled');
     assert.deepEqual((await clocksOf(a)).map((c) => [c.def, c.state]), [['discharge-leave', 'met'], ['discharge-summary', 'met']]);
 

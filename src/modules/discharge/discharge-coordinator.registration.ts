@@ -22,9 +22,11 @@ export const DISCHARGE_MESSAGE_TYPES: MessageTypeDef[] = [
   type('discharge.ordered', 'A doctor ordered a discharge', {
     orderId: 'string', planId: 'string', admissionId: 'string', bedLabel: 'string', kind: 'string', plannedLeaveAt: 'date',
   }),
-  // Sent when the window opens (A1): both clocks start on it, and their due times are real time.
+  // Sent when the window opens (A1): the clocks start on it, and their due times are real time. `summarySigned`:
+  // the summary was signed before the window opened, so its clock does not start (R20).
   type('discharge.window-opened', 'The discharge window opened', {
     orderId: 'string', admissionId: 'string', bedLabel: 'string', kind: 'string', plannedLeaveAt: 'date', leaveDueAt: 'date', summaryDueAt: 'date',
+    summarySigned: 'boolean',
   }),
   type('discharge.summary-signed', 'A discharge summary was signed', { orderId: 'string', summaryId: 'string', bedLabel: 'string', kind: 'string' }),
   type('discharge.ready', 'Every required discharge line is done', { orderId: 'string', bedLabel: 'string', kind: 'string' }),
@@ -55,7 +57,8 @@ const bedAndKind = (p: Record<string, unknown>): string | null => {
 
 /**
  * Exported for the demo seed. The minutes are the defaults: the sender computes `leaveDueAt` and `summaryDueAt`
- * from Settings → Discharge when the window opens. Start and stop messages must carry the same case and order id.
+ * from Settings → Discharge when the window opens, and says whether the summary is already signed. Start and stop
+ * messages must carry the same case and order id.
  */
 export const DISCHARGE_CLOCKS: ClockDef[] = [
   {
@@ -79,6 +82,9 @@ export const DISCHARGE_CLOCKS: ClockDef[] = [
     label: 'Summary signed',
     startOn: 'discharge.window-opened',
     stopOn: ['discharge.summary-signed', 'discharge.completed', 'discharge.cancelled'],
+    // A summary signed before the window opened sent its stop before this clock could start, and a stop that
+    // comes first is not kept: a window that opens on a signed summary starts no clock. Every stop still matches.
+    match: (type, payload) => type !== 'discharge.window-opened' || payload.summarySigned !== true,
     minutes: DEFAULT_DISCHARGE_CONFIG.summaryMinutes,
     ladder: 'discharge-doctor',
     dueFrom: date('summaryDueAt'),
