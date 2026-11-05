@@ -74,7 +74,10 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
     registration.wake.set('bed.transferred', (id) =>
       this.run('bed.transferred', id, async (m) => {
         const admissionId = await this.admissionIdOf(m);
-        if (admissionId) await this.onTransferred(admissionId);
+        if (!admissionId) return;
+        // Opens a plan the agent missed, or gives a caseless one the message's case, before it follows the move.
+        await this.ensurePlan(admissionId, m.case);
+        await this.onTransferred(admissionId);
       }),
     );
     registration.wake.set('bed.discharged', (id) => this.run('bed.discharged', id, (m) => this.onDischarged(m)));
@@ -92,7 +95,8 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
   /**
    * The admission's plan, opened when it has none: due at admission + expected stay, with `discharge.planned` sent
    * once, by the call that created it. Two calls at once make one plan (the unique index). `caseId` is the message's
-   * case; without one, the case that holds the admission, if any. Null for a sample, a missing or an ended admission,
+   * case; without one, the case that holds the admission, if any. A plan that has no case yet takes it then. Null for
+   * a sample, a missing or an ended admission; for one still being placed (its bed does not point back to it yet);
    * and for one whose bed or ward can't be read (a data error, retried by the catch-up).
    */
   async ensurePlan(admissionId: string, caseId: string | null): Promise<DischargePlanDocument | null> {
@@ -103,7 +107,7 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
     if (!isValidObjectId(admissionId)) return null;
     const id = new Types.ObjectId(admissionId);
     const existing = await this.plans.findOne({ admission: id }).exec();
-    if (existing) return { plan: existing, created: false };
+    if (existing) return { plan: await this.withCase(existing, admissionId, caseId), created: false };
     const admission = await this.admissions.findById(id).lean().exec();
     if (!admission || admission.sample || admission.status !== 'active') return null;
     const place = await this.placeOf(admission.bed);
@@ -114,6 +118,10 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
       }
       return null;
     }
+    // BedsService writes the admission before it takes the bed, and deletes the admission when the bed is lost (the
+    // hold ran out, the bed was just taken, a twin-room clash). Until the bed points back to it the stay is still
+    // being placed: no plan yet, and its own bed.assigned plans it.
+    if (place.holds !== admissionId) return null;
     const [patient, caseRef] = await Promise.all([
       this.patients.findById(admission.patient).select('name uhid').lean<{ name?: string; uhid?: string }>().exec(),
       this.caseOf(admissionId, caseId),
@@ -128,7 +136,8 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
         // The patient record rather than the admission's copy: an ER placeholder may have been named since (R15).
         patientUhid: patient?.uhid || admission.patientUhid,
         patientName: patient?.name || admission.patientName,
-        ...place,
+        bedLabel: place.bedLabel,
+        wardName: place.wardName,
         doctor: admission.doctor ?? '',
         targetDay: isoDate(targetAt),
         targetAt,
@@ -138,13 +147,29 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
       if ((e as { code?: number }).code !== DUPLICATE_KEY) throw e;
       // Another delivery opened it a moment ago, and that call announces it.
       const raced = await this.plans.findOne({ admission: id }).exec();
-      return raced ? { plan: raced, created: false } : null;
+      return raced ? { plan: await this.withCase(raced, admissionId, caseId), created: false } : null;
     }
     await this.announce(plan, `${plan.bedLabel}: Discharge planned for ${dayText(plan.targetDay)}`);
     return { plan, created: true };
   }
 
-  /** The plan follows its stay to the new bed: the bed label and ward name change, and so does an open reminder's title. */
+  /**
+   * A plan opened before its case held the admission (the bed bridge adds the ref on its own queue, after the
+   * admission exists) takes the case from a later message, or from the ref once it is there. A case once set stays.
+   */
+  private async withCase(plan: DischargePlanDocument, admissionId: string, caseId: string | null): Promise<DischargePlanDocument> {
+    if (plan.case) return plan;
+    const ref = await this.caseOf(admissionId, caseId);
+    if (!ref) return plan;
+    // `case: null` also matches a plan with no case field at all.
+    const updated = await this.plans.findOneAndUpdate({ _id: plan._id, case: null }, { $set: { case: ref } }, { new: true }).exec();
+    return updated ?? (await this.plans.findById(plan._id).exec()) ?? plan;
+  }
+
+  /**
+   * The plan follows its stay to the new bed: the bed label and ward name change, and so does an open reminder's
+   * title. A stay with no plan is left to the bed.transferred handler and the catch-up, which open one.
+   */
   async onTransferred(admissionId: string): Promise<void> {
     if (!isValidObjectId(admissionId)) return;
     const admission = await this.admissions.findById(admissionId).select('bed sample').lean().exec();
@@ -154,8 +179,9 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Admission ${admissionId}: its new bed or ward was not found; the discharge plan keeps the old one`);
       return;
     }
-    const plan = await this.plans.findOneAndUpdate({ admission: admission._id, state: { $ne: 'completed' } }, { $set: place }, { new: true }).exec();
-    // No plan yet: the catch-up opens one, with the bed the stay is in then.
+    const plan = await this.plans
+      .findOneAndUpdate({ admission: admission._id, state: { $ne: 'completed' } }, { $set: { bedLabel: place.bedLabel, wardName: place.wardName } }, { new: true })
+      .exec();
     if (!plan) return;
     await this.alerts.updateOne({ link: reminderLink(plan._id), status: { $ne: 'Completed' } }, { $set: { title: reminderTitle(plan.bedLabel) } }).exec();
   }
@@ -346,12 +372,19 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
     return c ? (c._id as Types.ObjectId) : null;
   }
 
-  /** A bed's label (as the bed messages carry it) and its ward's name; null when either can't be read. */
-  private async placeOf(bedId: unknown): Promise<{ bedLabel: string; wardName: string } | null> {
+  /**
+   * A bed's label (as the bed messages carry it), its ward's name and the admission it holds (`holds`, null when it
+   * holds none); null when the bed or its ward can't be read.
+   */
+  private async placeOf(bedId: unknown): Promise<{ bedLabel: string; wardName: string; holds: string | null } | null> {
     if (!bedId || !isValidObjectId(bedId)) return null;
-    const bed = await this.beds.findById(bedId).select('label ward').lean<{ label?: string; ward?: Types.ObjectId }>().exec();
+    const bed = await this.beds
+      .findById(bedId)
+      .select('label ward admission')
+      .lean<{ label?: string; ward?: Types.ObjectId; admission?: Types.ObjectId | null }>()
+      .exec();
     const ward = bed?.ward ? await this.wards.findById(bed.ward).select('name').lean<{ name?: string }>().exec() : null;
-    return bed?.label && ward?.name ? { bedLabel: bed.label, wardName: ward.name } : null;
+    return bed?.label && ward?.name ? { bedLabel: bed.label, wardName: ward.name, holds: bed.admission ? String(bed.admission) : null } : null;
   }
 
   /**

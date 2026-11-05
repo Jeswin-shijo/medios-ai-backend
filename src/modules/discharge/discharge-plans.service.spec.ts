@@ -45,8 +45,12 @@ describe('DischargePlansService', () => {
   let plans: DischargePlansService;
   let logged: string[];
   const logger = { error: (x: string) => logged.push(x), warn: (x: string) => logged.push(x), log: () => undefined };
+  /** Every send the service asked for, as [type, planId]: the Coordinator drops a repeat within a minute, so stored messages can't show one. */
+  let sends: [string, string][];
+  const sendsFor = (planId: unknown) => sends.filter(([t, id]) => t === 'discharge.planned' && id === String(planId)).length;
   let bed: any;
   let hduBed: any;
+  let spareBed: any;
   let ravi: { patient: any; caseId: string };
 
   const handler = (type: string) => registry.get('discharge')!.handles!.find((h) => h.type === type)!.handler;
@@ -64,12 +68,17 @@ describe('DischargePlansService', () => {
     const opened = await cases.openOrJoin({ patientId: String(patient._id), patientUhid: uhid, patientName: name, kind: 'ipd', priority: 'medium', openedBy: 'bed' });
     return { patient, caseId: String(opened.case._id) };
   };
-  /** A stay in Ward A • Bed 12 from 26 Sep 14:37 for 3 days, on the patient's case when there is one. */
-  const admit = async (who: Who, extra: Record<string, unknown> = {}) => {
+  /**
+   * A stay in Ward A • Bed 12 from 26 Sep 14:37 for 3 days, on the patient's case when there is one. An active stay is
+   * placed, as BedsService leaves it: its bed is occupied and points back to it. `placed: false` is an admit still in
+   * flight (the admission is written first, the bed taken second).
+   */
+  const admit = async (who: Who, extra: Record<string, unknown> = {}, { placed = true } = {}) => {
     const a = await m.Admission.create({
       patient: who.patient._id, patientUhid: who.patient.uhid, patientName: who.patient.name, bed: bed._id, doctor: 'Dr. Ravi', department: 'General Surgery',
       roomClass: 'general', expectedStayDays: 3, admittedAt: at(26, 14, 37), admittedBy: 'Nurse Anjali Thomas', ...extra,
     });
+    if (placed && a.status === 'active') await m.Bed.updateOne({ _id: a.bed }, { $set: { state: 'occupied', admission: a._id } });
     if (who.caseId) await cases.addRefs(who.caseId, { admissionId: String(a._id) });
     return a;
   };
@@ -100,6 +109,12 @@ describe('DischargePlansService', () => {
     logged = [];
     (reg as any).logger = logger;
     reg.onModuleInit();
+    sends = [];
+    const send = reg.send.bind(reg);
+    reg.send = async (type, caseId, payload, summary) => {
+      sends.push([type, String(payload.planId)]);
+      return send(type, caseId, payload, summary);
+    };
     patientEvents = new PatientEvents();
     plans = new DischargePlansService(reg, messages, rules, settings, m.DischargePlan, m.Admission, m.Bed, m.Ward, m.Case, m.TaskAlertItem, m.Patient, patientEvents);
     (plans as any).logger = logger;
@@ -109,6 +124,7 @@ describe('DischargePlansService', () => {
     const hdu = await m.Ward.create({ code: 'HDU', name: 'HDU (step-down)', shortName: 'HDU', floor: 2, type: 'hdu', gender: 'any', ratePerDay: 4000 });
     bed = await m.Bed.create({ ward: wardA._id, label: WARD_A, number: 12, state: 'occupied' });
     hduBed = await m.Bed.create({ ward: hdu._id, label: HDU_1, number: 1, state: 'occupied' });
+    spareBed = await m.Bed.create({ ward: wardA._id, label: 'Ward A • Bed 14', number: 14 });
     ravi = await patientWithCase('MHK202600905', 'Ravi Kumar');
   });
   afterEach(() => {
@@ -118,9 +134,12 @@ describe('DischargePlansService', () => {
   test('bed.assigned twice makes one plan with targetDay = admittedAt + expected stay', async () => {
     const a = await admit(ravi);
     const msg = await assigned(a._id, ravi.caseId);
+    const created = (await m.DischargePlan.findOne({ admission: a._id }).lean())!;
+    assert.equal(sendsFor(created._id), 1, 'the creation sends one discharge.planned');
     // Delivered again, twice at once (a retry), then the agent's own placement message for the same stay.
     await Promise.all([handler('bed.assigned')(String(msg!._id)), handler('bed.assigned')(String(msg!._id))]);
     await assigned(a._id, ravi.caseId, { requestId: String(new Types.ObjectId()) });
+    assert.equal(sendsFor(created._id), 1, 'a replay sends nothing');
     const rows = await m.DischargePlan.find().lean();
     assert.equal(rows.length, 1);
     const p = rows[0];
@@ -148,6 +167,7 @@ describe('DischargePlansService', () => {
       [[mary.caseId, HDU_1, 'HDU (step-down)', 'Dr. Arun', '2026-10-01']],
     );
     assert.equal((await planned()).filter((s) => s.payload.admissionId === String(b._id)).length, 1);
+    assert.equal(sendsFor(x!._id), 1, 'only the call that created it sends');
     assert.deepEqual(logged, []);
   });
 
@@ -167,8 +187,10 @@ describe('DischargePlansService', () => {
     const mary = await patientWithCase('MHK202600906', 'Mary Jeni', { gender: 'Female' });
     const real = await admit(mary);
     assert.equal(await plans.catchUp(), 1);
-    assert.deepEqual((await m.DischargePlan.find().lean()).map((p) => String(p.admission)), [String(real._id)]);
+    const only = await m.DischargePlan.find().lean();
+    assert.deepEqual(only.map((p) => String(p.admission)), [String(real._id)]);
     assert.deepEqual((await planned()).map((s) => s.payload.admissionId), [String(real._id)]);
+    assert.deepEqual(sends, [['discharge.planned', String(only[0]._id)]]);
     // A message that cannot be read is logged, never thrown.
     for (const t of ['bed.assigned', 'bed.transferred', 'bed.discharged']) await assert.doesNotReject(handler(t)(String(new Types.ObjectId())), t);
     assert.equal(logged.length, 3);
@@ -193,9 +215,11 @@ describe('DischargePlansService', () => {
       [ravi.caseId, `${WARD_A}: Discharge target moved to 28 Sep 2026`, { planId: String(plan._id), admissionId: String(plan.admission), bedLabel: WARD_A, targetDay: '2026-09-28' }],
     );
     assert.ok(row.announcedAt, 'announced');
+    assert.equal(sendsFor(plan._id), 1, 'one send per change');
 
     // Today is allowed, with no note, and an admin can move it too.
     await plans.setTarget(ADMIN, String(plan._id), '2026-09-26');
+    assert.equal(sendsFor(plan._id), 2);
     row = (await stored(plan._id))!;
     assert.equal(row.targetAt.getTime(), at(26, 11).getTime());
     assert.deepEqual(row.targetLog.map((l) => [l.from, l.to, l.by.name, l.note]), [
@@ -206,6 +230,7 @@ describe('DischargePlansService', () => {
     await plans.setTarget(DOCTOR, String(plan._id), '2026-09-26', 'again');
     assert.equal((await stored(plan._id))!.targetLog.length, 2);
     assert.equal((await planned()).length, 2);
+    assert.equal(sendsFor(plan._id), 2, 'the same day sends nothing');
 
     // Refused: a day before today, an impossible or malformed day, a long note, an unknown plan, a completed plan.
     for (const day of ['2026-09-25', '2026-09-31', '2026-13-01', '28 Sep', '']) {
@@ -218,6 +243,7 @@ describe('DischargePlansService', () => {
     await assert.rejects(() => plans.setTarget(DOCTOR, String(plan._id), '2026-09-30'), ConflictException);
     assert.equal((await stored(plan._id))!.targetDay, '2026-09-26');
     assert.equal((await planned()).length, 2);
+    assert.equal(sendsFor(plan._id), 2, 'a refused change sends nothing');
   });
 
   test('a nurse cannot set the target', async () => {
@@ -229,6 +255,7 @@ describe('DischargePlansService', () => {
     const row = (await stored(plan._id))!;
     assert.deepEqual([row.targetDay, row.targetLog], ['2026-09-29', []]);
     assert.equal((await planned()).length, 0);
+    assert.deepEqual(sends, []);
   });
 
   test('at 08:59 no reminder; at 09:00 one reminder; run twice still one', async () => {
@@ -317,11 +344,13 @@ describe('DischargePlansService', () => {
   test('changing the target closes the reminder', async () => {
     const plan = await planRow({ targetDay: '2026-09-26' });
     assert.equal(await plans.remindDue(at(26, 9)), 1);
-    // The same day is no change: the reminder stays open.
+    // The same day is no change: the reminder stays open, and nothing is sent.
     await plans.setTarget(DOCTOR, String(plan._id), '2026-09-26');
     assert.equal((await alertOf(plan._id))?.status, 'Pending');
+    assert.equal(sendsFor(plan._id), 0);
     await plans.setTarget(DOCTOR, String(plan._id), '2026-09-27', 'Family comes tomorrow');
     assert.equal((await alertOf(plan._id))?.status, 'Completed');
+    assert.equal(sendsFor(plan._id), 1);
     assert.equal(await plans.remindDue(at(26, 10)), 0, 'not due today any more');
     // On the new day the same task opens again, once.
     assert.equal(await plans.remindDue(at(27, 9)), 1);
@@ -340,9 +369,10 @@ describe('DischargePlansService', () => {
     const loose = await admit({ patient: mary.patient, caseId: null }, { bed: hduBed._id });
     // Not missed: a stay that has its plan, an ended stay and a sample.
     const john = await patientWithCase('MHK202600907', 'John Peter');
-    const kept = await admit(john);
-    await plans.ensurePlan(String(kept._id), john.caseId);
-    await admit({ patient: john.patient, caseId: null }, { status: 'discharged', admittedAt: at(1, 9, 0, 7), dischargedAt: at(5, 9, 0, 7), dischargedBy: 'Nurse Anjali Thomas' });
+    const kept = await admit(john, { bed: spareBed._id });
+    const keptPlan = await plans.ensurePlan(String(kept._id), john.caseId);
+    assert.ok(keptPlan, 'the stay that has its plan');
+    await admit({ patient: john.patient, caseId: null }, { status: 'discharged', bed: spareBed._id, admittedAt: at(1, 9, 0, 7), dischargedAt: at(5, 9, 0, 7), dischargedBy: 'Nurse Anjali Thomas' });
     await m.Admission.create({
       patient: new Types.ObjectId(), patientUhid: 'SAMPLE-0001', patientName: 'Sample inpatient', bed: hduBed._id, roomClass: 'hdu', expectedStayDays: 2,
       admittedAt: at(25, 10), admittedBy: 'Seed', sample: true,
@@ -358,10 +388,57 @@ describe('DischargePlansService', () => {
     ]);
     const sent = (await planned()).slice(before).map((s) => [s.payload.admissionId, s.case ? String(s.case) : null]);
     assert.deepEqual(sent.sort(), [[String(old._id), ravi.caseId], [String(loose._id), null]].sort());
+    assert.deepEqual([sendsFor(opened[0]._id), sendsFor(opened[1]._id), sendsFor(keptPlan!._id)], [1, 1, 1]);
     // Nothing is left: a second pass opens none and sends nothing.
     assert.equal(await plans.catchUp(), 0);
     assert.equal(await m.DischargePlan.countDocuments(), 3);
     assert.equal((await planned()).length, before + 2);
+    assert.equal(sends.length, 3, 'the second pass sends nothing');
+    assert.deepEqual(logged, []);
+  });
+
+  test('a stay still being placed gets no plan until its bed points to it', async () => {
+    // BedsService writes the admission first and takes the bed second, and deletes the admission when the bed is lost.
+    const a = await admit(ravi, {}, { placed: false });
+    await m.Bed.updateOne({ _id: bed._id }, { $set: { state: 'held', admission: null } });
+    assert.equal(await plans.catchUp(), 0, 'the bed is only held');
+    // The hold ran out and the bed went to another patient: still none (the admit then deletes this admission).
+    await m.Bed.updateOne({ _id: bed._id }, { $set: { state: 'occupied', admission: new Types.ObjectId() } });
+    assert.equal(await plans.catchUp(), 0, 'the bed holds someone else');
+    assert.equal(await plans.ensurePlan(String(a._id), ravi.caseId), null);
+    assert.equal(await m.DischargePlan.countDocuments(), 0);
+    assert.deepEqual(sends, []);
+    // Placed: the bed points back to it, and its own bed.assigned plans it.
+    await m.Bed.updateOne({ _id: bed._id }, { $set: { state: 'occupied', admission: a._id } });
+    await assigned(a._id, ravi.caseId);
+    const plan = await m.DischargePlan.findOne({ admission: a._id }).lean();
+    assert.deepEqual([plan?.bedLabel, plan ? String(plan.case) : null, plan ? sendsFor(plan._id) : 0], [WARD_A, ravi.caseId, 1]);
+    assert.deepEqual(logged, []);
+  });
+
+  test('a plan opened before its case knew the admission takes the case from a later message', async () => {
+    // Placed, but the bed bridge has not yet added the admission to the case (it does so on its own queue).
+    const a = await admit({ patient: ravi.patient, caseId: null });
+    assert.equal(await plans.catchUp(), 1);
+    const plan = (await m.DischargePlan.findOne({ admission: a._id }).lean())!;
+    assert.equal(plan.case, undefined, 'no case holds the admission yet');
+    // The bridge links it and sends bed.assigned on the case: the plan takes the case, and nothing is sent again.
+    await cases.addRefs(ravi.caseId, { admissionId: String(a._id) });
+    await assigned(a._id, ravi.caseId);
+    assert.equal(String((await stored(plan._id))!.case), ravi.caseId);
+    assert.equal(sendsFor(plan._id), 1);
+    // A transfer that carries the case repairs a caseless plan too.
+    const mary = await patientWithCase('MHK202600906', 'Mary Jeni', { gender: 'Female' });
+    const b = await admit({ patient: mary.patient, caseId: null }, { bed: hduBed._id });
+    assert.equal(await plans.catchUp(), 1);
+    const second = (await m.DischargePlan.findOne({ admission: b._id }).lean())!;
+    assert.equal(second.case, undefined);
+    await bedMessage('bed.transferred', mary.caseId, { bedId: String(hduBed._id), bedLabel: HDU_1, fromBedLabel: WARD_A, admissionId: String(b._id), ward: 'HDU (step-down)' });
+    assert.equal(String((await stored(second._id))!.case), mary.caseId);
+    assert.equal(sendsFor(second._id), 1);
+    // A case once set is never replaced.
+    await assigned(a._id, mary.caseId);
+    assert.equal(String((await stored(plan._id))!.case), ravi.caseId);
     assert.deepEqual(logged, []);
   });
 
@@ -369,15 +446,20 @@ describe('DischargePlansService', () => {
     const a = await admit(ravi, { admittedAt: at(23, 14, 37) });
     const plan = await planRow({ admission: a._id, targetDay: '2026-09-26' });
     await plans.remindDue(at(26, 9));
-    // Moved to HDU • Bed 1, as BedsService.transfer records it.
-    await m.Admission.updateOne({ _id: a._id }, { $set: { bed: hduBed._id }, $push: { transfers: { fromBed: bed._id, toBed: hduBed._id, at: at(26, 10), by: 'Nurse Anjali Thomas' } } });
+    // Moved to HDU • Bed 1, as BedsService.transfer leaves it: the stay and the new bed point to each other, the old bed waits for cleaning.
+    const move = async (from: any, to: any) => {
+      await m.Admission.updateOne({ _id: a._id }, { $set: { bed: to._id }, $push: { transfers: { fromBed: from._id, toBed: to._id, at: at(26, 10), by: 'Nurse Anjali Thomas' } } });
+      await m.Bed.updateOne({ _id: to._id }, { $set: { state: 'occupied', admission: a._id } });
+      await m.Bed.updateOne({ _id: from._id }, { $set: { state: 'cleaning', admission: null } });
+    };
+    await move(bed, hduBed);
     await bedMessage('bed.transferred', ravi.caseId, { bedId: String(hduBed._id), bedLabel: HDU_1, fromBedLabel: WARD_A, admissionId: String(a._id), ward: 'HDU (step-down)' });
     let row = (await stored(plan._id))!;
     assert.deepEqual([row.bedLabel, row.wardName, row.targetDay, row.targetLog], [HDU_1, 'HDU (step-down)', '2026-09-26', []]);
     assert.equal((await alertOf(plan._id))?.title, `Discharge due today, no order yet: ${HDU_1}`);
     // A message with no admission id finds it through the case; a closed reminder keeps its title.
     await plans.closeReminder(String(plan._id));
-    await m.Admission.updateOne({ _id: a._id }, { $set: { bed: bed._id } });
+    await move(hduBed, bed);
     await bedMessage('bed.transferred', ravi.caseId, { bedId: String(bed._id), bedLabel: WARD_A, fromBedLabel: HDU_1, admissionId: '', ward: 'General ward A (men)' });
     row = (await stored(plan._id))!;
     assert.deepEqual([row.bedLabel, row.wardName], [WARD_A, 'General ward A (men)']);
