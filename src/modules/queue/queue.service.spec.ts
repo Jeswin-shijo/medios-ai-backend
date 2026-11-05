@@ -148,6 +148,53 @@ describe('QueueService doctor-wise tokens', () => {
     assert.equal(counts.get(docB), 1);
   });
 
+  describe("an appointment's own doctor (Scheduling books each appointment with a doctor)", () => {
+    const booked = (uhid: string, doctorId: string, time = '10:00 AM') =>
+      m().Appointment.create({ uhid, patientName: 'P', date: queue.today(), time, status: 'Scheduled', gender: 'Male', age: 30, doctorId } as any);
+
+    test("with no doctor asked, the token joins the appointment's doctor's line and checks it in", async () => {
+      await patient('U1');
+      const appt = await booked('U1', docB);
+      const { token } = await queue.issue({ appointmentId: String(appt._id) }, 'Tester');
+      assert.equal(token.label, 'G2-001');
+      assert.equal(token.series, docB);
+      assert.equal(token.appointmentId, String(appt._id));
+      assert.equal((await m().Appointment.findById(appt._id))!.status, 'Checked In');
+      // A card tap or UHID check-in finds the same line.
+      await patient('U2');
+      const other = await booked('U2', docB, '10:15 AM');
+      const byUhid = await queue.issue({ uhid: 'U2' }, 'Tester');
+      assert.equal(byUhid.token.series, docB);
+      assert.equal((await m().Appointment.findById(other._id))!.status, 'Checked In');
+    });
+
+    test("another doctor's line leaves the appointment alone", async () => {
+      const appt = await booked('U1', docB);
+      const { token } = await issueFor('U1', docA);
+      assert.equal(token.series, docA);
+      assert.equal(token.appointmentId, undefined);
+      assert.equal((await m().Appointment.findById(appt._id))!.status, 'Scheduled');
+    });
+
+    test('an inactive doctor sends the appointment to the default line, unchecked', async () => {
+      await patient('U1');
+      const appt = await booked('U1', docB);
+      await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
+      const { token } = await queue.issue({ appointmentId: String(appt._id) }, 'Tester');
+      assert.equal(token.series, docA);
+      assert.equal((await m().Appointment.findById(appt._id))!.status, 'Scheduled');
+    });
+
+    test("with two appointments today, the asked doctor's one is checked in", async () => {
+      const first = await booked('U1', docA, '09:00 AM');
+      const second = await booked('U1', docB, '11:00 AM');
+      const { token } = await issueFor('U1', docB);
+      assert.equal(token.appointmentId, String(second._id));
+      assert.equal((await m().Appointment.findById(second._id))!.status, 'Checked In');
+      assert.equal((await m().Appointment.findById(first._id))!.status, 'Scheduled');
+    });
+  });
+
   describe('hospital-wide line (no doctors)', () => {
     beforeEach(async () => {
       await m().OpDoctor.deleteMany({});

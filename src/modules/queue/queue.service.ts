@@ -54,7 +54,7 @@ export interface IssueRequest {
   appointmentId?: string;
   priority?: boolean;
   note?: string;
-  /** The doctor's line to join; the default doctor when omitted. */
+  /** The doctor's line to join; when omitted, the appointment's own doctor, else the default doctor. */
   doctorId?: string;
   /** Join the line without checking in the patient's appointment. */
   skipAppointment?: boolean;
@@ -291,12 +291,16 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async issue(req: IssueRequest, actor: string, source: 'front-desk' | 'kiosk' = 'front-desk') {
     if (!req.uhid && !req.appointmentId) throw new BadRequestException('Give the patient UHID or the appointment to check in');
     const date = this.today();
-    const doctor = await this.doctorFor(req.doctorId, req.allowInactiveDoctor === true);
-    const found = await this.appointmentFor(req, date);
+    const asked = req.doctorId ? await this.doctorFor(req.doctorId, req.allowInactiveDoctor === true) : null;
+    const defaultDoctor = await this.opd.defaultDoctor();
+    // An appointment belongs to its own doctor (Scheduling books one per doctor); one without a doctor to the default doctor.
+    const ownerOf = (a: AppointmentDocument) => a.doctorId || (defaultDoctor ? String(defaultDoctor._id) : '');
+    const found = await this.appointmentFor(req, date, asked ? (a) => ownerOf(a) === String(asked._id) : undefined);
     const uhid = req.uhid?.trim() || found!.uhid;
-    // Only the default doctor's line checks an appointment in.
-    const defaultDoctor = doctor ? await this.opd.defaultDoctor() : null;
-    const appointment = req.skipAppointment !== true && (!doctor || String(doctor._id) === String(defaultDoctor?._id)) ? found : null;
+    // The line: the doctor asked for, else the appointment's own doctor while they see patients, else the default doctor.
+    const doctor = asked ?? (found?.doctorId ? await this.activeDoctor(found.doctorId) : null) ?? defaultDoctor;
+    // Only the appointment's own doctor's line checks it in (any line does when the hospital has no doctors).
+    const appointment = req.skipAppointment !== true && found && (!doctor || ownerOf(found) === String(doctor._id)) ? found : null;
 
     const patient = await this.patients.findOne({ uhid }).exec();
     if (!patient && !found) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
@@ -346,8 +350,8 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return { token, existing: false };
   }
 
-  /** The appointment being checked in: the one named, or the patient's next one today. */
-  private async appointmentFor(req: IssueRequest, date: string): Promise<AppointmentDocument | null> {
+  /** The appointment being checked in: the one named, or the patient's next one today (the first that `prefer` accepts, if any). */
+  private async appointmentFor(req: IssueRequest, date: string, prefer?: (a: AppointmentDocument) => boolean): Promise<AppointmentDocument | null> {
     if (req.appointmentId) {
       const appointment = await this.appointments.findById(req.appointmentId).exec();
       if (!appointment) throw new NotFoundException('Appointment not found');
@@ -356,18 +360,23 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       if (!SEEING.includes(appointment.status)) throw new ConflictException(`That appointment is ${appointment.status}`);
       return appointment;
     }
-    const today = await this.appointments.find({ uhid: req.uhid!.trim(), date, status: { $in: CHECKABLE } }).exec();
-    return today.sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time))[0] ?? null;
+    const today = (await this.appointments.find({ uhid: req.uhid!.trim(), date, status: { $in: CHECKABLE } }).exec()).sort(
+      (a, b) => clockMinutes(a.time) - clockMinutes(b.time),
+    );
+    return (prefer && today.find(prefer)) || today[0] || null;
   }
 
-  /** The asked-for doctor (must be active), else the default doctor; null when the hospital has no doctors (one hospital-wide line). */
-  private async doctorFor(doctorId?: string, allowInactive = false) {
-    if (doctorId) {
-      const doctor = await this.opd.getDoctor(doctorId);
-      if (!doctor.active && !allowInactive) throw new ConflictException(`${doctor.name} is not seeing patients`);
-      return doctor;
-    }
-    return this.opd.defaultDoctor();
+  /** The asked-for doctor, who must be active unless `allowInactive`. */
+  private async doctorFor(doctorId: string, allowInactive = false) {
+    const doctor = await this.opd.getDoctor(doctorId);
+    if (!doctor.active && !allowInactive) throw new ConflictException(`${doctor.name} is not seeing patients`);
+    return doctor;
+  }
+
+  /** An appointment's doctor while they see patients; null for an unknown or inactive one (the default doctor's line takes the token). */
+  private async activeDoctor(doctorId: string) {
+    const doctor = await this.opd.getDoctor(doctorId).catch(() => null);
+    return doctor?.active ? doctor : null;
   }
 
   private async departmentName(code: string) {
