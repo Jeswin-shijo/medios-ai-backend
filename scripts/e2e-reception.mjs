@@ -252,7 +252,7 @@ async function main() {
     const s = await kiosk('POST', '/reception/kiosk/visits', { session: 'not-a-session', doctorId: doctor.id });
     ok('bad session gives 401 SESSION_ENDED', s.status === 401 && errCode(s) === 'SESSION_ENDED', s.json);
     const k = await call('GET', '/reception/kiosk/config', { auth: 'Kiosk wrong-key' });
-    ok('wrong kiosk key gives 401', k.status === 401, k.status);
+    ok('wrong kiosk key gives 401 KIOSK_REVOKED, in the words tablets match', k.status === 401 && errCode(k) === 'KIOSK_REVOKED' && /kiosk (key|link)/i.test(k.json?.message ?? ''), k.json);
   });
 
   await section('7. Waiting-room display', async () => {
