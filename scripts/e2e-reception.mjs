@@ -239,7 +239,7 @@ async function main() {
     const cash = await mk('CASH');
     const c2 = await kiosk('POST', `/reception/kiosk/visits/${cash}/cancel`);
     const after = (await kiosk('GET', `/reception/kiosk/visits/${cash}`)).data;
-    ok('kiosk cannot cancel a cash visit', after?.status === 'awaiting-payment', { status: c2.status, after: after?.status });
+    ok('kiosk cannot cancel a cash visit (409 CASH_PENDING, still waiting)', c2.status === 409 && errCode(c2) === 'CASH_PENDING' && after?.status === 'awaiting-payment', { status: c2.status, code: errCode(c2), after: after?.status });
     const c3 = await admin('POST', `/reception/visits/${cash}/cancel`);
     ok('staff cancels the cash visit', c3.status === 200 && c3.data.status === 'cancelled', c3.json);
   });

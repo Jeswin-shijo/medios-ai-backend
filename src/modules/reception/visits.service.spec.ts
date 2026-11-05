@@ -423,8 +423,12 @@ describe('OpVisitsService', () => {
 
   test('kiosk cannot cancel a cash visit', async () => {
     const cash = await visitWith('U1', 'CASH');
-    const unchanged = await service.cancel(cash.id, { actor: 'Kiosk: Front kiosk', kioskId: kiosk.id });
-    assert.equal(unchanged.status, 'awaiting-payment');
+    await assert.rejects(service.cancel(cash.id, { actor: 'Kiosk: Front kiosk', kioskId: kiosk.id }), (e) => {
+      assert.equal(statusOf(e), 409);
+      assert.equal(responseOf(e).code, 'CASH_PENDING');
+      return true;
+    });
+    assert.equal((await m().OpVisit.findById(cash.id).lean())!.status, 'awaiting-payment');
     assert.equal((await service.cancel(cash.id, { actor: 'Ravi' })).status, 'cancelled');
 
     const upi = await visitWith('U2', 'UPI');

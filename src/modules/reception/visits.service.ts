@@ -242,7 +242,8 @@ export class OpVisitsService {
 
   /**
    * Cancels an unpaid visit. A kiosk may cancel only its own, and never a cash visit
-   * (the patient may be on the way to the counter), which it gets back unchanged.
+   * (the patient may be on the way to the counter): that is refused with CASH_PENDING
+   * and the visit stays as it is. Staff may cancel any unpaid visit.
    */
   async cancel(visitId: string, by: { actor: string; kioskId?: string }): Promise<VisitView> {
     const id = this.visitId(visitId);
@@ -260,6 +261,9 @@ export class OpVisitsService {
     const visit = await this.visits.findOne({ _id: id, ...own }).exec();
     if (!visit) throw visitNotFound();
     if (visit.status === 'paid') throw visitClosed('paid');
+    if (by.kioskId && visit.status === 'awaiting-payment' && visit.method === 'CASH') {
+      throw new ConflictException({ message: 'This visit waits for payment at the counter. Only the staff there can cancel it.', code: 'CASH_PENDING' });
+    }
     return this.view(visit);
   }
 
