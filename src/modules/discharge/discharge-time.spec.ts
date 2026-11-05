@@ -63,5 +63,10 @@ describe('discharge time', () => {
     assert.throws(() => atClinicTime('2026-09-26', '9:00'), (e: any) => e.status === 400);
     assert.throws(() => atClinicTime('26 Sep 2026', '11:00'), (e: any) => e.status === 400);
     assert.throws(() => atClinicTime('', '11:00'), (e: any) => e.status === 400, 'no day is not "today"');
+    // A well-formed day that is not on the calendar is refused, never rolled over to the next month.
+    for (const day of ['2026-02-30', '2026-09-31', '2026-13-01', '2026-00-10']) {
+      assert.throws(() => atClinicTime(day, '11:00'), (e: any) => e.status === 400, `${day} is not a real day`);
+    }
+    assert.equal(iso(atClinicTime('2028-02-29', '11:00')), iso(at('2028-02-29', 11)), 'a leap day is real');
   });
 });

@@ -33,9 +33,10 @@ export function dayStatus(targetDay: string, now: Date): 'planned' | 'due-tomorr
 
 /** A clinic day (YYYY-MM-DD) at a 24-hour time: "2026-09-27" + "11:00". */
 export function atClinicTime(day: string, hhmm: string): Date {
-  // parseIsoDay reads a missing day as today on the real clock, which is never meant here.
-  if (!day) throw new BadRequestException('date must be YYYY-MM-DD, got ""');
   const at = parseIsoDay(day);
+  // Only a day that round-trips is real: parseIsoDay reads a missing day as today on the real clock, and
+  // rolls an impossible one over (2026-09-31 would be 1 Oct).
+  if (isoDate(at) !== day) throw new BadRequestException(`date must be a real day as YYYY-MM-DD, got "${day}"`);
   const m = HHMM.exec(hhmm);
   if (!m) throw new BadRequestException(`time must be HH:MM (24-hour), got "${hhmm}"`);
   at.setHours(Number(m[1]), Number(m[2]), 0, 0);
