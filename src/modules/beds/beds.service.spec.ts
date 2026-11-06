@@ -2,12 +2,15 @@ import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Types } from 'mongoose';
+import { clinicNow } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
+import { Patient as PatientRecord } from '../patients/schemas/patient.schema';
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { Actor } from './actor';
 import { BedEvents } from './bed-events';
 import { AdmissionRequestInput } from './bed-types';
+import { BedsController } from './beds.controller';
 import { AdmitInput, BedsService } from './beds.service';
 import { applyRules } from './rules';
 
@@ -15,6 +18,10 @@ const A: Actor = { id: 'user-a', name: 'Nurse Asha', role: UserRole.NURSE };
 const B: Actor = { id: 'user-b', name: 'Dr. Bala', role: UserRole.DOCTOR };
 const suggestionId = new Types.ObjectId().toString();
 const OTHER_GENDER = 'This room now has a patient of another gender. Choose another bed.';
+const HOUR = 3_600_000;
+/** The 409 for a real admission ended anywhere but the Discharge Agent's order. */
+const useTheOrder = (err: unknown) =>
+  err instanceof ConflictException && err.getStatus() === 409 && err.message === 'Use the discharge order on the Discharge Agent page.';
 /** A woman asking for a twin room. */
 const woman: AdmissionRequestInput = {
   age: 40, gender: 'Female', roomClass: 'twin', needs: [], department: 'General Medicine', expectedStayDays: 3, notes: '',
@@ -29,17 +36,20 @@ class SpyEvents extends BedEvents {
   }
 }
 
-/** Counts patient updates, so a test can show none was attempted. */
+/** Counts patient updates, so a test can show none was attempted; `written` hears each one once it is saved. */
 class SpyPatients extends PatientsService {
   updates = 0;
-  update(...args: Parameters<PatientsService['update']>) {
+  written?: (updates: Partial<PatientRecord>) => void;
+  async update(...args: Parameters<PatientsService['update']>) {
     this.updates++;
-    return super.update(...args);
+    const saved = await super.update(...args);
+    this.written?.(args[1]);
+    return saved;
   }
 }
 
 describe('BedsService', () => {
-  const { Ward, Bed, Admission, Patient } = models();
+  const { Ward, Bed, Admission, Patient, DischargeOrder } = models();
   let service: BedsService;
   let events: SpyEvents;
   let patients: SpyPatients;
@@ -115,7 +125,7 @@ describe('BedsService', () => {
 
     events = new SpyEvents();
     patients = new SpyPatients(Patient);
-    service = new BedsService(Ward, Bed, Admission, patients, events);
+    service = new BedsService(Ward, Bed, Admission, patients, events, DischargeOrder);
   });
 
   test('concurrent holds: exactly one wins', async () => {
@@ -229,7 +239,7 @@ describe('BedsService', () => {
   test('discharge → cleaning and patient Discharged', async () => {
     await service.hold(b1, A, suggestionId, 'Male');
     const admission = await service.admit(b1, A, input());
-    await service.discharge(b1, B, String(admission._id));
+    await service.discharge(b1, B, String(admission._id), { viaDischarge: true });
 
     const cleaning = await bed(b1);
     assert.equal(cleaning.state, 'cleaning');
@@ -242,7 +252,7 @@ describe('BedsService', () => {
     assert.equal(stored.dischargedBy, B.name);
     assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Discharged');
 
-    await assert.rejects(service.discharge(b1, B, String(admission._id)), /This bed is not occupied\./);
+    await assert.rejects(service.discharge(b1, B, String(admission._id), { viaDischarge: true }), /This bed is not occupied\./);
   });
 
   test('discharge must name the admission in the bed: a stale one changes nothing', async () => {
@@ -252,10 +262,10 @@ describe('BedsService', () => {
       err instanceof ConflictException && err.message === 'This bed changed since you opened it. Check the board and try again.';
     const calls = events.calls;
 
-    await assert.rejects(service.discharge(b1, B, new Types.ObjectId().toString()), changed);
-    await assert.rejects(service.discharge(b1, B, null), changed);
+    await assert.rejects(service.discharge(b1, B, new Types.ObjectId().toString(), { viaDischarge: true }), changed);
+    await assert.rejects(service.discharge(b1, B, null, { viaDischarge: true }), changed);
     // A sample occupant has no admission: naming one is stale too.
-    await assert.rejects(service.discharge(b3, B, String(admission._id)), changed);
+    await assert.rejects(service.discharge(b3, B, String(admission._id), { viaDischarge: true }), changed);
 
     const kept = await bed(b1);
     assert.equal(kept.state, 'occupied');
@@ -534,8 +544,111 @@ describe('BedsService', () => {
     await emits(() => service.hold(b1, A, suggestionId, 'Male'));
     let admissionId = '';
     await emits(async () => (admissionId = String((await service.admit(b1, A, input()))._id)));
-    await emits(() => service.discharge(b1, A, admissionId));
+    await emits(() => service.discharge(b1, A, admissionId, { viaDischarge: true }));
     await emits(() => service.markCleaned(b1, A));
     await emits(() => service.block(b1, A, 'Broken rail'));
+  });
+
+  /** A discharge order for the stay, as the Discharge Agent writes it. */
+  const orderFor = (admission: { _id: unknown; patient: unknown }, over: Record<string, unknown> = {}) => {
+    const now = clinicNow();
+    return DischargeOrder.create({
+      plan: new Types.ObjectId(), admission: admission._id, patient: admission.patient, kind: 'home', state: 'ordered',
+      plannedLeaveAt: new Date(now.getTime() + 2 * HOUR), windowAt: now, diagnosis: 'Pneumonia',
+      orderedBy: { id: B.id, name: B.name }, orderedAt: now, ...over,
+    });
+  };
+
+  test('the bed route refuses a real admission with 409, and a sample occupant is released', async () => {
+    const route = new BedsController(service, null as never, events, null as never, null as never);
+    const user = { _id: A.id, name: A.name, role: A.role };
+    await service.hold(b1, A, suggestionId, 'Male');
+    const admission = await service.admit(b1, A, input());
+    const calls = events.calls;
+
+    await assert.rejects(route.discharge(user, b1, { admissionId: String(admission._id) }), useTheOrder);
+    // The service itself refuses it without the Discharge Agent's flag, before anything is written.
+    await assert.rejects(service.discharge(b1, B, String(admission._id)), useTheOrder);
+    await assert.rejects(service.discharge(b1, B, String(admission._id), { viaDischarge: false }), useTheOrder);
+
+    const kept = await bed(b1);
+    assert.equal(kept.state, 'occupied');
+    assert.equal(String(kept.admission), String(admission._id));
+    assert.equal(kept.occupantGender, 'Male');
+    const stored = await Admission.findById(admission._id).lean().exec();
+    assert.equal(stored.status, 'active');
+    assert.equal(stored.dischargedAt, undefined);
+    assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
+    assert.equal(events.calls, calls);
+
+    // A sample occupant is still released from the bed board.
+    const sample = await sampleAdmission(b3);
+    await Bed.updateOne({ _id: b3 }, { admission: sample._id });
+    assert.deepEqual(await route.discharge(user, b3, { admissionId: String(sample._id) }), { ok: true });
+    assert.equal((await bed(b3)).state, 'cleaning');
+    assert.equal((await Admission.findById(sample._id).lean().exec()).status, 'discharged');
+  });
+
+  test('discharge with viaDischarge, at and Deceased sets dischargedAt and the status', async () => {
+    await service.hold(b1, A, suggestionId, 'Male');
+    const admission = await service.admit(b1, A, input());
+    const at = new Date(clinicNow().getTime() - 3 * HOUR);
+    // The patient's status is saved before the bed announces the discharge: the Discharge Agent's handler reads it.
+    const steps: string[] = [];
+    patients.written = (u) => steps.push(`patient ${u.status}`);
+    const listening = events.bedChanges$.subscribe((c) => steps.push(`announced ${c.kind}`));
+
+    await service.discharge(b1, B, String(admission._id), { viaDischarge: true, at, patientStatus: 'Deceased' });
+    listening.unsubscribe();
+
+    assert.deepEqual(steps, ['patient Deceased', 'announced discharged']);
+    const cleaning = await bed(b1);
+    assert.equal(cleaning.state, 'cleaning');
+    assert.equal(cleaning.stateSince.getTime(), at.getTime());
+    const stored = await Admission.findById(admission._id).lean().exec();
+    assert.equal(stored.status, 'discharged');
+    assert.equal(stored.dischargedAt.getTime(), at.getTime());
+    assert.equal(stored.dischargedBy, B.name);
+    const patient = await Patient.findById(patientId).lean().exec();
+    assert.equal(patient.status, 'Deceased');
+    assert.equal(patient.visitType, 'IPD');
+
+    // Left without discharge, at the default time (now, clinic clock).
+    const other = await otherPatient('Male', 4);
+    const second = await service.admitToFreeBed(b2, A, { ...input(), patientId: other });
+    const before = clinicNow().getTime();
+    await service.discharge(b2, A, String(second._id), { viaDischarge: true, patientStatus: 'Left without discharge' });
+    const left = await Admission.findById(second._id).lean().exec();
+    assert.ok(left.dischargedAt.getTime() >= before && left.dischargedAt.getTime() <= clinicNow().getTime());
+    assert.equal((await bed(b2)).stateSince.getTime(), left.dischargedAt.getTime());
+    assert.equal((await Patient.findById(other).lean().exec()).status, 'Left without discharge');
+  });
+
+  test('the board shows leaving for an ordered admission and not after cancel', async () => {
+    await service.hold(b1, A, suggestionId, 'Male');
+    const admission = await service.admit(b1, A, input());
+    const leaveAt = new Date(clinicNow().getTime() + 90 * 60_000);
+    const order = await orderFor(admission, { plannedLeaveAt: leaveAt });
+    const leaving = async (id: string) => (await service.board(A)).beds.find((x) => x.id === id).patient?.leaving;
+
+    assert.deepEqual(await leaving(b1), { orderId: String(order._id), plannedAt: leaveAt.toISOString(), ready: false });
+    await DischargeOrder.updateOne({ _id: order._id }, { state: 'ready' }).exec();
+    assert.deepEqual(await leaving(b1), { orderId: String(order._id), plannedAt: leaveAt.toISOString(), ready: true });
+    await DischargeOrder.updateOne({ _id: order._id }, { state: 'cancelled' }).exec();
+    assert.equal(await leaving(b1), undefined);
+    assert.equal((await service.board(A)).beds.find((x) => x.id === b1).patient.name, 'Test Patient');
+
+    // A sample inpatient never shows it, even with an order naming its stay.
+    const sample = await sampleAdmission(b3);
+    await Bed.updateOne({ _id: b3 }, { admission: sample._id }).exec();
+    await orderFor(sample);
+    const shown = (await service.board(A)).beds.find((x) => x.id === b3).patient;
+    assert.equal(shown.sample, true);
+    assert.equal(shown.leaving, undefined);
+
+    // touch: open boards re-read.
+    const calls = events.calls;
+    service.touch();
+    assert.equal(events.calls, calls + 1);
   });
 });

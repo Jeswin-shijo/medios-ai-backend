@@ -58,7 +58,7 @@ const rejectsHttp = (promise: Promise<unknown>, status: number, message: RegExp)
   });
 
 describe('SuggestionsService', () => {
-  const { Ward, Bed, Admission, BedSuggestion, Patient } = models();
+  const { Ward, Bed, Admission, BedSuggestion, Patient, DischargeOrder } = models();
   let service: SuggestionsService;
   let ai: ReturnType<typeof fakeAi>;
   let patientId: string;
@@ -99,7 +99,7 @@ describe('SuggestionsService', () => {
 
     ai = fakeAi();
     const patients = new PatientsService(Patient);
-    const bedsService = new BedsService(Ward, Bed, Admission, patients, new BedEvents());
+    const bedsService = new BedsService(Ward, Bed, Admission, patients, new BedEvents(), DischargeOrder);
     service = new SuggestionsService(BedSuggestion, bedsService, patients, ai as unknown as AiService);
   });
 

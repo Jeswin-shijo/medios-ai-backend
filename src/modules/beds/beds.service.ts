@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types, UpdateQuery, mongo } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
+import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES } from '../discharge/schemas/discharge-order.schema';
 import { PatientsService } from '../patients/patients.service';
 import { Actor } from './actor';
 import { BedChange, BedEvents } from './bed-events';
@@ -54,7 +55,34 @@ export interface BedBoardBed {
   /** Set on held beds: whether the viewer holds it. */
   heldByMe?: boolean;
   /** A sample inpatient has no patient record: `id` is ''. */
-  patient?: { id: string; name: string; uhid: string; admissionId: string; admittedAt: string; sample: boolean };
+  patient?: {
+    id: string;
+    name: string;
+    uhid: string;
+    admissionId: string;
+    admittedAt: string;
+    sample: boolean;
+    /** "Leaving soon": the stay's open discharge order. `plannedAt` is the planned leaving time (clinic clock), ISO. Never on a sample. */
+    leaving?: { orderId: string; plannedAt: string; ready: boolean };
+  };
+}
+
+/** An open discharge order (given, the patient not yet gone), as the bed screens show it. */
+export interface OpenDischargeOrder {
+  orderId: string;
+  /** Clinic clock. */
+  plannedLeaveAt: Date;
+  /** Every required checklist line is done. */
+  ready: boolean;
+}
+
+/** How a stay ends. Only the Discharge Agent passes `viaDischarge`, which a real admission needs. */
+export interface DischargeBedOptions {
+  /** When the stay ended (clinic clock): the bed's `stateSince` and the admission's `dischargedAt`. Default now. */
+  at?: Date;
+  /** The patient's status afterwards. Default 'Discharged'. */
+  patientStatus?: 'Discharged' | 'Deceased' | 'Left without discharge';
+  viaDischarge?: boolean;
 }
 
 /** The admitted patient in a bed and what their admission asked for: a transfer starts from it. */
@@ -80,12 +108,14 @@ export interface BedBoard {
 type WardRecord = Ward & { _id: Types.ObjectId };
 type BedRecord = Bed & { _id: Types.ObjectId };
 type AdmissionRecord = Admission & { _id: Types.ObjectId };
+type OrderRecord = Pick<DischargeOrder, 'admission' | 'state' | 'plannedLeaveAt'> & { _id: Types.ObjectId };
 
 const HOLD_RAN_OUT = 'Your hold on this bed ran out. Choose a bed again.';
 const NOT_OCCUPIED = 'This bed is not occupied.';
 const OTHER_GENDER_ROOM = 'This room now has a patient of another gender. Choose another bed.';
 const UNKNOWN_GENDER_ROOM = "The patient's gender is not recorded, so a shared room can't be checked. Choose another bed.";
 const BED_CHANGED = 'This bed changed since you opened it. Check the board and try again.';
+const USE_DISCHARGE_ORDER = 'Use the discharge order on the Discharge Agent page.';
 const HOLD_FIELDS = { holdBy: 1, holdExpiresAt: 1, holdSuggestion: 1, holdGender: 1 };
 
 /** Free, or held with a hold that ran out (real clock): a bed the board shows as free. */
@@ -122,7 +152,42 @@ export class BedsService {
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     private readonly patients: PatientsService,
     private readonly events: BedEvents,
+    /** Read only: the Discharge Agent writes orders. */
+    @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>,
   ) {}
+
+  /** Tells open bed boards to re-read: the Discharge Agent calls it when an order or a cancel changes "Leaving soon". */
+  touch(): void {
+    this.events.changed();
+  }
+
+  /**
+   * Open discharge orders by admission id; only those of `admissionIds` when given. An admission has one at most:
+   * one plan per admission, and one live order per plan.
+   */
+  async openDischargeOrders(admissionIds?: unknown[]): Promise<Map<string, OpenDischargeOrder>> {
+    if (admissionIds && !admissionIds.length) return new Map();
+    const orders = await this.orders
+      .find({ state: { $in: OPEN_ORDER_STATES }, ...(admissionIds ? { admission: { $in: admissionIds } } : {}) })
+      .select('admission state plannedLeaveAt')
+      .lean<OrderRecord[]>()
+      .exec();
+    return new Map(
+      orders.map((o) => [String(o.admission), { orderId: String(o._id), plannedLeaveAt: o.plannedLeaveAt, ready: o.state === 'ready' }]),
+    );
+  }
+
+  /** Occupied beds whose stay has an open discharge order, with the planned leaving time (clinic clock), by bed id. */
+  async leavingBeds(): Promise<Map<string, Date>> {
+    const orders = await this.openDischargeOrders();
+    if (!orders.size) return new Map();
+    const beds = await this.beds
+      .find({ state: 'occupied', admission: { $in: [...orders.keys()] } })
+      .select('admission')
+      .lean<Array<{ _id: Types.ObjectId; admission: Types.ObjectId }>>()
+      .exec();
+    return new Map(beds.map((b) => [String(b._id), orders.get(String(b.admission))!.plannedLeaveAt]));
+  }
 
   /** Wards in board order, and their beds by ward, then number. */
   private async load(): Promise<{ wards: WardRecord[]; beds: BedRecord[] }> {
@@ -139,10 +204,12 @@ export class BedsService {
   async board(actor: Actor): Promise<BedBoard> {
     const now = new Date();
     const { wards, beds } = await this.load();
-    const admissions = await this.admissions
-      .find({ _id: { $in: beds.map((b) => b.admission).filter(Boolean) } })
-      .lean<AdmissionRecord[]>()
-      .exec();
+    const admissionIds = beds.map((b) => b.admission).filter(Boolean);
+    const [admissions, leaving] = await Promise.all([
+      this.admissions.find({ _id: { $in: admissionIds } }).lean<AdmissionRecord[]>().exec(),
+      // Samples are left out below: they never show "Leaving soon".
+      this.openDischargeOrders(admissionIds),
+    ]);
     const admissionById = new Map(admissions.map((a) => [String(a._id), a]));
 
     const views = beds.map((b): BedBoardBed => {
@@ -173,6 +240,8 @@ export class BedsService {
           admittedAt: admission.admittedAt.toISOString(),
           sample: !!admission.sample,
         };
+        const order = admission.sample ? undefined : leaving.get(String(admission._id));
+        if (order) view.patient.leaving = { orderId: order.orderId, plannedAt: order.plannedLeaveAt.toISOString(), ready: order.ready };
       }
       return view;
     });
@@ -589,12 +658,17 @@ export class BedsService {
   }
 
   /**
-   * Ends the admission staff saw in the bed (`admissionId`; null for a sample occupant) and
-   * sends the bed to cleaning. The admission is part of the update's condition, so a panel
-   * opened before a transfer or another discharge cannot end someone else's stay.
+   * Ends the admission staff saw in the bed (`admissionId`; null for a bed with no admission
+   * record) and sends the bed to cleaning. The admission is part of the update's condition, so
+   * a panel opened before a transfer or another discharge cannot end someone else's stay.
+   * A real admission ends only through the Discharge Agent's order (`viaDischarge`): anything
+   * else is refused before a write. A sample occupant can still be released from the board.
    */
-  async discharge(bedId: string, actor: Actor, admissionId: string | null): Promise<void> {
-    const at = clinicNow();
+  async discharge(bedId: string, actor: Actor, admissionId: string | null, opts: DischargeBedOptions = {}): Promise<void> {
+    if (!opts.viaDischarge && admissionId && (await this.admissions.exists({ _id: admissionId, sample: { $ne: true } }).exec())) {
+      throw new ConflictException(USE_DISCHARGE_ORDER);
+    }
+    const at = opts.at ?? clinicNow();
     let before: BedDocument;
     try {
       before = await this.transition(
@@ -620,7 +694,8 @@ export class BedsService {
         { new: true },
       )
       .exec();
-    if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: 'Discharged' });
+    // The status first: the Discharge Agent's handler of the announcement reads it.
+    if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: opts.patientStatus ?? 'Discharged' });
     await this.announce('discharged', bedId, { admission: admission && !admission.sample ? admission : null, byStaff: true });
   }
 

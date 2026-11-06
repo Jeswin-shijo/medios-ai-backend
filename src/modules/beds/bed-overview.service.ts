@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
+import { DischargePlan, DischargePlanDocument } from '../discharge/schemas/discharge-plan.schema';
 import { UserRole } from '../users/schemas/user.schema';
 import { Actor } from './actor';
 import {
@@ -67,6 +68,8 @@ export class BedOverviewService {
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     private readonly beds: BedsService,
     private readonly requests: BedRequestsService,
+    /** Read only: the Discharge Agent writes plans. */
+    @InjectModel(DischargePlan.name) private readonly plans: Model<DischargePlanDocument>,
   ) {}
 
   /** Stores this hour's counts (real clock), replacing any earlier snapshot of the same hour. */
@@ -187,6 +190,16 @@ export class BedOverviewService {
     return { range, points };
   }
 
+  /** The target (clinic clock) of every discharge plan still open, by admission id. */
+  private async targets(): Promise<Map<string, Date>> {
+    const plans = await this.plans
+      .find({ state: { $ne: 'completed' } })
+      .select('admission targetAt')
+      .lean<Array<{ admission: unknown; targetAt: Date }>>()
+      .exec();
+    return new Map(plans.map((p) => [String(p.admission), p.targetAt]));
+  }
+
   /** Active stays, and any stay admitted, moved or discharged in the last 7 days (clinic clock). */
   private stays(): Promise<AdmissionRecord[]> {
     const since = new Date(clinicNow().getTime() - 7 * DAY_MS);
@@ -201,14 +214,24 @@ export class BedOverviewService {
    * discharge plan and the expected admissions. One place, so the two always agree.
    */
   private async outlook() {
-    const [records, openRequests, inventory] = await Promise.all([this.stays(), this.requests.countOpen(), this.beds.inventory()]);
+    const [records, openRequests, inventory, targets, orders] = await Promise.all([
+      this.stays(),
+      this.requests.countOpen(),
+      this.beds.inventory(),
+      this.targets(),
+      this.beds.openDischargeOrders(),
+    ]);
     const clinic = clinicNow();
     const labels = new Map(inventory.beds.map((b) => [b.id, b.label]));
     const wardNames = new Map(inventory.wards.map((w) => [w.id, w.name]));
     const wardOfBed = new Map(inventory.beds.map((b) => [b.id, wardNames.get(b.wardId) ?? '']));
-    const stays = records.map(
-      (a): OverviewAdmission => ({
-        id: String(a._id),
+    const stays = records.map((a): OverviewAdmission => {
+      // A real stay is due when its open order plans the leaving, else at its plan's target. Samples keep admission + stay.
+      const id = String(a._id);
+      const order = a.sample ? undefined : orders.get(id);
+      const due = a.sample ? undefined : (order?.plannedLeaveAt ?? targets.get(id));
+      return {
+        id,
         patientName: a.patientName,
         sample: !!a.sample,
         department: a.department,
@@ -223,8 +246,10 @@ export class BedOverviewService {
           toLabel: labels.get(String(t.toBed)) ?? '—',
           at: t.at,
         })),
-      }),
-    );
+        ...(due ? { dischargeDue: due } : {}),
+        ordered: !!order,
+      };
+    });
     return {
       clinic,
       stays,

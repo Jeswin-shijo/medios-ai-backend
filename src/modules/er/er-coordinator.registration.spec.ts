@@ -126,7 +126,7 @@ describe('ErCoordinatorRegistration', () => {
     bench = new LabBenchService(m.LabRequest, m.LabLine, m.LabSample, labOrders, messages);
 
     const bedEvents = new BedEvents();
-    beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, bedEvents);
+    beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, bedEvents, m.DischargeOrder);
     requests = new BedRequestsService(m.BedRequest, patients, beds, new BedAlerts(m.TaskAlertItem), bedEvents);
     const suggestions = new SuggestionsService(m.BedSuggestion, beds, patients, fakeAi() as unknown as AiService);
     agent = new BedAgentService(requests, suggestions, beds, new SettingsService(m.HospitalSettings), bedEvents);
@@ -261,7 +261,7 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal(await caseState(v.caseId), 'open');
 
     // Discharge the bed patient and the case closes.
-    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission));
+    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission), { viaDischarge: true });
     await bridge.idle();
     assert.equal(await caseState(v.caseId), 'closed');
   });
@@ -287,7 +287,7 @@ describe('ErCoordinatorRegistration', () => {
     assert.equal(await caseState(v.caseId), 'open');
 
     const request: any = await m.BedRequest.findById(requestId).lean();
-    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission));
+    await beds.discharge(String(request.assignedBed), DOCTOR, String(request.admission), { viaDischarge: true });
     await bridge.idle();
     assert.equal(await caseState(v.caseId), 'closed');
   });

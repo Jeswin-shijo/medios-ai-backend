@@ -1,5 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
+import { Types } from 'mongoose';
+import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PatientsService } from '../patients/patients.service';
 import { BedAlerts } from './bed-alerts';
@@ -13,7 +15,7 @@ const HOUR = 3_600_000;
 const NURSE = { id: 'u1', name: 'Nurse', role: UserRole.NURSE };
 
 describe('BedOverviewService', () => {
-  const { Ward, Bed, Admission, Patient, BedRequest, BedSnapshot, TaskAlertItem } = models();
+  const { Ward, Bed, Admission, Patient, BedRequest, BedSnapshot, TaskAlertItem, DischargePlan, DischargeOrder } = models();
   let service: BedOverviewService;
 
   before(async () => {
@@ -43,9 +45,9 @@ describe('BedOverviewService', () => {
 
     const events = new BedEvents();
     const patients = new PatientsService(Patient);
-    const beds = new BedsService(Ward, Bed, Admission, patients, events);
+    const beds = new BedsService(Ward, Bed, Admission, patients, events, DischargeOrder);
     const requests = new BedRequestsService(BedRequest, patients, beds, new BedAlerts(TaskAlertItem), events);
-    service = new BedOverviewService(BedSnapshot, Admission, beds, requests);
+    service = new BedOverviewService(BedSnapshot, Admission, beds, requests, DischargePlan);
   });
 
   test('snapshot upserts one record per real hour', async () => {
@@ -101,6 +103,62 @@ describe('BedOverviewService', () => {
     assert.equal(o.movements[0].kind, 'admission');
     assert.equal(o.movements[0].to, 'ICU • Bed 1');
     assert.ok(o.suggestions.length > 0);
+  });
+
+  test("bed overview uses the plan's targetAt, then the order's plannedLeaveAt", async () => {
+    const now = clinicNow();
+    const ga1 = await Bed.findOne({ label: 'GA • Bed 1' }).lean().exec();
+    const patient = await Patient.create({ uhid: 'MHK202600201', name: 'Ravi', age: 60, gender: 'Male', phone: '9000000201' });
+    // Admitted 20 hours ago for 5 days: by admission + expected stay, not due in the next 24 hours.
+    const admission = await Admission.create({
+      patient: patient._id, patientUhid: patient.uhid, patientName: 'Ravi', bed: ga1._id, roomClass: 'general', department: 'General Medicine',
+      expectedStayDays: 5, admittedAt: new Date(now.getTime() - 20 * HOUR), admittedBy: 'x',
+    });
+    await Bed.updateOne({ _id: ga1._id }, { admission: admission._id }).exec();
+    const sample = await Admission.findOne({ patientName: 'Asha' }).lean().exec();
+    const sampleDue = new Date(sample.admittedAt.getTime() + 24 * HOUR).toISOString();
+    const plan = async () => {
+      const o = await service.overview(NURSE);
+      const pick = (name: string) => {
+        const item = o.dischargePlan.find((p) => p.patientName === name);
+        return item && { dueAt: item.dueAt, overdue: item.overdue, ordered: item.ordered };
+      };
+      return { ravi: pick('Ravi'), asha: pick('Asha'), expected: o.cards.expectedDischarges.value };
+    };
+    const ashaAsBefore = { dueAt: sampleDue, overdue: false, ordered: false };
+    assert.deepEqual(await plan(), { ravi: undefined, asha: ashaAsBefore, expected: 1 });
+
+    // The discharge plan's target brings the stay into the next 24 hours. A sample's plan is never read.
+    const targetAt = new Date(now.getTime() + 6 * HOUR);
+    const planFor = (a: { _id: unknown; patient: unknown; patientUhid: string; patientName: string }, at: Date) =>
+      DischargePlan.create({
+        admission: a._id, patient: a.patient, patientUhid: a.patientUhid, patientName: a.patientName, bedLabel: 'GA • Bed 1',
+        wardName: 'General A', targetDay: isoDate(at), targetAt: at,
+      });
+    const dischargePlan = await planFor(admission, targetAt);
+    await planFor(sample, new Date(now.getTime() + 10 * HOUR));
+    assert.deepEqual(await plan(), { ravi: { dueAt: targetAt.toISOString(), overdue: false, ordered: false }, asha: ashaAsBefore, expected: 2 });
+
+    // An open order's planned leaving time wins, ordered or ready.
+    const leaveAt = new Date(now.getTime() + 2 * HOUR);
+    const order = await DischargeOrder.create({
+      plan: dischargePlan._id, admission: admission._id, patient: patient._id, kind: 'home', state: 'ordered', plannedLeaveAt: leaveAt,
+      windowAt: now, diagnosis: 'Hernia repair', orderedBy: { id: 'u2', name: 'Dr. Ravi' }, orderedAt: now,
+    });
+    const ordered = { dueAt: leaveAt.toISOString(), overdue: false, ordered: true };
+    assert.deepEqual(await plan(), { ravi: ordered, asha: ashaAsBefore, expected: 2 });
+    await DischargeOrder.updateOne({ _id: order._id }, { state: 'ready' }).exec();
+    assert.deepEqual((await plan()).ravi, ordered);
+    // A sample is never ordered, even with an order naming its stay.
+    await DischargeOrder.create({
+      plan: new Types.ObjectId(), admission: sample._id, patient: sample.patient, kind: 'home', state: 'ordered', plannedLeaveAt: leaveAt,
+      windowAt: now, diagnosis: 'x', orderedBy: { id: 'u2', name: 'Dr. Ravi' }, orderedAt: now,
+    });
+    assert.deepEqual((await plan()).asha, ashaAsBefore);
+
+    // Cancelled: back to the plan's target.
+    await DischargeOrder.updateOne({ _id: order._id }, { state: 'cancelled' }).exec();
+    assert.deepEqual((await plan()).ravi, { dueAt: targetAt.toISOString(), overdue: false, ordered: false });
   });
 
   test('series fills missing hours with null', async () => {

@@ -59,6 +59,8 @@ export interface DischargeItem {
   dueAt: string;
   overdue: boolean;
   sample: boolean;
+  /** A discharge order is open: given, the patient not yet gone. */
+  ordered: boolean;
 }
 
 export interface Movement {
@@ -107,6 +109,13 @@ export interface OverviewAdmission {
   admittedAt: Date;
   dischargedAt?: Date;
   transfers: { fromLabel: string; toLabel: string; at: Date }[];
+  /**
+   * Real stays: the open discharge order's planned leaving time, else the discharge plan's target
+   * (clinic clock). Absent, the stay is due at admission + expected stay.
+   */
+  dischargeDue?: Date;
+  /** A discharge order is open. */
+  ordered?: boolean;
 }
 
 export interface SuggestionInput {
@@ -128,7 +137,7 @@ export function dischargePlan(admissions: OverviewAdmission[], now: Date): Disch
   const horizon = now.getTime() + DAY_MS;
   return admissions
     .filter((a) => a.status === 'active')
-    .map((a) => ({ a, due: dueAt(a.admittedAt, a.expectedStayDays) }))
+    .map((a) => ({ a, due: a.dischargeDue ?? dueAt(a.admittedAt, a.expectedStayDays) }))
     .filter(({ due }) => due.getTime() < horizon)
     .sort((x, y) => x.due.getTime() - y.due.getTime())
     .map(({ a, due }) => ({
@@ -139,6 +148,7 @@ export function dischargePlan(admissions: OverviewAdmission[], now: Date): Disch
       dueAt: due.toISOString(),
       overdue: due.getTime() < now.getTime(),
       sample: a.sample,
+      ordered: !!a.ordered,
     }));
 }
 

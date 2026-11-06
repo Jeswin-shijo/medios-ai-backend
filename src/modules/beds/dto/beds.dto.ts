@@ -100,7 +100,12 @@ export class TransferBedDto extends AdmitBedDto {
 }
 
 export class DischargeBedDto {
-  @ApiPropertyOptional({ description: 'The admission staff saw in the bed; null or left out for a sample occupant', nullable: true })
+  @ApiPropertyOptional({
+    description:
+      'The admission staff saw in the bed (a sample occupant has one too); null or left out for a bed with no admission record. ' +
+      'A real admission is refused: it ends through the discharge order.',
+    nullable: true,
+  })
   @IsOptional()
   @IsMongoId()
   admissionId?: string | null;

@@ -22,6 +22,8 @@ import { AiModule } from '../ai/ai.module';
 import { CoordinatorModule } from '../coordinator/coordinator.module';
 import { BedCoordinatorBridge } from './bed-coordinator.bridge';
 import { PatientsModule } from '../patients/patients.module';
+import { DischargeOrder, DischargeOrderSchema } from '../discharge/schemas/discharge-order.schema';
+import { DischargePlan, DischargePlanSchema } from '../discharge/schemas/discharge-plan.schema';
 
 @Module({
   imports: [
@@ -32,6 +34,9 @@ import { PatientsModule } from '../patients/patients.module';
       { name: BedSuggestion.name, schema: BedSuggestionSchema },
       { name: BedRequest.name, schema: BedRequestSchema },
       { name: BedSnapshot.name, schema: BedSnapshotSchema },
+      // Read only: "Leaving soon" and the discharge planning dates. The Discharge Agent writes them.
+      { name: DischargeOrder.name, schema: DischargeOrderSchema },
+      { name: DischargePlan.name, schema: DischargePlanSchema },
     ]),
     AiModule,
     PatientsModule,

@@ -130,7 +130,7 @@ describe('BedCoordinatorBridge', () => {
 
     events = new BedEvents();
     const patients = new PatientsService(Patient);
-    beds = new BedsService(Ward, Bed, Admission, patients, events);
+    beds = new BedsService(Ward, Bed, Admission, patients, events, m.DischargeOrder);
     requests = new BedRequestsService(BedRequest, patients, beds, new BedAlerts(TaskAlertItem), events);
     const suggestions = new SuggestionsService(BedSuggestion, beds, patients, fakeAi() as unknown as AiService);
     agent = new BedAgentService(requests, suggestions, beds, new SettingsService(HospitalSettings), events);
@@ -362,7 +362,7 @@ describe('BedCoordinatorBridge', () => {
     const req: any = await BedRequest.findById(id2).lean();
     const c2a: any = await m.Case.findOne({ patientUhid: p2.uhid }).lean();
     assert.equal(c2a.state, 'open');
-    await beds.discharge(String(req.assignedBed), DOCTOR, String(req.admission));
+    await beds.discharge(String(req.assignedBed), DOCTOR, String(req.admission), { viaDischarge: true });
     await bridge.idle();
     const c2: any = await m.Case.findOne({ patientUhid: p2.uhid }).lean();
     assert.equal(c2.state, 'closed');
@@ -446,7 +446,7 @@ describe('BedCoordinatorBridge', () => {
     assert.equal(c.refs.admissionId, String(admission._id));
 
     // The discharge lands on the same case and closes it.
-    await beds.discharge(target, DOCTOR, String(admission._id));
+    await beds.discharge(target, DOCTOR, String(admission._id), { viaDischarge: true });
     await bridge.idle();
     assert.equal(await m.Case.countDocuments(), 1);
     const closed: any = await m.Case.findOne().lean();
@@ -489,7 +489,7 @@ describe('BedCoordinatorBridge', () => {
     await agent.process(id);
     await bridge.idle();
     const req: any = await BedRequest.findById(id).lean();
-    await beds.discharge(String(req.assignedBed), DOCTOR, String(req.admission));
+    await beds.discharge(String(req.assignedBed), DOCTOR, String(req.admission), { viaDischarge: true });
     await beds.markCleaned(String(req.assignedBed), DOCTOR);
     await bridge.idle();
     const [cleaned] = await all('bed.cleaned');

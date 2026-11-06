@@ -7,8 +7,9 @@ import { isStepDown } from './agent-policy';
 import { Actor } from './actor';
 import { BedAlerts } from './bed-alerts';
 import { BedEvents } from './bed-events';
-import { Need, PatientGender, RoomClass, WardType } from './bed-types';
+import { AdmissionRequestInput, BedInfo, Need, PatientGender, RoomClass, WardType } from './bed-types';
 import { BedsService } from './beds.service';
+import { applyRules } from './rules';
 import {
   BedDecision,
   BedRequest,
@@ -73,6 +74,15 @@ export interface BedRequestView {
   closedByName?: string;
 }
 
+/** A bed whose patient has a discharge order and that would suit a waiting request once free. */
+export interface LeavingSoonBed {
+  bedId: string;
+  bedLabel: string;
+  wardName: string;
+  /** The planned leaving time (clinic clock), ISO. */
+  plannedAt: string;
+}
+
 export interface BedRequestQuery {
   state?: string;
   type?: 'admission' | 'transfer' | 'step-down';
@@ -86,6 +96,26 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
 const iso = (d?: Date) => (d ? d.toISOString() : undefined);
+
+/** The request as the rules see it. A transfer leaves the patient's current bed out. */
+export function ruleInput(req: BedRequestDocument): AdmissionRequestInput {
+  return {
+    age: req.patientAge,
+    gender: req.patientGender,
+    roomClass: req.roomClass,
+    needs: [...req.needs],
+    department: req.department,
+    expectedStayDays: req.expectedStayDays,
+    notes: req.notes,
+    currentBedId: req.type === 'transfer' && req.fromBed ? String(req.fromBed) : undefined,
+  };
+}
+
+/** An occupied bed as the rules see a free one: no occupant. */
+function asFree(bed: BedInfo): BedInfo {
+  const { occupantGender: _occupant, ...rest } = bed;
+  return { ...rest, state: 'free' };
+}
 
 /** No agent pass holds the request: its lock is absent or has run out (real clock). */
 const unlocked = (now: Date): FilterQuery<BedRequestDocument> => ({
@@ -333,6 +363,29 @@ export class BedRequestsService {
     if (String(req.patient) !== expect.patientId || req.type !== expect.type || !sameBed) {
       throw new BadRequestException('This bed request is for another patient or bed.');
     }
+  }
+
+  /**
+   * For a waiting request: the beds whose patient has an open discharge order and that the fixed
+   * rules would offer once free, soonest first. The rules run on the whole inventory with those
+   * beds treated as free, so wards and twin rooms are checked as usual. Nothing is held. Empty
+   * unless the request is waiting.
+   */
+  async leavingSoon(id: string): Promise<LeavingSoonBed[]> {
+    const req = await this.requests.findById(id).exec();
+    if (!req) throw new NotFoundException(NOT_FOUND);
+    if (req.state !== 'waiting') return [];
+    const leaving = await this.beds.leavingBeds();
+    if (!leaving.size) return [];
+    const { wards, beds } = await this.beds.inventory();
+    const freed = beds.map((b) => (b.state === 'occupied' && leaving.has(b.id) ? asFree(b) : b));
+    const { candidates } = applyRules(ruleInput(req), wards, freed, new Date());
+    const wardName = new Map(wards.map((w) => [w.id, w.name]));
+    return candidates
+      .filter((b) => leaving.has(b.id))
+      .map((b) => ({ bedId: b.id, bedLabel: b.label, wardName: wardName.get(b.wardId) ?? '', at: leaving.get(b.id)! }))
+      .sort((x, y) => x.at.getTime() - y.at.getTime())
+      .map(({ at, ...bed }) => ({ ...bed, plannedAt: at.toISOString() }));
   }
 
   /** Requests the agent is still placing or waiting for. */

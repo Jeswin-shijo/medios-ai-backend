@@ -42,6 +42,13 @@ export class BedRequestsController {
     return this.requests.get(p.id);
   }
 
+  @Get(':id/leaving-soon')
+  @Roles(...ADMIT_ROLES)
+  @ApiOperation({ summary: 'For a waiting request: beds whose patient has a discharge order and that the rules would offer once free' })
+  leavingSoon(@Param() p: RequestIdParam) {
+    return this.requests.leavingSoon(p.id);
+  }
+
   @Post(':id/cancel')
   @Roles(...REQUEST_ROLES)
   @HttpCode(HttpStatus.OK)
