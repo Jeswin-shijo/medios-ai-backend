@@ -34,6 +34,7 @@ import { ReceptionSession, ReceptionSessionSchema } from '../modules/reception/s
 import { OtpChallenge, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
 import { formatTokenLabel, newSecret } from '../modules/reception/format';
 import { seedBeds } from './seed-beds';
+import { DEMO_CARDS, seedDemoCards } from './seed-cards';
 import { seedCoordinator } from './seed-coordinator';
 import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
@@ -131,11 +132,6 @@ async function seedOpd(doctorUserId: string) {
 }
 
 const MINUTE = 60_000;
-const DEMO_CARDS = [
-  { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
-  { cardId: '0004567890', uhid: 'MHK202500325' }, // David Raj
-  { cardId: '04C8D9E0F1A2B3', uhid: 'MHK202500326' }, // Selvi A
-];
 
 /**
  * The demo day's token queue, in step with its appointments: everyone who has
@@ -199,10 +195,9 @@ async function seedQueue(shajin: { _id: any; name: string; room: string; tokenPr
   console.log(`✅ ${records.length} queue tokens`);
 
   // Demo cards for patients not checked in yet, so the kiosk can be tried without
-  // real cards. Cards linked by hand are kept (patients keep their UHIDs).
-  for (const card of DEMO_CARDS) {
-    await model(PatientCard, PatientCardSchema).updateOne({ cardId: card.cardId }, { $set: { ...card, linkedBy: 'Seed' } }, { upsert: true });
-  }
+  // real cards. Cards linked by hand are kept (patients keep their UHIDs); each demo
+  // card is its patient's one active card again.
+  await seedDemoCards(model(PatientCard, PatientCardSchema));
   console.log(`✅ ${DEMO_CARDS.length} demo patient cards (${DEMO_CARDS.map((c) => c.cardId).join(', ')})`);
 }
 
