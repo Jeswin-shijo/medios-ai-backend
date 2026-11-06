@@ -6,6 +6,7 @@ import type { Actor } from '../beds/actor';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
 import { MessagesService } from '../coordinator/messages.service';
+import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES } from '../discharge/schemas/discharge-order.schema';
 import { LabLine, LabLineDocument } from '../lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from '../lab/schemas/lab-request.schema';
 import { PharmacyLine, PharmacyLineDocument } from '../pharmacy/schemas/pharmacy-line.schema';
@@ -27,6 +28,13 @@ const COLLECTED = ['collected', 'received', 'awaiting-validation', 'released'];
 const finalLink = (billId: unknown) => `revenue-bill:${String(billId)}:final`;
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 const list = (names: string[]) => (names.length > 4 ? `${names.slice(0, 4).join(', ')} and ${names.length - 4} more` : names.join(', '));
+const pad = (n: number) => String(n).padStart(2, '0');
+/** "14:30": a clinic-clock moment as a 24-hour time. */
+const hhmm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const date = (v: unknown): Date | null => {
+  const d = typeof v === 'string' || v instanceof Date ? new Date(v) : null;
+  return d && !isNaN(d.getTime()) ? d : null;
+};
 
 /**
  * The final bill and settlement. Preparing the bill, and settling it, are desk actions; nothing here holds care.
@@ -50,9 +58,49 @@ export class FinalBillService {
     @InjectModel(LabLine.name) private readonly labLines: Model<LabLineDocument>,
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
     @InjectModel(Appointment.name) private readonly appointments: Model<AppointmentDocument>,
+    /** Read-only: the open discharge order of a stay (its planned leaving time). */
+    @InjectModel(DischargeOrder.name) private readonly dischargeOrders: Model<DischargeOrderDocument>,
   ) {
     // A.2: the ER trigger is er.left with any reason but `admitted` (the stay's own bill asks at bed.discharged).
     registration.capture.set('er.left', (id) => this.onErLeft(id));
+    // Discharge A2: a stay's bill is asked for when its discharge window opens, before the patient leaves.
+    registration.capture.set('discharge.window-opened', (id) => this.onWindowOpened(id));
+  }
+
+  /** discharge.window-opened: the final bill for the stay's active admission bill, once. Never throws. */
+  private async onWindowOpened(messageId: string): Promise<void> {
+    try {
+      const message = await this.messages.get(messageId);
+      if (!message) {
+        this.logger.warn(`discharge.window-opened: message ${messageId} not found`);
+        return;
+      }
+      const payload = message.payload ?? {};
+      const admissionId = str(payload.admissionId);
+      const bill =
+        admissionId && isValidObjectId(admissionId)
+          ? await this.billModel.findOne({ kind: 'admission', admission: new Types.ObjectId(admissionId), state: { $in: ACTIVE_BILL_STATES } }).select('_id').lean().exec()
+          : null;
+      if (!bill) {
+        this.logger.warn(`discharge.window-opened: no active bill for admission ${admissionId ?? '(none)'}; no final bill requested`);
+        return;
+      }
+      await this.request('agent', String(bill._id), { leavingAt: date(payload.plannedLeaveAt) });
+    } catch (e) {
+      this.logger.warn(`discharge.window-opened: final bill not requested (${(e as Error).message})`);
+    }
+  }
+
+  /** The planned leaving time (clinic clock) of the stay's order in progress, or null. */
+  private async leavingAt(admission: unknown): Promise<Date | null> {
+    if (!admission) return null;
+    const order = await this.dischargeOrders
+      .findOne({ admission, state: { $in: OPEN_ORDER_STATES } })
+      .sort({ orderedAt: -1, _id: -1 })
+      .select('plannedLeaveAt')
+      .lean()
+      .exec();
+    return date(order?.plannedLeaveAt);
   }
 
   private async onErLeft(messageId: string): Promise<void> {
@@ -81,16 +129,16 @@ export class FinalBillService {
    * Asks the desk to prepare the bill: writes the `:final` task first (the marker that the ask was made), then sends
    * `revenue.final-requested` (the 60-minute clock, real time) through the never-throwing announce. A failed send leaves an
    * open, unannounced task, which the reconcile pass re-sends (R29). Only an open ER or admission bill; a replay finds the task
-   * and does nothing. Returns true when it asked.
+   * and does nothing. `leavingAt` (a discharge window) gives the task the planned leaving time. Returns true when it asked.
    */
-  async request(_actor: Actor | 'agent', billId: string): Promise<boolean> {
+  async request(_actor: Actor | 'agent', billId: string, opts: { leavingAt?: Date | null } = {}): Promise<boolean> {
     if (!isValidObjectId(billId)) return false;
     const bill = await this.billModel.findById(billId).exec();
     if (!bill || bill.state !== 'open' || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
     const link = finalLink(bill._id);
     if (await this.alerts.exists({ link })) return false;
     try {
-      await this.alerts.create({ ...this.finalTaskFields(bill), link });
+      await this.alerts.create({ ...this.finalTaskFields(bill, opts), link });
     } catch (e) {
       if ((e as { code?: number }).code !== 11000) throw e;
       return false;
@@ -99,10 +147,12 @@ export class FinalBillService {
     return true;
   }
 
-  private finalTaskFields(bill: BillDocument) {
+  private finalTaskFields(bill: BillDocument, opts: { leavingAt?: Date | null } = {}) {
+    const subtitle =
+      bill.kind === 'er' ? 'The ER visit has ended' : opts.leavingAt ? `Discharge ordered: leaving ~${hhmm(opts.leavingAt)}` : 'The patient has been discharged';
     return {
       title: `Prepare final bill: ${bill.number}`,
-      subtitle: bill.kind === 'er' ? 'The ER visit has ended' : 'The patient has been discharged',
+      subtitle,
       patientName: bill.patientName,
       uhid: bill.patientUhid,
       type: 'System',
@@ -114,14 +164,16 @@ export class FinalBillService {
 
   /**
    * The reconcile pass: writes the `:final` task of an open ER or admission bill whose final bill was asked for (announcedAt is
-   * set only after the request) when the task is missing. Never reopens one that exists. Never throws; true when it wrote one.
+   * set only after the request) when the task is missing, naming the planned leaving time while the stay's discharge order is in
+   * progress. Never reopens one that exists. Never throws; true when it wrote one.
    */
   async ensureFinalTask(billId: string): Promise<boolean> {
     try {
       const bill = isValidObjectId(billId) ? await this.billModel.findById(billId).exec() : null;
       if (!bill || bill.state !== 'open' || !bill.announcedAt || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
       const link = finalLink(bill._id);
-      const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...this.finalTaskFields(bill), link } }, { upsert: true }).exec();
+      const fields = this.finalTaskFields(bill, { leavingAt: bill.kind === 'admission' ? await this.leavingAt(bill.admission) : null });
+      const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...fields, link } }, { upsert: true }).exec();
       return !!r.upsertedCount;
     } catch (e) {
       this.logger.warn(`Final-bill task of ${billId} not restored (${(e as Error).message})`);
@@ -196,7 +248,8 @@ export class FinalBillService {
       if (unbilled.length) out.push({ kind: 'lab', text: `Collected with no charge: ${list(unbilled)}` });
     }
     if (bill.admission && (await this.admissions.exists({ _id: bill.admission, status: 'active' }))) {
-      out.push({ kind: 'admission', text: 'The patient is still admitted' });
+      const leaving = await this.leavingAt(bill.admission);
+      out.push({ kind: 'admission', text: leaving ? `Discharge ordered, leaving ~${hhmm(leaving)}` : 'The patient is still admitted' });
     }
     const unpriced = await this.chargeLines.find({ bill: bill._id, needsPrice: true, reversed: { $ne: true } }).select('name').lean().exec();
     if (unpriced.length) out.push({ kind: 'needs-price', text: `${unpriced.length} charge${unpriced.length === 1 ? ' has' : 's have'} no price: ${list(unpriced.map((l) => l.name))}` });

@@ -51,6 +51,13 @@ export class Bill {
   @Prop({ type: MongooseSchema.Types.ObjectId })
   admission?: Types.ObjectId;
 
+  /**
+   * A continuation bill: the stay's admission bill that was settled while the patient was still admitted, which this one
+   * continues. Charges for the stay that arrive after the settlement land here; the settled bill is never touched.
+   */
+  @Prop({ type: MongooseSchema.Types.ObjectId })
+  continuationOf?: Types.ObjectId;
+
   @Prop({ type: MongooseSchema.Types.ObjectId })
   appointment?: Types.ObjectId;
 

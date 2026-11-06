@@ -13,11 +13,13 @@ export interface RevenueConfig {
   topupThreshold: number;
   clocks: { final: number; topup: number; refund: number };
   receiptHeader: string;
+  /** The checkout grace (0 to 24 hours): a bed period that starts this soon after the stay's bill is settled is not charged. */
+  graceHours: number;
 }
 
 const STAY_TYPES = Object.keys(DEFAULT_STAY).filter((t) => t !== 'emergency') as WardType[];
 const CLOCKS = ['final', 'topup', 'refund'] as const;
-const KNOWN = ['deposits', 'stay', 'allowance', 'topupThreshold', 'clocks', 'receiptHeader'];
+const KNOWN = ['deposits', 'stay', 'allowance', 'topupThreshold', 'clocks', 'receiptHeader', 'graceHours'];
 export const DEFAULT_RECEIPT_HEADER = "St. Mary's Multi Speciality Hospital, Nagercoil";
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -33,6 +35,7 @@ export function defaultRevenueConfig(): RevenueConfig {
     topupThreshold: 80,
     clocks: { ...DEFAULT_CLOCKS },
     receiptHeader: DEFAULT_RECEIPT_HEADER,
+    graceHours: 4,
   };
 }
 
@@ -66,6 +69,7 @@ export class RevenueSettingsService {
       if (whole(v, 1, 10080)) out.clocks[c] = v;
     }
     if (validHeader(saved.receiptHeader)) out.receiptHeader = saved.receiptHeader;
+    if (whole(saved.graceHours, 0, 24)) out.graceHours = saved.graceHours;
     return out;
   }
 
@@ -111,6 +115,10 @@ export class RevenueSettingsService {
     if ('receiptHeader' in patch) {
       if (!validHeader(patch.receiptHeader)) throw new BadRequestException('"receiptHeader" must be 1 to 120 characters');
       next.receiptHeader = (patch.receiptHeader as string).trim();
+    }
+    if ('graceHours' in patch) {
+      if (!whole(patch.graceHours, 0, 24)) throw new BadRequestException('"graceHours" must be a whole number of hours from 0 to 24');
+      next.graceHours = patch.graceHours;
     }
     await this.settings.setRevenue(next as never);
     return this.get();

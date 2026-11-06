@@ -30,6 +30,7 @@ describe('RevenueSettingsService', () => {
     assert.deepEqual(got.deposits, DEFAULT_DEPOSITS);
     assert.equal(got.topupThreshold, 80);
     assert.deepEqual(got.clocks, { final: 60, topup: 240, refund: 2880 });
+    assert.equal(got.graceHours, 4);
 
     await assert.rejects(() => svc.save(ADMIN, { topupThreshold: 49 }), (e: any) => e.status === 400);
     await assert.rejects(() => svc.save(ADMIN, { topupThreshold: 101 }), (e: any) => e.status === 400);
@@ -44,16 +45,28 @@ describe('RevenueSettingsService', () => {
 
   test('an admin saves values that merge over earlier ones, and a bad stored value falls back', async () => {
     await svc.save(ADMIN, { topupThreshold: 70, deposits: { general: 12000 } });
-    const next = await svc.save(ADMIN, { deposits: { critical: 60000 }, clocks: { topup: 120 }, stay: { hdu: 3 }, receiptHeader: 'Test Hospital' });
+    const next = await svc.save(ADMIN, { deposits: { critical: 60000 }, clocks: { topup: 120 }, stay: { hdu: 3 }, receiptHeader: 'Test Hospital', graceHours: 6 });
     assert.deepEqual(next.deposits, { general: 12000, private: 25000, critical: 60000 });
     assert.equal(next.topupThreshold, 70);
     assert.deepEqual(next.clocks, { final: 60, topup: 120, refund: 2880 });
     assert.equal(next.stay.hdu, 3);
     assert.equal(next.receiptHeader, 'Test Hospital');
+    assert.equal(next.graceHours, 6);
+    assert.equal((await svc.save(ADMIN, { topupThreshold: 75 })).graceHours, 6, 'a later save keeps the grace');
+    assert.equal((await svc.save(ADMIN, { graceHours: 0 })).graceHours, 0, 'no grace is allowed');
 
-    await new SettingsService(m.HospitalSettings).setRevenue({ topupThreshold: 12, deposits: { general: -4 } } as never);
+    await new SettingsService(m.HospitalSettings).setRevenue({ topupThreshold: 12, deposits: { general: -4 }, graceHours: 30 } as never);
     const fallback = await svc.get();
     assert.equal(fallback.topupThreshold, 80);
     assert.equal(fallback.deposits.general, 10000);
+    assert.equal(fallback.graceHours, 4);
+  });
+
+  test('graceHours 25 is 400', async () => {
+    for (const bad of [25, -1, 2.5, '4', null]) {
+      await assert.rejects(() => svc.save(ADMIN, { graceHours: bad }), (e: any) => e.status === 400 && /graceHours/.test(e.message), String(bad));
+    }
+    assert.equal((await svc.get()).graceHours, 4, 'nothing was saved');
+    assert.equal((await svc.save(ADMIN, { graceHours: 24 })).graceHours, 24, '24 is the most');
   });
 });

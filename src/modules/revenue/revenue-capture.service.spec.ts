@@ -68,7 +68,7 @@ describe('RevenueCaptureService', () => {
     stub('scheduling', SCHEDULING_MESSAGE_TYPES);
     stub('bed', BED_MESSAGE_TYPES);
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     capture = new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
     reg.onModuleInit();
@@ -235,6 +235,90 @@ describe('RevenueCaptureService', () => {
     assert.equal(await m.Bill.countDocuments({}), bills0);
     assert.equal(await m.Bill.countDocuments({ state: 'open' }), 0);
     assert.equal(await m.ChargeLine.countDocuments({}), before);
+  });
+
+  /** A stay whose admission bill on the case was settled while the patient is still in the bed (or, with `status`, has left). */
+  const settledStay = async (status = 'active') => {
+    const adm = await m.Admission.create({
+      patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3,
+      status, admittedAt: new Date(Date.now() - 3 * 86_400_000), admittedBy: 'Nurse',
+    });
+    const settled = await m.Bill.create({
+      number: 'BL-0900', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, kind: 'admission', state: 'settled', case: caseId,
+      admission: adm._id, openedAt: new Date(Date.now() - 3 * 86_400_000), finalAt: new Date(), settledAt: new Date(), payer: 'self',
+      totals: { charges: 9000, discounts: 0, payments: 9000, refunds: 0, balance: 0 },
+    });
+    return { adm, settled };
+  };
+  const cbcCollected = async () => {
+    const r = await labRequest([{ test: 'cbc' }]);
+    await deliver('lab', 'lab.collected', { requestId: String(r._id), sampleId: `s-${r._id}`, sampleNumber: 'S-1', tube: 'edta', tests: ['cbc'] });
+  };
+  const settle = (id: unknown, paid: number) => m.Bill.updateOne({ _id: id }, { $set: { state: 'settled', finalAt: new Date(), settledAt: new Date(), 'totals.payments': paid, 'totals.balance': 0 } });
+
+  test('a lab charge after settlement goes on a continuation bill, not walk-in', async () => {
+    await price('lab:cbc', 300);
+    const { adm, settled } = await settledStay();
+    const untouched = await m.Bill.findById(settled._id).lean();
+    await cbcCollected();
+    assert.equal(await m.Bill.countDocuments({ kind: { $in: ['walk-in', 'opd'] } }), 0, 'no walk-in or OPD bill');
+    const next = (await m.Bill.findOne({ _id: { $ne: settled._id } }).lean()) as any;
+    assert.ok(next, 'a continuation bill');
+    assert.deepEqual(
+      [next.kind, next.state, String(next.admission), String(next.case), String(next.continuationOf), String(next.patient), next.patientUhid],
+      ['admission', 'open', String(adm._id), String(caseId), String(settled._id), String(patient._id), patient.uhid],
+    );
+    assert.notEqual(next.number, settled.number);
+    assert.deepEqual([next.totals.charges, next.totals.balance], [300, 300]);
+    assert.deepEqual((await lines()).map((l) => [String(l.bill), l.code]), [[String(next._id), 'lab:cbc']]);
+    assert.deepEqual(await m.Bill.findById(settled._id).lean(), untouched, 'the settled bill is untouched');
+  });
+
+  test('a second late charge joins the same continuation bill', async () => {
+    await price('lab:cbc', 300);
+    await price('med:para500', 4);
+    await price('consult:urgent', 800);
+    await price('proc:angiography', 25000);
+    const { adm, settled } = await settledStay();
+    await cbcCollected();
+    const order = await m.PharmacyOrder.create({ number: 'PO-3', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, setting: 'Ward', orderedBy: BY, priority: 'routine', orderedAt: new Date() });
+    const pl = await m.PharmacyLine.create({ order: order._id, patient: patient._id, medicine: 'paracetamol', product: 'para500', status: 'issued' });
+    await deliver('pharmacy', 'pharmacy.issued', issued(String(pl._id), 10));
+    const stay = await m.Bill.find({ kind: 'admission', admission: adm._id }).sort({ _id: 1 }).lean();
+    assert.equal(stay.length, 2, 'one continuation bill for both charges');
+    assert.equal(await m.Bill.countDocuments({}), 2);
+    assert.deepEqual([stay[1].state, stay[1].totals.charges, stay[1].totals.balance], ['open', 340, 340]);
+    assert.deepEqual([settled.totals.charges, (await m.Bill.findById(settled._id).lean())!.totals.charges], [9000, 9000]);
+
+    // Once that one is settled too, the next late charge opens another, which continues it.
+    await settle(stay[1]._id, 340);
+    const c = await m.ConsultRequest.create({ number: 'CN-3', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, departmentCode: 'cardio', priority: 'urgent', dueAt: new Date(), requestedBy: BY, requestedAt: new Date() } as any);
+    await deliver('scheduling', 'scheduling.consult-seen', { consultId: String(c._id), number: 'CN-3', department: 'Cardiology', priority: 'urgent', dueAt: new Date() });
+    const third = (await m.Bill.findOne({ kind: 'admission', admission: adm._id, state: 'open' }).lean()) as any;
+    assert.equal(String(third.continuationOf), String(stay[1]._id));
+    assert.equal(third.totals.charges, 800);
+
+    // After the patient has left, a late charge goes where it always did: the walk-in bill.
+    await settle(third._id, 800);
+    await m.Admission.updateOne({ _id: adm._id }, { $set: { status: 'discharged', dischargedAt: new Date() } });
+    const b = await m.ProcedureBooking.create({ number: 'PB-3', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, case: caseId, procedure: 'angiography', priority: 'urgent', requestedBy: BY, earliest: new Date() } as any);
+    await deliver('scheduling', 'scheduling.procedure-done', { bookingId: String(b._id), number: 'PB-3', procedure: 'angiography', priority: 'urgent', status: 'done' });
+    assert.equal(await m.Bill.countDocuments({ kind: 'admission', admission: adm._id }), 3, 'no continuation for a stay that has ended');
+    assert.equal((await m.Bill.findOne({ kind: 'walk-in' }).lean())!.totals.charges, 25000);
+  });
+
+  test('the Bill settled close check fails while a continuation bill has a balance', async () => {
+    await price('lab:cbc', 300);
+    const { settled } = await settledStay();
+    const closeCheck = () => registry.closeChecks().find((c) => c.agent === 'revenue')!.check(String(caseId));
+    assert.equal(await closeCheck(), 'pass', 'the settled stay alone');
+    await cbcCollected();
+    assert.equal(await closeCheck(), 'fail', 'the continuation bill is open with ₹300 due');
+    const next = (await m.Bill.findOne({ continuationOf: settled._id } as any).lean())!;
+    await m.Bill.updateOne({ _id: next._id }, { $set: { state: 'final', finalAt: new Date() } });
+    assert.equal(await closeCheck(), 'fail', 'final with ₹300 due');
+    await settle(next._id, 300);
+    assert.equal(await closeCheck(), 'pass', 'both bills settled');
   });
 
   test('a failed price lookup still charges 0 with needs price and does not throw', async () => {

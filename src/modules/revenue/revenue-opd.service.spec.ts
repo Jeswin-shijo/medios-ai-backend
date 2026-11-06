@@ -47,10 +47,10 @@ describe('RevenueOpdService', () => {
     const stub = (key: AgentKey, types: MessageTypeDef[]) => registry.register({ key, messageTypes: types, status: async () => ({ open: 0, capacity: 0, onTimePct: null }) });
     stub('lab', LAB_MESSAGE_TYPES);
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     const revenueSettings = new RevenueSettingsService(new SettingsService(m.HospitalSettings));
-    const final = new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     svc = new RevenueOpdService(events, prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600961', name: 'Asha Devi', age: 40, gender: 'Female', phone: '9100000061' });

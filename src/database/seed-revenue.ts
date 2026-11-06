@@ -22,6 +22,7 @@ import { CoordinatorCounter, CoordinatorCounterSchema } from '../modules/coordin
 import { DutyTitle, DutyTitleSchema } from '../modules/coordinator/schemas/duty-title.schema';
 import { Escalation, EscalationSchema } from '../modules/coordinator/schemas/escalation.schema';
 import { Ladder, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
+import { DischargeOrder, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
 import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabLine, LabLineSchema } from '../modules/lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestSchema } from '../modules/lab/schemas/lab-request.schema';
@@ -166,6 +167,7 @@ function wire() {
   const bills = new RevenueBillsService(
     model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, model(Payment, PaymentSchema) as never, model(Refund, RefundSchema) as never,
     model(Correction, CorrectionSchema) as never, model(Estimate, EstimateSchema) as never, model(CoordinatorCounter, CoordinatorCounterSchema) as never, model(Patient, PatientSchema) as never,
+    undefined, model(Admission, AdmissionSchema) as never,
   );
   const prices = new PriceListService(model(PriceItem, PriceItemSchema) as never, model(Ward, WardSchema) as never, model(OpDoctor, OpDoctorSchema) as never);
   const capture = new RevenueCaptureService(
@@ -176,7 +178,7 @@ function wire() {
   const final = new FinalBillService(
     messages, registration, settings, bills, model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, model(TaskAlertItem, TaskAlertItemSchema) as never,
     model(PharmacyOrder, PharmacyOrderSchema) as never, model(PharmacyLine, PharmacyLineSchema) as never, model(LabRequest, LabRequestSchema) as never, model(LabLine, LabLineSchema) as never,
-    model(Admission, AdmissionSchema) as never, model(Appointment, AppointmentSchema) as never,
+    model(Admission, AdmissionSchema) as never, model(Appointment, AppointmentSchema) as never, model(DischargeOrder, DischargeOrderSchema) as never,
   );
   const payments = new PaymentsService(registration, settings, bills, final, model(Payment, PaymentSchema) as never);
   const opd = new RevenueOpdService(
@@ -192,7 +194,7 @@ function wire() {
   );
   const bedDays = new RevenueBedDaysService(
     messages, prices, bills, registration, model(Admission, AdmissionSchema) as never, model(Bed, BedSchema) as never, model(Case, CaseSchema) as never,
-    model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, estimates, deposits, final,
+    model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, estimates, deposits, final, settings, model(DischargeOrder, DischargeOrderSchema) as never,
   );
   const refunds = new RefundsService(registration, settings, bills, approvals, final, model(Refund, RefundSchema) as never, model(TaskAlertItem, TaskAlertItemSchema) as never);
   const corrections = new CorrectionsService(registration, bills, approvals, final, prices, capture, model(Correction, CorrectionSchema) as never, model(ChargeLine, ChargeLineSchema) as never);

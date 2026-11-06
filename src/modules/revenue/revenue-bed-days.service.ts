@@ -6,6 +6,7 @@ import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { Bed, BedDocument } from '../beds/schemas/bed.schema';
 import { MessagesService } from '../coordinator/messages.service';
 import { Case, CaseDocument } from '../coordinator/schemas/case.schema';
+import { DischargeOrder, DischargeOrderDocument } from '../discharge/schemas/discharge-order.schema';
 import { PriceListService } from './price-list.service';
 import { nursingCode, wardGroupOf } from './revenue-catalogue';
 import { RevenueBillsService } from './revenue-bills.service';
@@ -13,11 +14,13 @@ import { RevenueCoordinatorRegistration } from './revenue-coordinator.registrati
 import { RevenueDepositsService } from './revenue-deposits.service';
 import { RevenueEstimatesService } from './revenue-estimates.service';
 import { FinalBillService } from './revenue-final.service';
+import { RevenueSettingsService } from './revenue-settings.service';
 import { ACTIVE_BILL_STATES, Bill, BillDocument } from './schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from './schemas/charge-line.schema';
 
 const BY = { name: 'Revenue Agent' };
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 /** A stay longer than this many periods is a data error; stop rather than loop. */
 const MAX_PERIODS = 3660;
 
@@ -51,6 +54,9 @@ export class RevenueBedDaysService {
     private readonly estimates: RevenueEstimatesService,
     private readonly deposits: RevenueDepositsService,
     private readonly final: FinalBillService,
+    private readonly settings: RevenueSettingsService,
+    /** Read-only: a discharge order cancelled after the stay's bill was settled ends the checkout grace. */
+    @InjectModel(DischargeOrder.name) private readonly dischargeOrders: Model<DischargeOrderDocument>,
   ) {
     registration.capture.set('bed.assigned', (id) => this.run('bed.assigned', id, (m) => this.onAssigned(m)));
     registration.capture.set('bed.transferred', (id) => this.run('bed.transferred', id, (m) => this.onTransferred(m)));
@@ -157,12 +163,15 @@ export class RevenueBedDaysService {
   }
 
   /**
-   * The admission's bill. Any existing bill for it (even a settled one) is returned, so a replay never opens a second.
-   * Else the case's active ER bill becomes it (its ER charges stay); else a new admission bill opens.
+   * The admission's bill: its active one (a continuation bill included), else its newest (even a settled one), so a replay
+   * never opens a second. With none, the case's active ER bill becomes it (its ER charges stay); else a new admission bill opens.
    */
   private async ensureBill(admission: { _id: unknown; patient: unknown; bed: unknown; transfers?: { fromBed: unknown }[] }, caseId: string | null): Promise<BillDocument> {
     const admissionId = new Types.ObjectId(String(admission._id));
-    const existing = await this.billModel.findOne({ kind: 'admission', admission: admissionId }).sort({ openedAt: -1, _id: -1 }).exec();
+    const stay = { kind: 'admission', admission: admissionId };
+    const existing =
+      (await this.billModel.findOne({ ...stay, state: { $in: ACTIVE_BILL_STATES } }).exec()) ??
+      (await this.billModel.findOne(stay).sort({ openedAt: -1, _id: -1 }).exec());
     if (existing) return existing;
     const wardType = await this.firstWardType(admission);
     if (caseId && isValidObjectId(caseId)) {
@@ -198,16 +207,37 @@ export class RevenueBedDaysService {
    * Charges every started 24-hour period not yet charged: `bed-day` and `nursing-day`, ref `<admissionId>:<k>`.
    * Period k starts at admittedAt + k days. While admitted it counts once that moment has come; after discharge only if it
    * starts before the discharge time (so a discharge at exactly 24 h is one day). Returns the number of new lines.
+   * Once a bill of the stay is settled, only the periods `afterSettlement` allows are charged, on the stay's active bill; with
+   * none and the patient still admitted, the first such charge opens the continuation bill.
    */
   async chargeDue(admissionId: string, now: Date = this.clock()): Promise<number> {
     if (!isValidObjectId(admissionId)) return 0;
     const admission = await this.admissions.findById(admissionId).lean().exec();
     if (!admission || admission.sample) return 0;
-    const bill = await this.billModel
+    const active = await this.billModel
       .findOne({ kind: 'admission', admission: admission._id, state: { $in: ACTIVE_BILL_STATES } })
-      .sort({ openedAt: -1, _id: -1 })
+      .select('_id')
+      .lean()
       .exec();
-    if (!bill) return 0;
+    // The patient narrows the read to an index: every bill of the stay is the patient's.
+    const settled = await this.billModel
+      .find({ patient: admission.patient, kind: 'admission', admission: admission._id, state: 'settled' })
+      .select('settledAt')
+      .lean()
+      .exec();
+    // No bill yet, or every bill settled and the stay over: nothing to charge.
+    if (!active && (!settled.length || admission.status !== 'active')) return 0;
+    const chargeable = settled.length ? await this.afterSettlement(admission._id, settled) : () => true;
+    let billId = active ? String(active._id) : null;
+    /** The bill to charge: the active one, else the continuation bill, opened by the first charge that needs it. */
+    const target = async (): Promise<string> => {
+      if (!billId) {
+        const opened = await this.bills.continuation({ admission: admission._id as Types.ObjectId });
+        if (!opened) throw new Error('the stay has no active bill and is no longer admitted');
+        billId = String(opened._id);
+      }
+      return billId;
+    };
 
     const discharged = admission.status === 'discharged' && admission.dischargedAt;
     const end = discharged ? new Date(Math.min(now.getTime(), new Date(admission.dischargedAt!).getTime())) : now;
@@ -218,7 +248,7 @@ export class RevenueBedDaysService {
       if (discharged ? start >= end.getTime() : start > end.getTime()) break;
       starts.push(start);
     }
-    if (!starts.length) return 0;
+    if (!starts.some(chargeable)) return 0;
 
     // The ward history: the first bed, then each transfer's new bed from the time it moved.
     const transfers = [...(admission.transfers ?? [])].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
@@ -231,6 +261,7 @@ export class RevenueBedDaysService {
 
     let created = 0;
     for (let k = 0; k < starts.length; k++) {
+      if (!chargeable(starts[k])) continue;
       const ref = `${admissionId}:${k}`;
       try {
         const bedAtStart = transfers.filter((t) => new Date(t.at).getTime() <= starts[k]).pop()?.toBed ?? firstBed;
@@ -250,7 +281,7 @@ export class RevenueBedDaysService {
         }
         const day = k + 1;
         if (!(await this.chargeLines.exists({ 'source.type': 'bed-day', 'source.ref': ref }).exec())) {
-          const r = await this.bills.addCharge(String(bill._id), {
+          const r = await this.bills.addCharge(await target(), {
             code: `bed:${rate.wardType}`,
             name: `Bed, ${rate.wardName || rate.wardType} (day ${day})`,
             category: 'bed',
@@ -275,7 +306,7 @@ export class RevenueBedDaysService {
             }
             nursing.set(code, p);
           }
-          const r = await this.bills.addCharge(String(bill._id), {
+          const r = await this.bills.addCharge(await target(), {
             code,
             name: `${p.name === code ? 'Nursing and doctor visit' : p.name} (day ${day})`,
             category: 'nursing',
@@ -294,17 +325,45 @@ export class RevenueBedDaysService {
     return created;
   }
 
-  /** Every active admission that has a revenue bill gets its days caught up. One bad admission never stops the rest. */
+  /**
+   * Which period starts a stay may still charge once a bill of it is settled (design 4.5, R6). A settled bill stands for
+   * everything that started before its settlement, so only periods from the latest settlement on count. Of those, none that
+   * starts inside a settlement's checkout grace `[settledAt, settledAt + graceHours)` is ever charged, whichever bill is
+   * active now, except that a discharge order cancelled after the settlement ends that grace at the cancel time. All on the
+   * clinic clock. A settled bill with no settledAt allows nothing.
+   */
+  private async afterSettlement(admissionId: unknown, settled: { settledAt?: Date }[]): Promise<(start: number) => boolean> {
+    const graceMs = (await this.settings.get()).graceHours * HOUR_MS;
+    const cancels = (await this.dischargeOrders.find({ admission: admissionId, state: 'cancelled' }).select('cancelled').lean().exec())
+      .map((o) => (o.cancelled?.at ? new Date(o.cancelled.at).getTime() : NaN))
+      .filter((t) => !isNaN(t))
+      .sort((a, b) => a - b);
+    const graces = settled.map((b) => {
+      const from = b.settledAt ? new Date(b.settledAt).getTime() : Infinity;
+      const cancel = cancels.find((t) => t > from) ?? Infinity;
+      return { from, to: Math.min(from + graceMs, cancel) };
+    });
+    const latest = Math.max(...graces.map((g) => g.from));
+    return (start) => start >= latest && !graces.some((g) => start >= g.from && start < g.to);
+  }
+
+  /**
+   * Every admitted patient whose stay has a revenue bill gets its days caught up: on the active bill, or after a settlement
+   * on the continuation bill. One bad admission never stops the rest.
+   */
   async tick(now: Date = this.clock()): Promise<number> {
     let total = 0;
     try {
-      const ids = await this.billModel.distinct('admission', { kind: 'admission', state: { $in: ACTIVE_BILL_STATES }, admission: { $exists: true } }).exec();
-      const active = await this.admissions.find({ _id: { $in: ids }, status: 'active', sample: { $ne: true } }).select('_id').lean().exec();
-      for (const a of active) {
+      const admitted = await this.admissions.find({ status: 'active', sample: { $ne: true } }).select('_id patient').lean().exec();
+      // The patients narrow the read to an index. A stay whose bills are all settled counts too.
+      const ids = await this.billModel
+        .distinct('admission', { patient: { $in: admitted.map((a) => a.patient) }, kind: 'admission', admission: { $in: admitted.map((a) => a._id) } })
+        .exec();
+      for (const id of ids) {
         try {
-          total += await this.chargeDue(String(a._id), now);
+          total += await this.chargeDue(String(id), now);
         } catch (e) {
-          this.logger.warn(`Bed days for admission ${String(a._id)} failed (${(e as Error).message})`);
+          this.logger.warn(`Bed days for admission ${String(id)} failed (${(e as Error).message})`);
         }
       }
     } catch (e) {

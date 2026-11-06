@@ -68,7 +68,7 @@ describe('RevenueBedDaysService', () => {
     stub('er', ER_MESSAGE_TYPES);
     stub('bed', BED_MESSAGE_TYPES);
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     // The capture service registers the other handlers; the bed-day service registers its own three.
     new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
@@ -76,7 +76,8 @@ describe('RevenueBedDaysService', () => {
     const revenueSettings = new RevenueSettingsService(settingsService);
     const estimates = new RevenueEstimatesService(reg, revenueSettings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
     const deposits = new RevenueDepositsService(messages, reg, new RulesService(registry, settingsService, new CoordinatorEvents()), revenueSettings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
-    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment));
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
+    svc = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final, revenueSettings, m.DischargeOrder);
     reg.onModuleInit();
     svc.clock = () => at(0);
     patient = await m.Patient.create({ uhid: 'MHK202600961', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000061' });
@@ -228,5 +229,88 @@ describe('RevenueBedDaysService', () => {
     const n = await lines('nursing-day');
     assert.equal(n[0].unitPrice, 0);
     assert.equal(n[0].needsPrice, true);
+  });
+
+  /** The stay's bill, prepared and paid at `hours` (the clinic clock): day 1 of 1500 + 300. */
+  const settleAt = (adm: any, hours: number) =>
+    m.Bill.findOneAndUpdate(
+      { kind: 'admission', admission: adm._id },
+      { $set: { state: 'settled', finalAt: at(hours), settledAt: at(hours), 'totals.payments': 1800, 'totals.balance': 0 } },
+      { new: true },
+    ).lean();
+  const order = (adm: any, extra: Record<string, unknown>) =>
+    m.DischargeOrder.create({
+      plan: new Types.ObjectId(), admission: adm._id, patient: adm.patient, kind: 'home', state: 'ordered', plannedLeaveAt: at(24), windowAt: at(22),
+      diagnosis: 'Community-acquired pneumonia', orderedBy: { name: 'Dr Arun' }, orderedAt: at(20), ...extra,
+    });
+  const stayOf = (adm: any) => m.Bill.find({ kind: 'admission', admission: adm._id }).sort({ openedAt: 1, _id: 1 }).lean();
+
+  test('a bed period starting 3 h after settlement is not charged, 5 h after is charged on the continuation bill', async () => {
+    // Two stays admitted at T0. Each bill is settled before the second period starts (at 24 h): A 3 h before it, B 5 h before.
+    const other = await m.Patient.create({ uhid: 'MHK202600964', name: 'Lata', age: 40, gender: 'Female', phone: '9100000064' });
+    const a = await admit();
+    const b = await admit({ patient: other._id, patientUhid: other.uhid, patientName: other.name });
+    await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(a._id), ward: '' });
+    await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(b._id), ward: '' }, null);
+    const settledA = (await settleAt(a, 21))!;
+    const settledB = (await settleAt(b, 19))!;
+    // A discharge order cancelled before the settlement does not cut the grace.
+    await order(a, { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: at(20) } });
+
+    assert.equal(await svc.tick(at(25)), 2, "B's day 2: a bed day and a nursing day");
+    const stayB = await stayOf(b);
+    assert.equal(stayB.length, 2);
+    const contB = stayB[1] as any;
+    assert.deepEqual([contB.state, String(contB.continuationOf), contB.totals.charges], ['open', String(settledB._id), 1500 + 300]);
+    assert.deepEqual(
+      (await m.ChargeLine.find({ bill: contB._id }).sort({ _id: 1 }).lean()).map((l) => [l.source.type, l.source.ref]),
+      [['bed-day', `${b._id}:1`], ['nursing-day', `${b._id}:1`]],
+    );
+    assert.deepEqual(await m.Bill.findById(settledB._id).lean(), settledB, "B's settled bill is untouched");
+    assert.equal((await stayOf(a)).length, 1, 'A: its day 2 starts inside the grace, so nothing is charged and no bill opens');
+
+    // R6: the grace still holds once A's stay has a continuation bill for a late charge.
+    const late = (await bills.forCharge({ patientId: String(patient._id), caseId: String(caseDoc._id) })) as any;
+    assert.equal(String(late.continuationOf), String(settledA._id));
+    assert.equal(await svc.tick(at(30)), 0);
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': `${a._id}:1` }), 0, "A's period inside the grace is never charged");
+    // The next period, a day later, is charged for both stays, on their continuation bills.
+    assert.equal(await svc.tick(at(48)), 4);
+    assert.equal(await m.ChargeLine.countDocuments({ bill: late._id, 'source.ref': `${a._id}:2` }), 2);
+    assert.equal(await m.ChargeLine.countDocuments({ bill: contB._id, 'source.ref': `${b._id}:2` }), 2);
+    assert.deepEqual(await m.Bill.findById(settledA._id).lean(), settledA, "A's settled bill is untouched");
+  });
+
+  test('cancel after settlement: the next periods are charged once each, and the settled bill is untouched', async () => {
+    const adm = await admit();
+    await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(adm._id), ward: '' });
+    // Settled at 22 h for a planned 24 h leaving; the order is cancelled at 23 h and the patient stays two more days.
+    const settled = (await settleAt(adm, 22))!;
+    await order(adm, { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: at(23) } });
+
+    assert.equal(await svc.tick(at(49)), 4, 'days 2 and 3: they start after the cancel');
+    assert.equal(await svc.tick(at(49)), 0, 'nothing twice');
+    assert.equal(await svc.chargeDue(String(adm._id), at(49)), 0);
+    assert.equal(await svc.tick(at(72)), 2, 'day 4');
+    const stay = await stayOf(adm);
+    assert.equal(stay.length, 2, 'one continuation bill');
+    const cont = stay[1] as any;
+    assert.equal(String(cont.continuationOf), String(settled._id));
+    assert.deepEqual(
+      (await m.ChargeLine.find({ bill: cont._id, 'source.type': 'bed-day' }).sort({ 'source.ref': 1 }).lean()).map((l) => l.source.ref),
+      [1, 2, 3].map((k) => `${adm._id}:${k}`),
+    );
+    assert.equal(cont.totals.charges, 3 * (1500 + 300));
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.type': 'bed-day' }), 4, 'each period once');
+    assert.deepEqual(await m.Bill.findById(settled._id).lean(), settled, 'the settled bill is untouched');
+    assert.equal(await m.ChargeLine.countDocuments({ bill: settled._id }), 2, 'it keeps its own day 1');
+
+    // Leaving later: the final bill is asked for on the continuation bill, never the settled one.
+    await m.Admission.updateOne({ _id: adm._id }, { $set: { status: 'discharged', dischargedAt: at(75) } });
+    svc.clock = () => at(76);
+    await deliver('bed.discharged', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(adm._id) });
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${cont._id}:final` }), 1);
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${settled._id}:final` }), 0);
+    assert.equal((await stayOf(adm)).length, 2);
   });
 });
