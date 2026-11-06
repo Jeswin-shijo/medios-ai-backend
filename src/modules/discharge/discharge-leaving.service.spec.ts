@@ -46,6 +46,7 @@ describe('DischargeLeavingService', () => {
   let lines: DischargeLinesService;
   let orders: DischargeOrdersService;
   let beds: BedsService;
+  let patients: PatientsService;
   let leaving: DischargeLeavingService;
   let caseId: string;
   let planId: string;
@@ -167,7 +168,8 @@ describe('DischargeLeavingService', () => {
     };
     const plans = new DischargePlansService(reg, w.messages, rules, settings, m.DischargePlan, m.Admission, m.Bed, m.Ward, m.Case, m.TaskAlertItem, m.Patient);
     (plans as any).logger = logger;
-    beds = new BedsService(m.Ward, m.Bed, m.Admission, new PatientsService(m.Patient), new BedEvents(), m.DischargeOrder);
+    patients = new PatientsService(m.Patient);
+    beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, new BedEvents(), m.DischargeOrder);
     lines = new DischargeLinesService(
       reg, w.messages, w.cases, m.DischargeOrder, m.DischargePlan, m.DischargeSummary, m.LabRequest, m.LabLine, m.PharmacyLine, m.FollowUpItem, m.Bill, m.ChargeLine,
     );
@@ -181,7 +183,9 @@ describe('DischargeLeavingService', () => {
     );
     (orders as any).logger = logger;
     orders.clock = () => NOW;
-    leaving = new DischargeLeavingService(reg, plans, orders, lines, settings, beds, w.escalations, m.DischargePlan, m.DischargeOrder, m.Admission, m.Bill, m.CoordinatorCounter);
+    leaving = new DischargeLeavingService(
+      reg, plans, orders, lines, settings, beds, w.escalations, m.DischargePlan, m.DischargeOrder, m.Admission, m.Bed, m.Bill, m.CoordinatorCounter,
+    );
     (leaving as any).logger = logger;
     leaving.clock = () => NOW;
 
@@ -403,25 +407,124 @@ describe('DischargeLeavingService', () => {
     assert.deepEqual(logged, []);
   });
 
-  test('a bed that cannot be freed puts the order back and reports the error', async () => {
+  test('a stay the Bed Agent left untouched (a transfer got there first) puts the order back, and a retry ends it', async () => {
     const id = await ready();
     await leaving.gatePass(NURSE, id);
-    // The bed no longer holds this stay (a transfer got there first).
-    await m.Bed.updateOne({ _id: bedId }, { $set: { admission: new Types.ObjectId() } });
-    await assert.rejects(leaving.left(NURSE, id), ConflictException);
+    const realDischarge = beds.discharge.bind(beds);
+    /** Just before the bed call, a transfer moves the patient to another bed: the old bed is no longer theirs. */
+    const transferFirst = (label: string, number: number) => {
+      beds.discharge = async (...args: Parameters<BedsService['discharge']>) => {
+        beds.discharge = realDischarge;
+        const from = (await admissionOf()).bed;
+        const to = await m.Bed.create({ ward: wardId, label, number, state: 'occupied', admission: admissionId });
+        await m.Admission.updateOne({ _id: admissionId }, { $set: { bed: to._id } });
+        await m.Bed.updateOne({ _id: from }, { $set: { state: 'free', admission: null } });
+        return realDischarge(...args);
+      };
+    };
+    transferFirst('GWA-20', 20);
+    await assert.rejects(leaving.left(NURSE, id), /This bed is not occupied/);
     let row = await stored(id);
     assert.deepEqual([row.state, row.leftAt, row.leftBy, row.endedAs], ['ready', undefined, undefined, undefined]);
     assert.equal((await planOf()).state, 'ready');
     assert.equal((await admissionOf()).status, 'active');
     assert.equal(sendsOf('discharge.completed').length, 0);
     // Left without discharge fails the same way: nothing it changed stays.
-    await assert.rejects(leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: at(26, 10) }), ConflictException);
+    transferFirst('GWA-21', 21);
+    await assert.rejects(leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: at(26, 10) }), /This bed is not occupied/);
     row = await stored(id);
     assert.deepEqual([row.state, row.endedAs], ['ready', undefined]);
     const plan = await planOf();
     assert.deepEqual([plan.state, plan.leftWithoutDischarge, plan.completedKind], ['ready', undefined, undefined]);
     assert.equal(await m.Escalation.countDocuments(), 0);
     assert.equal(sendsOf('discharge.completed').length, 0);
+    // Pressed again, it ends the stay from the bed the patient is in now.
+    await leaving.left(NURSE, id);
+    assert.equal((await stored(id)).state, 'left');
+    assert.equal((await m.Bed.findOne({ label: 'GWA-21' }).lean<any>()).state, 'cleaning');
+    assert.equal((await admissionOf()).status, 'discharged');
+  });
+
+  test('I1 (review): a Patient left whose Bed Agent step fails after the stay ended keeps the order left and finishes', async () => {
+    const id = await ready();
+    await leaving.gatePass(NURSE, id);
+    // The bed and the admission are written, then the patient's status fails once.
+    const realUpdate = patients.update.bind(patients);
+    patients.update = async () => {
+      patients.update = realUpdate;
+      throw new Error('database blip');
+    };
+    await leaving.left(NURSE, id);
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.endedAs], ['left', 'home']);
+    assert.equal((await bedOf()).state, 'cleaning');
+    assert.equal((await admissionOf()).status, 'discharged');
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.completedKind], ['completed', 'home']);
+    assert.deepEqual((await w.sent('discharge.completed')).map((x) => x.payload.orderId), [id]);
+    assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['met', 'met']);
+    assert.ok(logged.some((l) => /database blip/.test(l)), logged.join(' | '));
+    // A retry is told the patient has left, never sent round a "not occupied" loop.
+    await assert.rejects(leaving.left(NURSE, id), /The patient has already left\./);
+  });
+
+  test('I1 (review): a Left without discharge whose Bed Agent step fails after the stay ended keeps the claim and finishes', async () => {
+    const lastSeen = at(26, 10, 30);
+    const realUpdate = patients.update.bind(patients);
+    patients.update = async () => {
+      patients.update = realUpdate;
+      throw new Error('database blip');
+    };
+    await leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: lastSeen });
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.completedKind, plan.leftWithoutDischarge?.reason], ['completed', 'left-without-discharge', 'Absconded']);
+    assert.equal((await bedOf()).state, 'cleaning');
+    assert.equal((await admissionOf()).status, 'discharged');
+    assert.deepEqual((await w.sent('discharge.completed')).map((x) => [x.payload.orderId, x.payload.kind]), [['', 'left-without-discharge']]);
+    assert.equal(await m.Escalation.countDocuments({ 'source.kind': 'discharge-left' }), 1);
+    assert.ok(logged.some((l) => /database blip/.test(l)), logged.join(' | '));
+    await assert.rejects(leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: lastSeen }), /This discharge is complete\./);
+  });
+
+  test('a waiting line written between the refresh and the move makes Patient left 409 (Minor 1)', async () => {
+    const id = await ready();
+    await leaving.gatePass(NURSE, id);
+    const realRefresh = lines.refresh.bind(lines);
+    // Another refresh, woken by Revenue, has written the waiting bill line but not yet moved the order to ordered.
+    lines.refresh = async (orderId: string) => {
+      lines.refresh = realRefresh;
+      const read = await realRefresh(orderId);
+      await m.DischargeOrder.updateOne({ _id: orderId, 'lines.key': 'bill' }, { $set: { 'lines.$.state': 'waiting', 'lines.$.detail': '₹240 due' } });
+      return read;
+    };
+    await assert.rejects(leaving.left(NURSE, id), (e: unknown) => {
+      assert.ok(e instanceof ConflictException, String(e));
+      assert.match((e as ConflictException).message, /^Something changed on the checklist/);
+      return true;
+    });
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.leftAt, row.endedAs], ['ready', undefined, undefined]);
+    assert.equal((await bedOf()).state, 'occupied');
+    assert.equal(sendsOf('discharge.completed').length, 0);
+  });
+
+  test('Patient left on a transfer with a balance: the pass says billing is informed, and the patient leaves (Minor 8)', async () => {
+    const o = await orders.order(DOC, planId, transfer());
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(6000, 2000) });
+    await sign(o._id, 'transfer');
+    await lines.tick(NURSE, id, 'teaching', { state: 'done' });
+    assert.equal((await stored(id)).state, 'ready');
+    assert.equal((await leaving.gatePass(DESK, id)).billLine, 'Balance due: billing informed');
+    await leaving.left(DESK, id);
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.endedAs], ['left', 'transfer']);
+    assert.deepEqual([(await planOf()).state, (await planOf()).completedKind], ['completed', 'transfer']);
+    assert.equal((await patientOf()).status, 'Discharged');
+    // The balance stays Revenue's task.
+    const after = await m.Bill.findById(b._id).lean<any>();
+    assert.deepEqual([after.state, after.totals.balance], ['final', 4000]);
+    assert.deepEqual((await w.sent('discharge.completed')).map((x) => x.payload.kind), ['transfer']);
   });
 
   test('I1: a Patient left that lands while the window opens leaves discharge.completed due again', async () => {
@@ -712,6 +815,23 @@ describe('DischargeLeavingService', () => {
     assert.deepEqual(sends.filter((x) => x.payload.orderId === String(row._id)).map((x) => x.type), []);
     assert.equal((await clocksOf(row._id)).length, 0);
     assert.ok(logged.some((l) => /stay ended while it was being given/.test(l)), logged.join(' | '));
+  });
+
+  test('R44: Left without discharge on a death order is refused', async () => {
+    const o = await orders.order(DOC, planId, died());
+    const id = String(o._id);
+    await assert.rejects(leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: at(26, 10, 50) }), (e: unknown) => {
+      assert.ok(e instanceof ConflictException, String(e));
+      assert.equal((e as ConflictException).message, 'Use Body released for a death.');
+      return true;
+    });
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.endedAs], ['ordered', undefined]);
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.leftWithoutDischarge, plan.completedKind], ['ordered', undefined, undefined]);
+    assert.equal((await bedOf()).state, 'occupied');
+    assert.equal((await patientOf()).status, 'Today');
+    assert.equal(await m.Escalation.countDocuments({ 'source.kind': 'discharge-left' }), 0);
   });
 
   test('a staff user cannot record left without discharge', async () => {

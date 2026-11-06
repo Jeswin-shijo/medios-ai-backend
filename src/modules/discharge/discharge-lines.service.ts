@@ -13,7 +13,7 @@ import { PharmacyLine, PharmacyLineDocument, PharmacyLineStatus } from '../pharm
 import { Bill, BillDocument, BillState } from '../revenue/schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from '../revenue/schemas/charge-line.schema';
 import { UserRole } from '../users/schemas/user.schema';
-import { KIND_LABEL, LINE_KEYS, LINE_LABEL, LINE_OWNER, LINE_RULE, LineKey } from './discharge-catalogue';
+import { DischargeKind, KIND_LABEL, LINE_KEYS, LINE_LABEL, LINE_OWNER, LINE_RULE, LineKey } from './discharge-catalogue';
 import { DischargeRegistration, WAKE_TYPES } from './discharge-coordinator.registration';
 import {
   DischargeLineEntry,
@@ -122,6 +122,20 @@ export function missing(order: Pick<DischargeOrder, 'kind' | 'lines'>): LineKey[
 /** Ready to leave: every required line is done or not needed. The gate pass and the leaving need it. */
 export function isReady(order: Pick<DischargeOrder, 'kind' | 'lines'>): boolean {
   return missing(order).length === 0;
+}
+
+/** The required lines of a kind. */
+const requiredKeys = (kind: DischargeKind): LineKey[] => LINE_KEYS.filter((k) => LINE_RULE[kind][k] === 'R');
+/** A stored line of these keys that holds Ready. */
+const notDoneOf = (required: LineKey[]) => ({ key: { $in: required }, state: { $nin: COMPLETE } });
+
+/**
+ * `isReady` as a query filter on the stored lines, for a guarded move: every required line of the kind is there, and
+ * none is other than done or not needed. A move guarded on it never passes a line another write has just made wait.
+ */
+export function readyLinesFilter(kind: DischargeKind): Record<string, unknown> {
+  const required = requiredKeys(kind);
+  return { 'lines.key': { $all: required }, $nor: [{ lines: { $elemMatch: notDoneOf(required) } }] };
 }
 
 /**
@@ -509,11 +523,11 @@ export class DischargeLinesService {
    * count's key (R31); losing it takes the announcement off `announced`. The plan follows the order.
    */
   private async settleReady(order: LeanOrder, caseId: string | null, bedLabel: string | null): Promise<void> {
-    const required = LINE_KEYS.filter((k) => LINE_RULE[order.kind][k] === 'R');
-    const notDone = { key: { $in: required }, state: { $nin: COMPLETE } };
+    const required = requiredKeys(order.kind);
+    const notDone = notDoneOf(required);
     const gained = await this.orders
       .findOneAndUpdate(
-        { _id: order._id, state: 'ordered', 'lines.key': { $all: required }, $nor: [{ lines: { $elemMatch: notDone } }] },
+        { _id: order._id, state: 'ordered', ...readyLinesFilter(order.kind) },
         { $set: { state: 'ready' }, $inc: { readyCount: 1 }, $pull: { announced: READY } },
         { new: true },
       )

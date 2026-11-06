@@ -5,13 +5,14 @@ import { clinicNow } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { BedsService, DischargeBedOptions } from '../beds/beds.service';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
+import { Bed, BedDocument } from '../beds/schemas/bed.schema';
 import { EscalationsService } from '../coordinator/escalations.service';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { Bill, BillDocument, BillState } from '../revenue/schemas/bill.schema';
 import { UserRole } from '../users/schemas/user.schema';
 import { CompletionKind, KIND_LABEL, LINE_LABEL } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
-import { DischargeLinesService, missing } from './discharge-lines.service';
+import { DischargeLinesService, missing, readyLinesFilter } from './discharge-lines.service';
 import { DischargeOrdersService } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
@@ -34,6 +35,8 @@ const NOT_FINISHED = "The checklist isn't finished";
 const CHANGED = 'Something changed on the checklist';
 const PLAN_COMPLETE = 'This discharge is complete.';
 const ALREADY_LEFT = 'The patient has already left.';
+/** R44: a deceased patient is never marked Left without discharge. */
+const DEATH_IS_RELEASED = 'Use Body released for a death.';
 
 const BALANCE_DUE = 'Balance due: billing informed';
 const REFUND_DUE = 'Refund due: billing informed';
@@ -105,7 +108,8 @@ const stateRefusal = (state: OrderState | undefined): string =>
  * end the stay through the Bed Agent's own discharge; Left without discharge records a patient who has already gone,
  * on any stay, with or without an order. Each ending completes the plan with its kind and sends `discharge.completed`,
  * which stops the clocks and makes Pharmacy cancel what still waits. A stay ends once: of two presses at once, one
- * wins and the other is 409; a bed that cannot be freed puts the order back. Times are on the clinic clock.
+ * wins and the other is 409; a Bed Agent failure puts the order back only while the stored stay is untouched. Times are
+ * on the clinic clock.
  */
 @Injectable()
 export class DischargeLeavingService {
@@ -127,6 +131,8 @@ export class DischargeLeavingService {
     @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>,
     /** Read only: the stay's bed and admission time. */
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
+    /** Read only: whether the stay's bed still holds it, after a Bed Agent step failed (review I1). */
+    @InjectModel(Bed.name) private readonly bedDocs: Model<BedDocument>,
     /** Read only: the stay's admission bills, for the gate pass. */
     @InjectModel(Bill.name) private readonly bills: Model<BillDocument>,
     @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>,
@@ -227,10 +233,12 @@ export class DischargeLeavingService {
 
   /**
    * The checklist is read again (the backstop for changes no agent announces), then `ready → left` is one guarded
-   * move, so two presses at once end the stay once; the Bed Agent's own guard (admission plus bed) is the second line.
-   * The bed is freed through `BedsService.discharge` (the admission discharged at this moment, the bed to cleaning,
-   * the patient's status, `bed.discharged`); if it fails the order is put back and the error reported. Then the plan
-   * completes with the kind and `discharge.completed` goes.
+   * move, also guarded on the stored lines still holding Ready (a refresh may have just written a waiting line and not
+   * yet moved the order), so two presses at once end the stay once; the Bed Agent's own guard (admission plus bed) is
+   * the second line. The bed is freed through `BedsService.discharge` (the admission discharged at this moment, the bed
+   * to cleaning, the patient's status, `bed.discharged`). If it fails, the stored stay decides (review I1): untouched,
+   * the order is put back and the error reported; already ended (a later Bed Agent step failed), the leaving stands.
+   * Then the plan completes with the kind and `discharge.completed` goes.
    */
   private async leave(
     actor: Actor,
@@ -244,14 +252,21 @@ export class DischargeLeavingService {
     const [plan, admission] = await Promise.all([this.planOf(fresh.plan), this.admissionOf(fresh.admission)]);
     const now = this.clock();
     const ended = await this.orders
-      .findOneAndUpdate({ _id: fresh._id, state: 'ready' }, { $set: { state: 'left', leftAt: now, leftBy: by(actor), endedAs: fresh.kind } }, { new: true })
+      .findOneAndUpdate(
+        { _id: fresh._id, state: 'ready', ...readyLinesFilter(fresh.kind) },
+        { $set: { state: 'left', leftAt: now, leftBy: by(actor), endedAs: fresh.kind } },
+        { new: true },
+      )
       .exec();
     if (!ended) throw await this.lost(fresh._id);
     try {
       await this.beds.discharge(String(admission.bed), actor, String(fresh.admission), { viaDischarge: true, at: now, patientStatus });
     } catch (e) {
-      await this.reopen(ended._id, now, 'ready');
-      throw e;
+      if (await this.stayUntouched(fresh.admission)) {
+        await this.reopen(ended._id, now, 'ready');
+        throw e;
+      }
+      this.logger.error(`Discharge order ${String(ended._id)}: the stay ended, but a later Bed Agent step failed (${(e as Error).message}); the leaving stands`);
     }
     await this.complete(plan, fresh.kind, now);
     await this.announce(plan, ended, fresh.kind, now, what);
@@ -266,7 +281,8 @@ export class DischargeLeavingService {
    * Agent at the last-seen time, which stops bed days there, and the patient's status says what happened. The plan
    * completes with that kind, an escalation goes to the Duty administrator (the reason stays on the plan, never in the
    * escalation), and `discharge.completed` stops the clocks (`orderId` is '' with no order). Revenue asks for the final
-   * bill on its own `bed.discharged`. A bed that cannot be freed undoes the claim and the order.
+   * bill on its own `bed.discharged`. 409 for a death order (R44: use Body released). A Bed Agent failure that left the
+   * stay untouched undoes the claim and the order; one after the stay ended lets it stand (review I1).
    */
   async leftWithoutDischarge(actor: Actor, planId: string, input: LeftWithoutDischargeInput): Promise<DischargePlanDocument> {
     if (!actor || !WARD_ROLES.includes(actor.role)) throw new ForbiddenException('Only a nurse or an admin can record a patient who left without discharge.');
@@ -280,6 +296,7 @@ export class DischargeLeavingService {
     if (lastSeenAt.getTime() > now.getTime()) throw new BadRequestException('The last-seen time cannot be in the future.');
     if (lastSeenAt.getTime() < new Date(admission.admittedAt).getTime()) throw new BadRequestException('The last-seen time cannot be before the admission.');
     if (admission.status !== 'active') throw new ConflictException('This stay has already ended.');
+    if (await this.orders.exists({ plan: plan._id, state: { $in: OPEN_ORDER_STATES }, kind: 'died' }).exec()) throw new ConflictException(DEATH_IS_RELEASED);
 
     // `null` also matches a plan with no record at all.
     const claimed = await this.plans
@@ -294,18 +311,34 @@ export class DischargeLeavingService {
       throw new ConflictException(state === 'completed' ? PLAN_COMPLETE : 'Someone is recording this already. Reload and try again.');
     }
     let ended: DischargeOrderDocument | null = null;
-    try {
-      ended = await this.endWithout(claimed._id as Types.ObjectId, lastSeenAt, actor);
-      // A Patient left (or Body released) in progress holds the order: that one ends the stay.
-      if (!ended && (await this.orders.exists({ plan: claimed._id, state: 'left' }).exec())) throw new ConflictException(ALREADY_LEFT);
-      await this.beds.discharge(String(admission.bed), actor, String(plan.admission), { viaDischarge: true, at: lastSeenAt, patientStatus: 'Left without discharge' });
-    } catch (e) {
+    /** Undoes what this call changed: the order back as it was, and the claim. */
+    const undo = async () => {
       if (ended) await this.reopen(ended._id as Types.ObjectId, lastSeenAt, ended.state);
       await this.plans
         .updateOne({ _id: claimed._id, 'leftWithoutDischarge.at': now, 'leftWithoutDischarge.by.id': actor.id }, { $unset: { leftWithoutDischarge: 1 } })
         .exec()
-        .catch((err: Error) => this.logger.error(`Discharge plan ${String(claimed._id)}: Left without discharge not undone after the bed failed (${err.message})`));
+        .catch((err: Error) => this.logger.error(`Discharge plan ${String(claimed._id)}: Left without discharge not undone (${err.message})`));
+    };
+    try {
+      ended = await this.endWithout(claimed._id as Types.ObjectId, lastSeenAt, actor);
+      if (!ended) {
+        // A Patient left (or Body released) in progress holds the order: that one ends the stay.
+        if (await this.orders.exists({ plan: claimed._id, state: 'left' }).exec()) throw new ConflictException(ALREADY_LEFT);
+        // R44: a death order given after the check above.
+        if (await this.orders.exists({ plan: claimed._id, state: { $in: OPEN_ORDER_STATES }, kind: 'died' }).exec()) throw new ConflictException(DEATH_IS_RELEASED);
+      }
+    } catch (e) {
+      await undo();
       throw e;
+    }
+    try {
+      await this.beds.discharge(String(admission.bed), actor, String(plan.admission), { viaDischarge: true, at: lastSeenAt, patientStatus: 'Left without discharge' });
+    } catch (e) {
+      if (await this.stayUntouched(plan.admission)) {
+        await undo();
+        throw e;
+      }
+      this.logger.error(`Discharge plan ${String(claimed._id)}: the stay ended, but a later Bed Agent step failed (${(e as Error).message}); Left without discharge stands`);
     }
     await this.complete(claimed, LEFT_WITHOUT, lastSeenAt);
     // An order the doctor gave while this was being recorded (after the check above) is ended the same way.
@@ -321,11 +354,14 @@ export class DischargeLeavingService {
     return this.planOf(claimed._id as Types.ObjectId);
   }
 
-  /** Ends the plan's open order as Left without discharge, in one guarded move. Returns the order as it was before, or null. */
+  /**
+   * Ends the plan's open order as Left without discharge, in one guarded move; never a death order (R44). Returns the
+   * order as it was before, or null.
+   */
   private endWithout(planId: Types.ObjectId, lastSeenAt: Date, actor: Actor): Promise<DischargeOrderDocument | null> {
     return this.orders
       .findOneAndUpdate(
-        { plan: planId, state: { $in: OPEN_ORDER_STATES } },
+        { plan: planId, state: { $in: OPEN_ORDER_STATES }, kind: { $ne: 'died' } },
         { $set: { state: 'left', leftAt: lastSeenAt, leftBy: by(actor), endedAs: LEFT_WITHOUT } },
         { new: false },
       )
@@ -381,6 +417,23 @@ export class DischargeLeavingService {
       if (sent) await this.orders.updateOne({ _id: order._id }, { $addToSet: { announced: COMPLETED } }).exec();
       if (order.windowOpenedAt && !order.announced.includes(WINDOW_OPENED)) await this.ordersService.stopDueAgain(order._id as Types.ObjectId, 'left');
     });
+  }
+
+  /**
+   * Review I1: after `BedsService.discharge` threw, whether the stay is exactly as it was, read from the stored records:
+   * the admission still active and its bed still holding it. Its writes go bed, admission, patient status, message, so
+   * a throw after the first leaves the stay ended, and putting the order back would loop on "not occupied" forever. A
+   * read that fails counts as untouched: the order is put back, and a retry decides from the records again.
+   */
+  private async stayUntouched(admissionId: Types.ObjectId): Promise<boolean> {
+    try {
+      const admission = await this.admissions.findById(admissionId).select('status bed').lean<{ status?: string; bed?: Types.ObjectId }>().exec();
+      if (admission?.status !== 'active' || !admission.bed) return false;
+      return !!(await this.bedDocs.exists({ _id: admission.bed, admission: admissionId }).exec());
+    } catch (e) {
+      this.logger.error(`Admission ${String(admissionId)}: not read after the Bed Agent failed (${(e as Error).message}); treated as untouched`);
+      return true;
+    }
   }
 
   /** Puts an order the bed could not follow back as it was. Logged when even that fails. */
