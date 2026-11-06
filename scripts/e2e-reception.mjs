@@ -16,6 +16,7 @@ const LABEL = /^[A-Z][A-Z0-9]{0,2}-\d{3}$/;
 let passed = 0;
 let failed = 0;
 let adminToken = '';
+let adminUser = null;
 let kioskKey = '';
 let kioskId = '';
 let displayKey = '';
@@ -87,7 +88,7 @@ async function bookToday(patient) {
  * The Revenue Agent has the paid visit (R26): one consultation line (the appointment's own check-in charge, or the visit's),
  * the kiosk payment for the fee, and nothing due. `appointmentId` set: the visit checked that appointment in.
  */
-async function checkRevenue(paid, appointmentId) {
+async function checkRevenue(paid, appointmentId, cash = false) {
   // Revenue's own check-in hook runs on its own; give it time to (wrongly) add a second line.
   if (appointmentId) await sleep(1000);
   const found = await must('find the bill', admin('GET', `/revenue/bills?q=${encodeURIComponent(paid?.billNumber ?? '')}`));
@@ -101,7 +102,9 @@ async function checkRevenue(paid, appointmentId) {
   ok(`bill kind is ${appointmentId ? 'opd' : 'walk-in'}`, view.bill.kind === (appointmentId ? 'opd' : 'walk-in') && (!appointmentId || String(view.bill.appointment) === appointmentId), view.bill.kind);
   const kioskPay = view.payments.filter((p) => p.source === `op-visit:${paid.id}`);
   ok('one kiosk payment of 300 with its receipt', kioskPay.length === 1 && kioskPay[0].mode === 'kiosk' && kioskPay[0].amount === 300 && kioskPay[0].receiptNumber === paid.receiptNumber, kioskPay);
-  ok('the payment is recorded by the kiosk device', kioskPay[0]?.by?.id === kioskId && /^Kiosk: /.test(kioskPay[0]?.by?.name ?? ''), kioskPay[0]?.by);
+  // R34: cash is the staff member who confirmed it at the counter; UPI and card the kiosk device.
+  if (cash) ok('the payment is the staff member who took the cash', kioskPay[0]?.by?.id === adminUser?.id && kioskPay[0]?.by?.name === adminUser?.name, kioskPay[0]?.by);
+  else ok('the payment is recorded by the kiosk device', kioskPay[0]?.by?.id === kioskId && /^Kiosk: /.test(kioskPay[0]?.by?.name ?? ''), kioskPay[0]?.by);
   ok('balance 0', view.bill.totals.balance === 0, view.bill.totals);
   return kioskPay[0];
 }
@@ -115,6 +118,7 @@ async function setup() {
   const login = await call('POST', '/auth/login', { body: { email: 'admin@medios.ai', password: 'Admin@123' } });
   if (login.status >= 300) throw new Error(`admin login failed: ${login.status}`);
   adminToken = login.data.accessToken;
+  adminUser = login.data.user;
   // Each device's id is kept the moment it exists, so cleanup removes it even if a later step fails.
   const d = await must('create kiosk', admin('POST', '/queue/displays', { name: 'E2E kiosk', kind: 'kiosk' }));
   kioskId = d?.display?.id ?? d?.display?._id ?? '';
@@ -216,8 +220,8 @@ async function main() {
     otpToken = paid?.token?.label;
     const appt = await admin('GET', `/appointments/${appointmentId}`);
     ok('the appointment with that doctor is Checked In', appt.data?.status === 'Checked In', appt.data?.status);
-    const pay = await checkRevenue(paid, appointmentId);
-    ok('the payment says cash at the counter, and who took it', /^Cash at counter · .+$/.test(pay?.reference ?? ''), pay?.reference);
+    const pay = await checkRevenue(paid, appointmentId, true);
+    ok('the payment says cash at the counter', pay?.reference === 'Cash at counter', pay?.reference);
     const old = await admin('GET', `/billing/invoices?uhid=${picked.uhid}`);
     const olds = Array.isArray(old.data) ? old.data : [];
     ok('no old invoice is written for the visit', !olds.some((i) => JSON.stringify(i).includes(paid?.opNumber ?? '\u0000')), olds.length);

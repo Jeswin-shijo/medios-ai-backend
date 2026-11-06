@@ -22,11 +22,11 @@ export interface PaymentInput {
 /** A payment the reception kiosk took. */
 export interface KioskPaymentInput {
   amount: number;
-  /** How the patient paid, as the receipt shows it: `Cash at counter · <who took it>`, `UPI · <ref> · SAMPLE`. */
+  /** How the patient paid, as the receipt shows it: `Cash at counter`, `UPI · <ref> · SAMPLE`. */
   reference: string;
   /** One payment per source: `op-visit:<id>`. */
   source: string;
-  /** The kiosk device the visit was booked and paid on (R33). */
+  /** Who received it (R34): for cash the staff member who took it at the counter, for UPI and card the kiosk device. */
   by: { id: string; name: string };
   /** When the money came in (clinic clock). */
   at: Date;

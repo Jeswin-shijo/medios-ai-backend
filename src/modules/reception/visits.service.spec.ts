@@ -33,6 +33,9 @@ const savedClinicDate = process.env.CLINIC_DATE;
 process.env.CLINIC_DATE = '2026-09-26';
 
 const kiosk: KioskRef = { id: 'k1', name: 'Front kiosk' };
+/** Staff members who take cash at the counter (R34: the payment is theirs). */
+const ANITA = { id: 'u-anita', name: 'Anita' };
+const RAVI = { id: 'u-ravi', name: 'Ravi' };
 const otherKiosk: KioskRef = { id: 'k2', name: 'Side kiosk' };
 
 const responseOf = (error: unknown) => (error as { getResponse(): Record<string, any> }).getResponse();
@@ -168,7 +171,7 @@ describe('OpVisitsService', () => {
     assert.equal(cash.expiresAt, new Date(clock.getTime() + 30 * 60_000).toISOString());
     assert.deepEqual((await service.list({ status: 'awaiting-cash' })).map((v) => v.id), [visit.id]);
 
-    const paid = await service.confirmCash(visit.id, 'Anita');
+    const paid = await service.confirmCash(visit.id, ANITA);
     assert.equal(paid.status, 'paid');
     assert.equal(paid.opNumber, 'OP-20260926-0001');
     assert.equal(paid.token?.label, 'G-001');
@@ -197,8 +200,8 @@ describe('OpVisitsService', () => {
     assert.equal(payments.length, 1);
     assert.deepEqual(
       { receipt: payments[0].receiptNumber, amount: payments[0].amount, mode: payments[0].mode, kind: payments[0].kind, reference: payments[0].reference, by: { id: payments[0].by.id, name: payments[0].by.name } },
-      // Recorded by the kiosk device (R33); the reference says who took the cash at the counter.
-      { receipt: 'RC-0001', amount: 300, mode: 'kiosk', kind: 'settlement', reference: 'Cash at counter · Anita', by: { id: 'k1', name: 'Kiosk: Front kiosk' } },
+      // R34: cash is the staff member who took it at the counter (the drawer is reconciled per person).
+      { receipt: 'RC-0001', amount: 300, mode: 'kiosk', kind: 'settlement', reference: 'Cash at counter', by: { id: 'u-anita', name: 'Anita' } },
     );
 
     const tokens = await m().QueueToken.find({}).lean();
@@ -209,10 +212,11 @@ describe('OpVisitsService', () => {
     assert.equal(stored!.tokenId, String(tokens[0]._id));
     assert.equal(stored!.billId, String(bill!._id));
     assert.equal(stored!.confirmedBy, 'Anita');
+    assert.equal(stored!.confirmedById, 'u-anita');
 
     // Paid is final: no cancel, and a second confirm changes nothing.
     await rejectsWith(service.cancel(visit.id, { actor: 'Ravi' }), 'VISIT_CLOSED');
-    assert.equal((await service.confirmCash(visit.id, 'Ravi')).opNumber, 'OP-20260926-0001');
+    assert.equal((await service.confirmCash(visit.id, RAVI)).opNumber, 'OP-20260926-0001');
     assert.equal((await m().OpVisit.findById(visit.id).lean())!.status, 'paid');
   });
 
@@ -256,7 +260,7 @@ describe('OpVisitsService', () => {
     for (let i = 0; i < 8; i++) {
       const uhid = `R${i}`;
       const visit = await visitWith(uhid, 'CASH');
-      const confirm = () => service.confirmCash(visit.id, 'Anita');
+      const confirm = () => service.confirmCash(visit.id, ANITA);
       const cancel = () => service.cancel(visit.id, { actor: 'Ravi' });
       const [first, second] = await Promise.allSettled(i % 2 ? [confirm(), cancel()] : [cancel(), confirm()]);
       const [confirmed, cancelled] = i % 2 ? [first, second] : [second, first];
@@ -349,7 +353,7 @@ describe('OpVisitsService', () => {
   test('doctor deactivated between booking and payment still gets a token and a bill', async () => {
     const visit = await visitWith('U1', 'CASH', docB);
     await m().OpDoctor.updateOne({ _id: docB }, { $set: { active: false } });
-    const paid = await service.confirmCash(visit.id, 'Anita');
+    const paid = await service.confirmCash(visit.id, ANITA);
     assert.equal(paid.status, 'paid');
     assert.equal(paid.opNumber, 'OP-20260926-0001');
     assert.equal(paid.token?.label, 'G2-001');
@@ -458,7 +462,7 @@ describe('OpVisitsService', () => {
   test('cash confirm is refused once the patient switched to UPI', async () => {
     const visit = await visitWith('U1', 'CASH');
     await service.pay(kiosk, visit.id, 'UPI');
-    await assert.rejects(service.confirmCash(visit.id, 'Anita'), (e) => {
+    await assert.rejects(service.confirmCash(visit.id, ANITA), (e) => {
       assert.equal(statusOf(e), 409);
       assert.equal(responseOf(e).message, 'This visit is not waiting for a cash payment.');
       return true;
@@ -515,7 +519,7 @@ describe('OpVisitsService', () => {
     // Cash waits 30 minutes for the counter; a confirm after that is refused.
     const cash = await visitWith('U3', 'CASH');
     advance(30 * 60 + 1);
-    await rejectsWith(service.confirmCash(cash.id, 'Anita'), 'VISIT_CLOSED');
+    await rejectsWith(service.confirmCash(cash.id, ANITA), 'VISIT_CLOSED');
     assert.equal((await m().OpVisit.findById(cash.id).lean())!.status, 'expired');
     assert.equal(await m().QueueToken.countDocuments({}), 0);
   });
@@ -665,6 +669,8 @@ describe('OpVisitsService', () => {
       assert.equal(payments.length, 1);
       assert.deepEqual([payments[0].mode, payments[0].amount, payments[0].kind], ['kiosk', 300, 'settlement']);
       assert.equal(payments[0].reference, `UPI · ${paid.transactionId} · SAMPLE`);
+      // R34: UPI and card are recorded by the kiosk device.
+      assert.deepEqual({ id: payments[0].by.id, name: payments[0].by.name }, { id: 'k1', name: 'Kiosk: Front kiosk' });
       assert.equal(String(payments[0].bill), String(all[0].bill));
       assert.equal(bill!.kind, 'opd');
       assert.equal(String(bill!.appointment), String(appointment._id));
@@ -679,13 +685,13 @@ describe('OpVisitsService', () => {
   test("a visit with another doctor than the appointment's leaves the appointment alone and charges the visit's doctor", async () => {
     const appointment = await appointmentFor('U1', docA, 'Dr. A');
     const visit = await visitWith('U1', 'CASH', docB);
-    const paid = await service.confirmCash(visit.id, 'Anita');
+    const paid = await service.confirmCash(visit.id, ANITA);
     assert.equal(paid.token?.label, 'G2-001');
     assert.equal((await m().Appointment.findById(appointment._id).lean())!.status, 'Scheduled');
     assert.equal(await m().ChargeLine.countDocuments({ 'source.type': 'opd-fee' }), 0);
     const { payments, bill, lines } = await revenueOf(visit.id);
     assert.deepEqual(lines.map((l) => [l.name, l.amount, l.source.type, l.source.ref]), [['Consultation - Dr. B', 450, 'op-visit', visit.id]]);
-    assert.deepEqual(payments.map((p) => [p.amount, p.reference, p.by.id, p.by.name]), [[450, 'Cash at counter · Anita', 'k1', 'Kiosk: Front kiosk']]);
+    assert.deepEqual(payments.map((p) => [p.amount, p.reference, p.by.id, p.by.name]), [[450, 'Cash at counter', 'u-anita', 'Anita']]);
     assert.equal(bill!.kind, 'walk-in');
     assert.equal(bill!.totals.balance, 0);
   });
@@ -714,7 +720,7 @@ describe('OpVisitsService', () => {
   test("a walk-in visit's bill settles once its token is called and marked done", () =>
     withRevenueEvents(async () => {
       const visit = await visitWith('U1', 'CASH');
-      await service.confirmCash(visit.id, 'Anita');
+      await service.confirmCash(visit.id, ANITA);
       const paid = await kioskBill(visit.id);
       assert.deepEqual([paid!.kind, paid!.state, paid!.totals.balance], ['walk-in', 'open', 0]);
       const token = (await m().QueueToken.findOne({ uhid: 'U1' }).lean())!;
@@ -732,7 +738,7 @@ describe('OpVisitsService', () => {
     withRevenueEvents(async () => {
       const appointment = await appointmentFor('U1', docA, 'Dr. A');
       const visit = await visitWith('U1', 'CASH', docB);
-      await service.confirmCash(visit.id, 'Anita');
+      await service.confirmCash(visit.id, ANITA);
       await seeAndFinish(visit.id);
       const bill = await kioskBill(visit.id);
       assert.deepEqual([bill!.kind, bill!.state, bill!.totals.balance], ['walk-in', 'settled', 0]);
@@ -743,9 +749,9 @@ describe('OpVisitsService', () => {
     withRevenueEvents(async () => {
       await m().OpDoctor.updateOne({ _id: docB }, { $set: { fee: 0 } });
       const free = await visitWith('U1', 'CASH', docB);
-      await service.confirmCash(free.id, 'Anita');
+      await service.confirmCash(free.id, ANITA);
       const owing = await visitWith('U2', 'CASH');
-      await service.confirmCash(owing.id, 'Anita');
+      await service.confirmCash(owing.id, ANITA);
       const owingBill = (await kioskBill(owing.id))!;
       await revenueBills.addCharge(String(owingBill._id), { code: 'misc', name: 'Dressing', category: 'other', qty: 1, unitPrice: 50, source: { type: 'manual', ref: 'dressing-1' }, by: { name: 'Desk' } });
       await seeAndFinish(free.id);
@@ -778,7 +784,7 @@ describe('OpVisitsService', () => {
     revenueOpd.onModuleInit(); // the async check-in hook, as in the app
     try {
       const visit = await visitWith('U1', 'CASH', docA);
-      const paid = await service.confirmCash(visit.id, 'Anita');
+      const paid = await service.confirmCash(visit.id, ANITA);
       assert.equal(paid.token?.label, 'G-001');
       const moved = (await m().Appointment.findById(appointment._id).lean())!;
       assert.deepEqual([moved.status, moved.doctorId, moved.doctorName], ['Checked In', docA, 'Dr. A']);
@@ -793,6 +799,21 @@ describe('OpVisitsService', () => {
     } finally {
       revenueOpd.onModuleDestroy();
     }
+  });
+
+  test('a cash payment retried after a Revenue failure still carries the staff member who confirmed it (R34)', async () => {
+    (service as unknown as { logger: { warn(message: string): void } }).logger = { warn: () => undefined };
+    const record = revenue.record;
+    revenue.record = async () => {
+      throw new Error('revenue unavailable');
+    };
+    const visit = await visitWith('U1', 'CASH');
+    const paid = await service.confirmCash(visit.id, ANITA);
+    assert.deepEqual([paid.token?.label, paid.billNumber], ['G-001', undefined]);
+    revenue.record = record;
+    await service.finishStuck(); // the minute pass
+    const { payments } = await revenueOf(visit.id);
+    assert.deepEqual(payments.map((p) => [p.reference, p.by.id, p.by.name]), [['Cash at counter', 'u-anita', 'Anita']]);
   });
 
   test('a Revenue failure never holds back the token; the payment is recorded on a later try', async () => {

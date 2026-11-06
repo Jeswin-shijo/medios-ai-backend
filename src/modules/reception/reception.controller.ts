@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { actorOf } from '../beds/actor';
 import { UserRole } from '../users/schemas/user.schema';
 import { VisitsQueryDto } from './dto/reception.dto';
 import { OpVisitsService } from './visits.service';
@@ -38,8 +39,10 @@ export class ReceptionController {
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.ADMIN, UserRole.STAFF)
   @ApiOperation({ summary: 'The cash was taken at the counter: pay the visit, issue the token and bill' })
-  confirmCash(@Param('id') id: string, @CurrentUser('name') user: string) {
-    return this.visits.confirmCash(id, user || 'Front desk');
+  confirmCash(@Param('id') id: string, @CurrentUser() user: unknown) {
+    // R34: the cash payment is recorded as the confirming staff member's, by id and name.
+    const staff = actorOf(user);
+    return this.visits.confirmCash(id, { id: staff.id, name: staff.name || 'Front desk' });
   }
 
   @Post('visits/:id/cancel')

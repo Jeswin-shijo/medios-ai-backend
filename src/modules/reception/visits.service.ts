@@ -65,12 +65,20 @@ const daysBefore = (day: string, n: number) => {
 };
 /**
  * How the patient paid, for the Revenue receipt: the payment's mode is `kiosk`, so the real method and its reference
- * go here, and sample mode says so. The payment is the kiosk's (R33), so cash names the staff member who took it.
+ * go here, and sample mode says so.
  */
 const paymentReference = (visit: OpVisit) =>
   visit.method === 'CASH'
-    ? ['Cash at counter', visit.confirmedBy].filter(Boolean).join(' · ')
+    ? 'Cash at counter'
     : [MODE[visit.method!], visit.transactionId || visit.orderId, visit.provider === 'sample' ? 'SAMPLE' : ''].filter(Boolean).join(' · ');
+/**
+ * Who received the payment (R34): cash, the staff member who took it at the counter, as the drawer is reconciled per
+ * person; UPI and card, the kiosk device.
+ */
+const receivedBy = (visit: OpVisit) =>
+  visit.method === 'CASH'
+    ? { id: visit.confirmedById ?? '', name: visit.confirmedBy || 'Front desk' }
+    : { id: visit.kioskId, name: kioskActor({ id: visit.kioskId, name: visit.kioskName }) };
 const isDuplicate = (err: unknown) => err instanceof mongo.MongoServerError && err.code === 11000;
 /** Paid and given everything payment brings: the OP number, the token and the bill. */
 const isFinished = (visit: OpVisit) => Boolean(visit.opNumber && visit.tokenId && visit.billId);
@@ -238,9 +246,9 @@ export class OpVisitsService {
     return this.completeWith(visitId, by, PAYMENT_METHODS);
   }
 
-  /** Staff took the cash at the counter. Also works after the kiosk has moved on. */
-  confirmCash(visitId: string, actor: string): Promise<VisitView> {
-    return this.completeWith(visitId, { actor }, ['CASH']);
+  /** Staff took the cash at the counter; the visit keeps who (id and name), and the payment is theirs. Also works after the kiosk has moved on. */
+  confirmCash(visitId: string, staff: { id: string; name: string }): Promise<VisitView> {
+    return this.completeWith(visitId, { actor: staff.name, staffId: staff.id }, ['CASH']);
   }
 
   /**
@@ -294,7 +302,7 @@ export class OpVisitsService {
 
   // ---------------------------------------------------------------- completion
 
-  private async completeWith(visitId: string, by: { actor: string; transactionId?: string }, methods: readonly PaymentMethod[]): Promise<VisitView> {
+  private async completeWith(visitId: string, by: { actor: string; staffId?: string; transactionId?: string }, methods: readonly PaymentMethod[]): Promise<VisitView> {
     const id = this.visitId(visitId);
     const now = this.now();
     // The one switch every completion, cancel and expiry races on.
@@ -306,6 +314,7 @@ export class OpVisitsService {
             status: 'paid',
             paidAt: now,
             confirmedBy: by.actor,
+            ...(by.staffId ? { confirmedById: by.staffId } : {}),
             finishingUntil: after(now, FINISH_LEASE_MS),
             ...(by.transactionId ? { transactionId: by.transactionId } : {}),
           },
@@ -444,8 +453,8 @@ export class OpVisitsService {
       day: visit.date,
       appointmentId,
       reference: paymentReference(visit),
-      // The kiosk device records the payment (R33); who confirmed it stays in the visit's history.
-      by: { id: visit.kioskId, name: kioskActor({ id: visit.kioskId, name: visit.kioskName }) },
+      // Read from the visit, so a retry or heal records the same person (R34).
+      by: receivedBy(visit),
       at: clinicNow(visit.paidAt ?? this.now()),
     });
     const event = record.receiptNumber

@@ -89,6 +89,10 @@ export class OpVisit {
   @Prop()
   confirmedBy?: string;
 
+  /** Cash only: the user id of the staff member who took it at the counter (`confirmedBy` is their name); the payment is theirs (R34). */
+  @Prop()
+  confirmedById?: string;
+
   @Prop({ unique: true, sparse: true })
   opNumber?: string;
 
