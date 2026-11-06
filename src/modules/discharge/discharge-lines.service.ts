@@ -436,8 +436,11 @@ export class DischargeLinesService {
   /**
    * Nothing due from the patient: every admission bill of the stay (continuation bills included; never a walk-in, OPD
    * or another stay's bill) is final or settled with a balance of zero or less. A refund owed never holds it (money the
-   * hospital owes). With no bill at all it needs a person, "Check with billing", unless an admin overrode it, which
-   * holds while there is still no bill. A Transfer or a death shows it, never waits for it (see `missing`).
+   * hospital owes). R32 (Revenue's R20): an unpriced line is not "nothing due", so a final bill with a Needs price line
+   * that is not reversed waits whatever its balance, a refund owed included; a settled bill is done whatever its lines
+   * say, as settling is the desk's own decision. With no bill at all it needs a person, "Check with billing", unless an
+   * admin overrode it, which holds while there is still no bill. A Transfer or a death shows it, never waits for it
+   * (see `missing`).
    */
   private async billLine(order: LeanOrder, prev?: DischargeLineEntry): Promise<DischargeLineEntry> {
     const bills = await this.bills.find({ kind: 'admission', admission: order.admission }).select('state totals').lean<BillFacts[]>().exec();
@@ -448,20 +451,25 @@ export class DischargeLinesService {
     }
     const balance = (b: BillFacts) => b.totals?.balance ?? 0;
     const due = bills.reduce((sum, b) => sum + Math.max(0, balance(b)), 0);
+    // A settled bill's lines are never counted: the desk settled it as it was.
     const unsettled = bills.filter((b) => b.state !== 'settled').map((b) => b._id);
-    const unpriced = unsettled.length ? await this.chargeLines.countDocuments({ bill: { $in: unsettled }, needsPrice: true, reversed: { $ne: true } }).exec() : 0;
-    const priceNote = unpriced > 0 && `${plural(unpriced, 'line')} ${unpriced === 1 ? 'needs' : 'need'} a price`;
-    const clear = bills.every((b) => (b.state === 'final' || b.state === 'settled') && balance(b) <= 0);
-    if (!clear) {
-      const open = bills.some((b) => b.state === 'open');
-      return entry({ key: 'bill', state: 'waiting', detail: joined([due > 0 ? `${formatRupees(due)} due` : open && 'Final bill not prepared yet', priceNote]) });
+    const unpriced = unsettled.length
+      ? await this.chargeLines.find({ bill: { $in: unsettled }, needsPrice: true, reversed: { $ne: true } }).select('bill').lean<{ bill: Types.ObjectId }[]>().exec()
+      : [];
+    const unpricedBills = new Set(unpriced.map((l) => String(l.bill)));
+    const clear = (b: BillFacts) =>
+      balance(b) <= 0 && (b.state === 'settled' || (b.state === 'final' && !unpricedBills.has(String(b._id))));
+    if (bills.every(clear)) {
+      const head = bills.some((b) => balance(b) < 0)
+        ? 'Refund due: billing informed'
+        : bills.every((b) => b.state === 'settled')
+          ? 'Bill settled'
+          : 'Final bill ready: nothing due';
+      return entry({ key: 'bill', state: 'done', detail: head });
     }
-    const head = bills.some((b) => balance(b) < 0)
-      ? 'Refund due: billing informed'
-      : bills.every((b) => b.state === 'settled')
-        ? 'Bill settled'
-        : 'Final bill ready: nothing due';
-    return entry({ key: 'bill', state: 'done', detail: joined([head, priceNote]) });
+    const open = bills.some((b) => b.state === 'open');
+    const priceNote = unpriced.length > 0 && `${plural(unpriced.length, 'line')} ${unpriced.length === 1 ? 'needs' : 'need'} a price`;
+    return entry({ key: 'bill', state: 'waiting', detail: joined([due > 0 ? `${formatRupees(due)} due` : open && 'Final bill not prepared yet', priceNote]) });
   }
 
   /**

@@ -486,6 +486,81 @@ describe('DischargeLinesService', () => {
     await assert.rejects(lines.overrideBill(ADMIN, id, 'Nothing due'), ConflictException);
   });
 
+  test('R32: a final bill at ₹0 with an unpriced line waits, and is done once the line is priced (R44)', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(4800, 4800) });
+    const first = await unpriced(b._id);
+    await lines.refresh(id);
+    // Nothing is due on paper, but an unpriced line is not "nothing due" (Revenue R20).
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '1 line needs a price']);
+    const second = await unpriced(b._id);
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '2 lines need a price']);
+    // A reversed line no longer counts.
+    await m.ChargeLine.updateOne({ _id: second._id }, { $set: { reversed: true } });
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '1 line needs a price']);
+    // Everything else done: a Home discharge is still kept for it.
+    await sign(o._id);
+    await lines.tick(NURSE, id, 'teaching', { state: 'done' });
+    let row = await stored(id);
+    assert.deepEqual([row.state, missing(row)], ['ordered', ['bill']]);
+
+    // The desk's correction confirms the price (R44: here free, at ₹0), which clears Needs price: done, and Ready.
+    await m.ChargeLine.updateOne({ _id: first._id }, { $set: { needsPrice: false } });
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['done', 'Final bill ready: nothing due']);
+    row = await stored(id);
+    assert.equal(row.state, 'ready');
+  });
+
+  test('R32: a refund owed with an unpriced line still waits', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(4800, 6000) });
+    await unpriced(b._id);
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '1 line needs a price']);
+    // Priced: the hospital owes a refund, which never keeps the patient.
+    await m.ChargeLine.updateMany({ bill: b._id }, { $set: { needsPrice: false } });
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['done', 'Refund due: billing informed']);
+  });
+
+  test('R32: a settled bill is done whatever its lines say', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    // The desk settled it by hand with a line still unpriced: settling is the desk's own decision.
+    const b = await bill({ state: 'settled', totals: totals(4800, 4800) });
+    await unpriced(b._id);
+    await revenue('revenue.bill-settled', b, { total: 4800 });
+    assert.deepEqual(await stateOf(id, 'bill'), ['done', 'Bill settled']);
+    // A continuation bill, final with nothing due but an unpriced line of its own, waits (only its line is counted)...
+    const next = await bill({ continuationOf: b._id, state: 'final', totals: totals(200, 200) });
+    await unpriced(next._id);
+    await lines.refresh(id);
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '1 line needs a price']);
+    // ...until the desk settles it too.
+    await m.Bill.updateOne({ _id: next._id }, { $set: { state: 'settled' } });
+    await revenue('revenue.bill-settled', next, { total: 200 });
+    assert.deepEqual(await stateOf(id, 'bill'), ['done', 'Bill settled']);
+  });
+
+  test('R32: for a transfer an unpriced line shows on the bill line but never blocks Ready', async () => {
+    const o = await orders.order(DOC, planId, {
+      kind: 'transfer', plannedLeaveAt: new Date(NOW.getTime() + 60 * MIN), diagnosis: DIAGNOSIS, condition: 'stable', takeHome: 'none',
+      receivingHospital: 'Medical College Hospital, Trivandrum', transferReason: 'Cardiothoracic surgery',
+    });
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(3000, 3000) });
+    await unpriced(b._id);
+    await sign(o._id, 'transfer');
+    await lines.tick(NURSE, id, 'teaching', { state: 'done' });
+    assert.deepEqual(await stateOf(id, 'bill'), ['waiting', '1 line needs a price']);
+    assert.equal((await stored(id)).state, 'ready');
+  });
+
   // ---------- Transfer and Died ----------
 
   test('transfer is ready with a bill due', async () => {
