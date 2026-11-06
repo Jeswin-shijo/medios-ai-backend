@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { QueueService } from '../queue/queue.service';
 import { QueueEvents } from '../queue/queue-events';
-import { PatientCardsService } from '../queue/patient-cards.service';
+import { CARD_REPLACED_MESSAGE, PatientCardsService } from '../queue/patient-cards.service';
 import { OpdService } from '../opd/opd.service';
 import { SettingsService } from '../settings/settings.service';
 import { AppointmentEvents } from '../appointments/appointment-events';
@@ -100,6 +100,21 @@ describe('ReceptionIdentityService', () => {
       assert.equal(responseOf(e).message, "This card isn't linked yet. Use Find my record or ask at the counter.");
       return true;
     });
+  });
+
+  test('identifyByCard on a replaced card throws CARD_REPLACED', async () => {
+    await patient('U1');
+    await m().PatientCard.create({ cardId: '04A1B2C3', uhid: 'U1', linkedBy: 't', status: 'replaced', replacedAt: new Date() } as any);
+    await m().PatientCard.create({ cardId: '04D4E5F6', uhid: 'U1', linkedBy: 't' });
+    // The desk's decimal read of the same card too.
+    for (const read of ['04A1B2C3', '0077705923']) {
+      await assert.rejects(service.identifyByCard(kiosk, read), (e) => {
+        assert.equal(codeOf(e), 'CARD_REPLACED');
+        assert.equal(responseOf(e).message, CARD_REPLACED_MESSAGE);
+        return true;
+      });
+    }
+    assert.equal((await service.identifyByCard(kiosk, '04D4E5F6')).patient.uhid, 'U1');
   });
 
   test('otp send for an unknown number sends nothing and says not found', async () => {

@@ -189,8 +189,32 @@ async function main() {
     ok('second visit refused with 409 HAS_TOKEN', v.status === 409 && errCode(v) === 'HAS_TOKEN', v.json);
   });
 
+  await section('3. A new card replaces the old one', async () => {
+    const OLD_CARD = '04A1B2C3';
+    const NEW_CARD = '04E2E0C1';
+    let newCardId = '';
+    try {
+      const linked = await admin('POST', '/queue/cards', { cardId: NEW_CARD, uhid: rekha.uhid });
+      newCardId = linked.data?.id ?? '';
+      ok('staff link a new card for Rekha S; the answer names the old card it replaced', linked.status === 201 && linked.data?.status === 'active' && JSON.stringify(linked.data?.replaced) === '["…B2C3"]', linked.json);
+      for (const [name, cardId] of [['the old card', OLD_CARD], ["the old card in the desk reader's decimal format", '0077705923']]) {
+        const old = await kiosk('POST', '/reception/kiosk/identify/card', { cardId });
+        ok(`${name} gives 404 CARD_REPLACED`, old.status === 404 && errCode(old) === 'CARD_REPLACED' && old.json?.message === 'This card has been replaced. Please use your new card or ask at the counter.', old.json);
+      }
+      const fresh = await kiosk('POST', '/reception/kiosk/identify/card', { cardId: NEW_CARD });
+      ok('the new card identifies Rekha S', fresh.status === 200 && fresh.data.patient?.uhid === rekha.uhid, fresh.json);
+      const list = await admin('GET', `/queue/cards?uhid=${rekha.uhid}`);
+      ok('the card list shows the new card active first, the old one replaced', list.data?.[0]?.cardId === NEW_CARD && list.data?.[0]?.status === 'active' && list.data?.some((c) => c.cardId === OLD_CARD && c.status === 'replaced' && c.replacedAt), list.data);
+    } finally {
+      // Rekha's demo card goes back, so the next run (and the demo) starts as before.
+      const back = await admin('POST', '/queue/cards', { cardId: OLD_CARD, uhid: rekha.uhid });
+      ok('relinking the old card makes it active again and replaces the new one', back.status === 201 && back.data?.status === 'active' && JSON.stringify(back.data?.replaced) === '["…E0C1"]', back.json);
+      if (newCardId) ok('the e2e card is unlinked', (await admin('DELETE', `/queue/cards/${newCardId}`)).status < 300);
+    }
+  });
+
   let otpToken = '';
-  await section('3. OTP path with cash, checking in an appointment with that doctor', async () => {
+  await section('4. OTP path with cash, checking in an appointment with that doctor', async () => {
     const pts = await must('list patients', admin('GET', '/patients?limit=100'));
     const list = Array.isArray(pts) ? pts : pts.patients ?? pts.items ?? pts.data ?? [];
     const digits = (p) => String(p.phone ?? '').replace(/\D/g, '').slice(-10);
@@ -229,7 +253,7 @@ async function main() {
 
   let newToken = '';
   let newBill = '';
-  await section('4. New patient with card payment (a walk-in)', async () => {
+  await section('5. New patient with card payment (a walk-in)', async () => {
     const suffix = String(Math.floor(Math.random() * 1e5)).padStart(5, '0');
     const reg = await kiosk('POST', '/reception/kiosk/register', { name: `E2E Patient ${suffix}`, phone: `90000${suffix}`, gender: 'Female', age: 31 });
     ok('registered at the kiosk', (reg.status === 200 || reg.status === 201) && !!reg.data.patient?.uhid, reg.json);
@@ -246,7 +270,7 @@ async function main() {
     ok('the payment names the card and SAMPLE', /^Card · .+ · SAMPLE$/.test(kioskPay?.reference ?? ''), kioskPay?.reference);
   });
 
-  await section('5. Cancelling', async () => {
+  await section('6. Cancelling', async () => {
     const mk = async (method) => {
       const suffix = String(Math.floor(Math.random() * 1e5)).padStart(5, '0');
       const reg = await kiosk('POST', '/reception/kiosk/register', { name: `E2E Cancel ${suffix}`, phone: `90001${suffix}`, gender: 'Male', age: 40 });
@@ -265,7 +289,7 @@ async function main() {
     ok('staff cancels the cash visit', c3.status === 200 && c3.data.status === 'cancelled', c3.json);
   });
 
-  await section('6. Refusals', async () => {
+  await section('7. Refusals', async () => {
     const u = await kiosk('POST', '/reception/kiosk/identify/card', { cardId: 'FFEEDDCC' });
     ok('unknown card gives 404 CARD_UNKNOWN', u.status === 404 && errCode(u) === 'CARD_UNKNOWN', u.json);
     const p = await kiosk('POST', '/reception/kiosk/otp/send', { phone: '9111100000' });
@@ -276,7 +300,7 @@ async function main() {
     ok('wrong kiosk key gives 401 KIOSK_REVOKED, in the words tablets match', k.status === 401 && errCode(k) === 'KIOSK_REVOKED' && /kiosk (key|link)/i.test(k.json?.message ?? ''), k.json);
   });
 
-  await section('7. A doctor on leave today (Scheduling)', async () => {
+  await section('8. A doctor on leave today (Scheduling)', async () => {
     const set = await admin('PUT', `/scheduling/doctors/${doctor.id}/profile`, { leave: [{ from: clinicDay, to: clinicDay, reason: 'E2E leave' }] });
     ok('leave saved for today', set.status === 200, set.json);
     try {
@@ -293,7 +317,7 @@ async function main() {
     }
   });
 
-  await section('8. Waiting-room display', async () => {
+  await section('9. Waiting-room display', async () => {
     const snap = await call('GET', '/queue/display/state', { auth: `Display ${displayKey}` });
     const upcoming = snap.data?.upcoming ?? [];
     for (const [name, label] of [['Rekha S', step1Token], ['OTP patient', otpToken], ['new patient', newToken]]) {
@@ -302,7 +326,7 @@ async function main() {
     }
   });
 
-  await section("9. The walk-in's bill settles once the doctor calls its token and marks it done (R30)", async () => {
+  await section("10. The walk-in's bill settles once the doctor calls its token and marks it done (R30)", async () => {
     const billOf = async () => (await must('find the walk-in bill', admin('GET', `/revenue/bills?q=${encodeURIComponent(newBill)}`))).find((b) => b.number === newBill);
     ok('before: the walk-in bill is open with nothing due', (await billOf())?.state === 'open', await billOf());
     const board = await must('the queue', admin('GET', '/queue'));
@@ -334,7 +358,7 @@ async function cleanup() {
 
 console.log('Reception kiosk end-to-end');
 try { await main(); } catch (err) { ok(`setup: ${err.message}`, false); }
-console.log('\n10. Cleanup');
+console.log('\n11. Cleanup');
 try { await cleanup(); } catch (err) { ok(`cleanup: ${err.message}`, false); }
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

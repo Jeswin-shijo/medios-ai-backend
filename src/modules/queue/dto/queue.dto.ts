@@ -108,6 +108,11 @@ export class LinkCardDto extends CardTapDto {
   @IsOptional()
   @IsBoolean()
   reassign?: boolean;
+
+  @ApiPropertyOptional({ description: "The counter tablet has just written the patient's details onto the card" })
+  @IsOptional()
+  @IsBoolean()
+  written?: boolean;
 }
 
 export class CardsQueryDto {

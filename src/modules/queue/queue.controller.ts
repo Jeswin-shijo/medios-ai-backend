@@ -109,16 +109,16 @@ export class QueueController {
 
   @Get('cards')
   @Roles(...QUEUE_STAFF)
-  @ApiOperation({ summary: "A patient's linked cards" })
+  @ApiOperation({ summary: "A patient's linked cards: the active one first, then the replaced ones" })
   listCards(@Query() query: CardsQueryDto) {
     return this.cards.list(query.uhid);
   }
 
   @Post('cards')
   @Roles(...QUEUE_STAFF)
-  @ApiOperation({ summary: 'Link a card (its serial number, as the USB reader types it) to a patient' })
+  @ApiOperation({ summary: "Link a card (its serial number, as the reader gives it) as the patient's one active card; `replaced` lists the older cards it replaced" })
   linkCard(@Body() dto: LinkCardDto, @CurrentUser('name') user: string) {
-    return this.cards.link(dto.cardId, dto.uhid, user || 'Front desk', dto.reassign === true);
+    return this.cards.link(dto.cardId, dto.uhid, user || 'Front desk', dto.reassign === true, dto.written === true);
   }
 
   @Delete('cards/:id')

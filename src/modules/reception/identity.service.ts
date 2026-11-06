@@ -77,6 +77,7 @@ export class ReceptionIdentityService {
   // ---------------------------------------------------------------- card tap
 
   async identifyByCard(kiosk: KioskRef, rawCardId: string): Promise<IdentifyResult> {
+    // A replaced card is refused there with 404 CARD_REPLACED, whichever reader format read it.
     const card = await this.cards.findByCard(rawCardId);
     const patient = card ? await this.patients.findOne({ uhid: card.uhid }).exec() : null;
     if (!patient) {
