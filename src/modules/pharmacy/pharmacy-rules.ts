@@ -20,8 +20,10 @@ export type FlagKind =
   | 'kidney'
   | 'age'
   | 'list'
-  | 'procedure';
-export type Severity = 'red' | 'amber';
+  | 'procedure'
+  | 'continues';
+/** `info` is a note, never a warning: it is never a gate, never new red, and never opens a query. */
+export type Severity = 'red' | 'amber' | 'info';
 
 export interface FlagDraft {
   key: string;
@@ -42,6 +44,10 @@ export interface CheckLine {
   dose: number | null;
   frequency: Frequency;
   doseReadable?: boolean;
+  /** Where the line sits (its order's case and setting, and whether it is a take-home order), for the continuation rule. */
+  caseId?: string;
+  takeHome?: boolean;
+  setting?: 'ER' | 'Ward' | 'OPD';
 }
 
 /**
@@ -204,9 +210,21 @@ function clashFlag(a: MedicineDef, other: MedicineDef): FlagDraft | null {
   return null;
 }
 
-function doubleFlag(a: MedicineDef, other: MedicineDef): FlagDraft | null {
+/**
+ * A take-home line and an ER or Ward line of the same case, either way round: the take-home line carries the
+ * ward medicine on at home. Two take-home lines, an OPD line, another case or an unknown case never count.
+ */
+function continues(a: CheckLine, b: CheckLine): boolean {
+  if (!a.takeHome === !b.takeHome || !a.caseId || a.caseId !== b.caseId) return false;
+  const ward = a.takeHome ? b : a;
+  return ward.setting === 'ER' || ward.setting === 'Ward';
+}
+
+/** `lines`: the two lines the medicines belong to, when known (the continuation rule needs them). */
+function doubleFlag(a: MedicineDef, other: MedicineDef, lines?: { a: CheckLine; other: CheckLine }): FlagDraft | null {
   const key = `double.${other.key}`;
   if (a.key === other.key) {
+    if (lines && continues(lines.a, lines.other)) return d(`continues.${a.key}`, 'continues', 'info', 'Continues ward medicine');
     return d(key, 'double', 'red', `Same medicine twice (${a.key})`);
   }
   const text = (words: string, first: MedicineDef, second: MedicineDef) =>
@@ -369,10 +387,10 @@ export function checkLine(
   const out: FlagDraft[] = [];
   out.push(...allergyFlags(med, patient.allergies ?? []));
 
-  const otherMeds: MedicineDef[] = [];
+  const otherMeds: { med: MedicineDef; line: CheckLine }[] = [];
   for (const o of others) {
     const m = o.medicine ? medicineByKey(o.medicine) : undefined;
-    if (m) otherMeds.push(m);
+    if (m) otherMeds.push({ med: m, line: o });
   }
   const seen = new Set<string>();
   const push = (f: FlagDraft | null) => {
@@ -381,8 +399,8 @@ export function checkLine(
       out.push(f);
     }
   };
-  for (const o of otherMeds) if (o.key !== med.key) push(clashFlag(med, o));
-  for (const o of otherMeds) push(doubleFlag(med, o));
+  for (const o of otherMeds) if (o.med.key !== med.key) push(clashFlag(med, o.med));
+  for (const o of otherMeds) push(doubleFlag(med, o.med, { a: line, other: o.line }));
 
   out.push(...doseFlags(med, line, patient));
   out.push(...kidneyFlags(line, patient));

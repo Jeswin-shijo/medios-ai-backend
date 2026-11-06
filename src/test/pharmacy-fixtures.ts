@@ -11,12 +11,14 @@ import { PatientsService } from '../modules/patients/patients.service';
 import { SettingsService } from '../modules/settings/settings.service';
 import { TimelineService } from '../modules/timeline/timeline.service';
 import { UserRole } from '../modules/users/schemas/user.schema';
+import { DISCHARGE_MESSAGE_TYPES } from '../modules/discharge/discharge-coordinator.registration';
 import { PharmacyChecksService } from '../modules/pharmacy/pharmacy-checks.service';
 import { PharmacyCoordinatorRegistration } from '../modules/pharmacy/pharmacy-coordinator.registration';
 import { LineInput, PharmacyOrdersService } from '../modules/pharmacy/pharmacy-orders.service';
 import { PharmacyProceduresService } from '../modules/pharmacy/pharmacy-procedures.service';
 import { PharmacyPatientsService } from '../modules/pharmacy/pharmacy-patients.service';
 import { PharmacySettingsService } from '../modules/pharmacy/pharmacy-settings.service';
+import { PharmacyTakeHomeService } from '../modules/pharmacy/pharmacy-take-home.service';
 
 export const DOC: Actor = { id: 'user-doc', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 export const PHARM: Actor = { id: 'user-ph', name: 'Neethu George', role: UserRole.PHARMACIST };
@@ -28,6 +30,8 @@ export const enoxaparin60: LineInput = { medicine: 'enoxaparin', product: 'enoxa
 export const ibuprofen400: LineInput = { medicine: 'ibuprofen', product: 'ibuprofen-tab-400', dose: 400, route: 'oral', frequency: 'STAT' };
 export const amoxicillin500: LineInput = { medicine: 'amoxicillin', product: 'amoxicillin-cap-500', dose: 500, route: 'oral', frequency: 'TDS', durationDays: 5 };
 export const ceftriaxone1: LineInput = { medicine: 'ceftriaxone', product: 'ceftriaxone-vial-1', dose: 1, route: 'iv', frequency: 'STAT' };
+export const pantoprazole40: LineInput = { medicine: 'pantoprazole', product: 'pantoprazole-tab-40', dose: 40, route: 'oral', frequency: 'OD', durationDays: 7 };
+export const omeprazole20: LineInput = { medicine: 'omeprazole', product: 'omeprazole-cap-20', dose: 20, route: 'oral', frequency: 'OD', durationDays: 7 };
 
 /** The pharmacy agent wired to a test database, with a stub Lab agent that can send lab.resulted. */
 export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose?: boolean } = {}) {
@@ -52,14 +56,28 @@ export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose
     closeChecks: opts.stubClose === false ? [] : [{ agent: 'lab', label: 'Keeps the test case open', check: async () => 'fail' as const }],
     status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
   });
+  // A stub Discharge agent, so a spec can send discharge.completed and discharge.cancelled.
+  registry.register({ key: 'discharge', messageTypes: DISCHARGE_MESSAGE_TYPES, status: async () => ({ open: 0, capacity: 0, onTimePct: null }) });
+  const takeHome = new PharmacyTakeHomeService(orders, checks, m.PharmacyOrder, m.PharmacyLine);
   const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });
   const patientId = String(p._id);
   const patientUhid = p.uhid;
   const w = {
-    registry, messages, escalations, clocks, cases, orders, checks, patientId, patientUhid,
+    registry, messages, escalations, clocks, cases, orders, checks, takeHome, patientId, patientUhid,
     sent: (type: string) => m.AgentMessage.find({ type }).sort({ createdAt: 1, _id: 1 }).lean().exec() as Promise<any[]>,
     clocksOf: (def: string) => m.Clock.find({ def }).sort({ startedAt: 1 }).lean().exec() as Promise<any[]>,
     openEr: () => cases.openOrJoin({ patientId, patientUhid, patientName: 'Ravi Kumar', kind: 'er', priority: 'high', openedBy: 'er' }),
+    /** An inpatient case: direct orders on it are Ward orders. */
+    openWard: (id = patientId, uhid = patientUhid, name = 'Ravi Kumar') =>
+      cases.openOrJoin({ patientId: id, patientUhid: uhid, patientName: name, kind: 'ipd', priority: 'medium', openedBy: 'bed' }),
+    /** Sends a Discharge message (its handlers run inline). Leave `caseId` out for a message with no case. */
+    discharge: (caseId: string | undefined, type: 'discharge.completed' | 'discharge.cancelled', payload: Record<string, unknown>) =>
+      messages.send({
+        ...(caseId ? { case: caseId } : {}), from: 'discharge', to: ['coordinator'], type, priority: 'medium', summary: 'GWA-12: x',
+        payload, dedupeKey: `${type}:${new Types.ObjectId()}`,
+      }),
+    /** Runs Pharmacy's own handler of a message type again, as a redelivery would. */
+    rerun: (type: string, messageId: string) => registry.subscribers(type).find((s) => s.agent === 'pharmacy')!.handler(messageId),
     lineDoc: (id: string) => m.PharmacyLine.findById(id).lean().exec() as Promise<any>,
     /** Sets up the state directly: an unconfirmed red allergy flag on a line (the order path refuses to create one). */
     redAllergy: (id: string, medicine = 'amoxicillin') =>

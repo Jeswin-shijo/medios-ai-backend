@@ -24,6 +24,10 @@ export class PharmacyOrder {
   @Prop({ default: 0 }) prescriptionRev: number;
   /** Real time: a prescription sync in progress holds this until it ends. */
   @Prop({ type: Date }) syncingUntil?: Date;
+  /** The medicines a patient leaves with, placed by the Discharge Agent (always a Ward order). */
+  @Prop({ default: false }) takeHome: boolean;
+  /** Clinic clock: when the patient is planned to leave (take-home orders only). */
+  @Prop({ type: Date }) plannedLeaveAt?: Date;
   /** Clinic clock. */
   @Prop({ required: true, type: Date }) orderedAt: Date;
   /** Real time: set after pharmacy.ordered went out. */

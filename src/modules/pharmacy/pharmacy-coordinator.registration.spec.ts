@@ -50,7 +50,7 @@ describe('PharmacyCoordinatorRegistration', () => {
     assert.deepEqual([rule.agent, rule.default, rule.locked, rule.label], ['pharmacy', true, true, 'Medicine safety checks']);
     assert.equal(rule.description, 'Check every medicine order for allergy, clashes, doubles, dose and kidney function');
 
-    for (const t of ['lab.resulted', 'er.arrived', 'bed.assigned', 'bed.transferred', 'er.left', 'bed.discharged', 'scheduling.procedure-booked', 'scheduling.procedure-cancelled', 'scheduling.procedure-bumped', 'scheduling.procedure-done']) {
+    for (const t of ['lab.resulted', 'er.arrived', 'bed.assigned', 'bed.transferred', 'er.left', 'bed.discharged', 'scheduling.procedure-booked', 'scheduling.procedure-cancelled', 'scheduling.procedure-bumped', 'scheduling.procedure-done', 'discharge.completed', 'discharge.cancelled']) {
       assert.ok(registry.subscribers(t).some((s) => s.agent === 'pharmacy'), t);
     }
     const def = registry.definitions().find((d) => d.key === 'pharmacy')!;

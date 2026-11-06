@@ -1,6 +1,6 @@
 import { medicineByKey, Priority, productByKey } from './pharmacy-catalogue';
 import type { PatientFactsView } from './pharmacy-patients.service';
-import type { Flag, FlagKind } from './pharmacy-rules';
+import type { Flag, FlagKind, Severity } from './pharmacy-rules';
 import type { PharmacyTargets } from './pharmacy-settings.service';
 import type { PharmacyLineDocument, PharmacyLineStatus } from './schemas/pharmacy-line.schema';
 import type { PharmacyOrderDocument, PharmacySetting } from './schemas/pharmacy-order.schema';
@@ -11,7 +11,7 @@ const iso = (d?: Date | null) => (d ? new Date(d).toISOString() : null);
 export interface FlagView {
   key: string;
   kind: FlagKind;
-  severity: 'red' | 'amber';
+  severity: Severity;
   text: string;
   confirmed: { by: string; reason: string; at: string } | null;
   reviewed: { by: string; at: string } | null;
@@ -37,6 +37,9 @@ export interface PharmacyLineView {
   setting: PharmacySetting;
   defaultStore: 'main' | 'er';
   source: 'order' | 'prescription';
+  /** The line is on a take-home order; `plannedLeaveAt` (ISO, clinic clock) is set only then. */
+  takeHome: boolean;
+  plannedLeaveAt?: string;
   status: PharmacyLineStatus;
   medicine: string | null;
   medicineLabel: string;
@@ -93,10 +96,17 @@ export interface PharmacyOrderView {
   priority: Priority;
   note: string;
   source: 'order' | 'prescription';
+  /** A take-home order (the Discharge Agent's); `plannedLeaveAt` (ISO, clinic clock) is set only then. */
+  takeHome: boolean;
+  plannedLeaveAt?: string;
   prescriptionId: string | null;
   orderedAt: string;
   lines: PharmacyLineView[];
 }
+
+/** The take-home fields of a view: the leaving time only on a take-home order. */
+const takeHomeOf = (o: PharmacyOrderDocument): { takeHome: boolean; plannedLeaveAt?: string } =>
+  o.takeHome ? { takeHome: true, ...(o.plannedLeaveAt ? { plannedLeaveAt: iso(o.plannedLeaveAt)! } : {}) } : { takeHome: false };
 
 /**
  * A flag as the views show it. With the line's `version`, a confirmation or review made on an older version is
@@ -137,6 +147,7 @@ export function buildLineViews(
         setting: o.setting,
         defaultStore: o.setting === 'ER' ? 'er' : 'main',
         source: o.source,
+        ...takeHomeOf(o),
         status: l.status,
         medicine: l.medicine,
         medicineLabel: l.medicine ? (medicineByKey(l.medicine)?.name ?? l.medicine) : (l.freeName ?? 'Unlisted medicine'),
@@ -209,6 +220,7 @@ export function buildOrderViews(orders: PharmacyOrderDocument[], views: Pharmacy
       priority: o.priority,
       note: o.note ?? '',
       source: o.source,
+      ...takeHomeOf(o),
       prescriptionId: o.prescription ? String(o.prescription) : null,
       orderedAt: iso(o.orderedAt)!,
       lines: views.filter((v) => v.orderId === String(o._id)),

@@ -27,6 +27,7 @@ export const HINTS: Record<FlagKind, string> = {
   age: "Check a child's dose with a paediatric reference.",
   list: 'Check this medicine by hand.',
   procedure: 'Hold metformin around the contrast dye, and check the kidney function first.',
+  continues: 'This is a note, not a warning: check the take-home dose and duration are what the patient should continue at home.',
 };
 
 /** The fixed words of a list flag, sent as they are: nothing typed by a person is ever part of them. */
@@ -103,7 +104,7 @@ export class PharmacyAiService {
     const template = templateExplain(flagText, flag.kind);
 
     let other: MedicineSent | undefined;
-    const partner = /^(clash|double)\.([a-z0-9-]+)$/.exec(flag.key)?.[2];
+    const partner = /^(clash|double|continues)\.([a-z0-9-]+)$/.exec(flag.key)?.[2];
     if (partner && medicineByKey(partner)) {
       const found = await this.lines
         .findOne({ patient: line.patient, medicine: partner, status: { $in: ACTIVE }, _id: { $ne: line._id } })

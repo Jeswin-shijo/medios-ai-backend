@@ -205,6 +205,43 @@ describe('doubles', () => {
   });
 });
 
+describe('a take-home line continuing a ward medicine (A12)', () => {
+  const ward = (over: Partial<CheckLine> = {}) => line('enoxaparin', { caseId: 'c1', setting: 'Ward', takeHome: false, ...over });
+  const home = (over: Partial<CheckLine> = {}) => line('enoxaparin', { caseId: 'c1', setting: 'Ward', takeHome: true, ...over });
+  const pair = (a: CheckLine, b: CheckLine) =>
+    checkLine(a, patient(), [b]).filter((f) => f.kind === 'double' || f.kind === 'continues').map((f) => [f.key, f.kind, f.severity, f.text]);
+  const NOTE = [['continues.enoxaparin', 'continues', 'info', 'Continues ward medicine']];
+  const RED = [['double.enoxaparin', 'double', 'red', 'Same medicine twice (enoxaparin)']];
+
+  test('a take-home line and a Ward or ER line of the same case and medicine: an info note, from either side', () => {
+    assert.deepEqual(pair(home(), ward()), NOTE);
+    assert.deepEqual(pair(ward(), home()), NOTE);
+    assert.deepEqual(pair(home(), ward({ setting: 'ER' })), NOTE);
+    assert.deepEqual(pair(ward({ setting: 'ER' }), home()), NOTE);
+  });
+  test('anything else is still the red "Same medicine twice"', () => {
+    assert.deepEqual(pair(home(), home()), RED, 'two take-home lines');
+    assert.deepEqual(pair(home(), ward({ setting: 'OPD' })), RED, 'an OPD counter line');
+    assert.deepEqual(pair(ward({ setting: 'OPD' }), home()), RED, 'an OPD counter line, other side');
+    assert.deepEqual(pair(home(), ward({ caseId: 'c2' })), RED, 'another case');
+    assert.deepEqual(pair(home({ caseId: undefined }), ward({ caseId: undefined })), RED, 'no case known');
+    assert.deepEqual(pair(home(), ward({ setting: undefined })), RED, 'no setting known');
+    assert.deepEqual(pair(ward(), ward({ setting: 'ER' })), RED, 'two ward lines');
+    assert.deepEqual(pair(line('enoxaparin'), line('enoxaparin')), RED, 'no context at all');
+  });
+  test('class doubles still apply to a take-home line', () => {
+    const ctx = { caseId: 'c1', setting: 'Ward' as const };
+    assert.deepEqual(pair(line('omeprazole', { ...ctx, takeHome: true }), line('pantoprazole', ctx)), [
+      ['double.pantoprazole', 'double', 'amber', 'Two PPIs (omeprazole with pantoprazole)'],
+    ]);
+    assert.deepEqual(pair(home(), line('heparin', ctx)), [['double.heparin', 'double', 'red', 'Two heparins (enoxaparin with heparin)']]);
+  });
+  test('an info flag is never a gate and never a new red', () => {
+    const info: Flag = { key: 'continues.enoxaparin', kind: 'continues', severity: 'info', text: 'Continues ward medicine', version: 1 };
+    assert.deepEqual([needsDoctor([info], 1), needsReason([info], 1), needsReview([info], 1), newRed([], [info])], [[], [], [], []]);
+  });
+});
+
 describe('dose', () => {
   test('aspirin 900 mg is a red single dose', () => {
     const f = checkLine(line('aspirin', { dose: 900, frequency: 'STAT' }), patient(), []);
