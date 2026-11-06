@@ -60,7 +60,7 @@ export interface GatePassView {
   admittedAt: Date;
   /** Clinic clock. */
   plannedLeaveAt: Date;
-  /** The stay's bills as they stand at this print. */
+  /** The stay's bills as they stand at this print; after leaving, the line the patient's pass said (R49). */
   billLine: GatePassBillLine;
   /** Who printed it first, and when (clinic clock): a reprint is a copy of that pass. */
   issuedBy: string;
@@ -154,26 +154,40 @@ export class DischargeLeavingService {
     if (order.kind === 'died') throw new BadRequestException('A death has no gate pass: use Body released.');
     const fresh = await this.lines.refresh(String(order._id));
     this.mustBeReady(fresh, NOT_FINISHED);
-    const [plan, admission] = await Promise.all([this.planOf(fresh.plan), this.admissionOf(fresh.admission)]);
+    const [plan, admission, billLine] = await Promise.all([this.planOf(fresh.plan), this.admissionOf(fresh.admission), this.billLine(fresh)]);
     const now = this.clock();
     let printed: DischargeOrderDocument | null = null;
     let reprint = !!fresh.gatePass?.number;
     if (!reprint) {
       const number = await this.nextNumber();
       printed = await this.orders
-        .findOneAndUpdate({ _id: fresh._id, state: 'ready', gatePass: null }, { $set: { gatePass: { number, printedAt: [now], by: by(actor) } } }, { new: true })
+        .findOneAndUpdate(
+          { _id: fresh._id, state: 'ready', gatePass: null },
+          { $set: { gatePass: { number, printedAt: [now], by: by(actor), billLine } } },
+          { new: true },
+        )
         .exec();
       // Another first print got there a moment ago: this is its reprint, and the number taken here is skipped.
       reprint = !printed;
     }
+    // R49: every print while Ready stores the money line it printed, so the pass the patient leaves with is kept.
     printed ??= await this.orders
-      .findOneAndUpdate({ _id: fresh._id, state: 'ready', 'gatePass.number': { $exists: true } }, { $push: { 'gatePass.printedAt': now } }, { new: true })
+      .findOneAndUpdate(
+        { _id: fresh._id, state: 'ready', 'gatePass.number': { $exists: true } },
+        { $push: { 'gatePass.printedAt': now }, $set: { 'gatePass.billLine': billLine } },
+        { new: true },
+      )
       .exec();
     if (!printed?.gatePass) throw await this.lost(fresh._id);
-    return this.passView(printed, reprint, plan, admission);
+    return this.passView(printed, reprint, plan, admission, billLine);
   }
 
-  /** R45: the pass of a patient who has left, printed again. The same number; each print is still recorded. */
+  /**
+   * R45: the pass of a patient who has left, printed again. The same number; each print is still recorded. R49: it is a
+   * copy of the pass the patient left with, so its money line is the one stored at the last print while Ready, never
+   * today's bills (a late charge on a continuation bill does not rewrite it). A pass printed before R49 stored none: it
+   * falls back to the bills as they stand.
+   */
   private async reprintLeft(order: DischargeOrderDocument): Promise<GatePassView> {
     if (!order.gatePass?.number) throw new ConflictException(NO_PASS);
     const [plan, admission] = await Promise.all([this.planOf(order.plan), this.admissionOf(order.admission)]);
@@ -181,13 +195,20 @@ export class DischargeLeavingService {
       .findOneAndUpdate({ _id: order._id, state: 'left', 'gatePass.number': order.gatePass.number }, { $push: { 'gatePass.printedAt': this.clock() } }, { new: true })
       .exec();
     if (!printed?.gatePass) throw await this.lost(order._id);
-    return this.passView(printed, true, plan, admission);
+    const billLine = (printed.gatePass.billLine as GatePassBillLine | undefined) ?? (await this.billLine(printed));
+    return this.passView(printed, true, plan, admission, billLine);
   }
 
-  /** What the printed pass says: the stay's facts, the first print's issuer and time, and the bills as they stand now. */
-  private async passView(printed: DischargeOrderDocument, reprint: boolean, plan: DischargePlanDocument, admission: AdmissionFacts): Promise<GatePassView> {
+  /** What the printed pass says: the stay's facts, the first print's issuer and time, and the money line given. */
+  private async passView(
+    printed: DischargeOrderDocument,
+    reprint: boolean,
+    plan: DischargePlanDocument,
+    admission: AdmissionFacts,
+    billLine: GatePassBillLine,
+  ): Promise<GatePassView> {
     const gatePass = printed.gatePass!;
-    const [config, billLine] = await Promise.all([this.settings.get(), this.billLine(printed)]);
+    const config = await this.settings.get();
     return {
       number: gatePass.number,
       reprint,

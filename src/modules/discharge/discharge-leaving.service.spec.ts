@@ -376,6 +376,32 @@ describe('DischargeLeavingService', () => {
     assert.equal((await m.CoordinatorCounter.findOne({ key: 'discharge-gatepass' }).lean<any>()).last, taken);
   });
 
+  test('R49: a reprint after leaving is a faithful copy of the pass the patient left with', async () => {
+    // Final with nothing due: the first print says so, and the pass stores it.
+    const id = await ready(homeNone(), { state: 'final', totals: totals(4200, 4200) });
+    const first = await leaving.gatePass(NURSE, id);
+    assert.deepEqual([first.number, first.reprint, first.billLine], ['GP-0001', false, 'Nothing due: BL-0001']);
+    assert.equal((await stored(id)).gatePass.billLine, 'Nothing due: BL-0001');
+    // The desk settles it before the patient goes: a reprint while Ready reads the bills again and stores the latest.
+    await m.Bill.updateOne({ number: 'BL-0001' }, { $set: { state: 'settled' } });
+    const settled = await leaving.gatePass(DESK, id);
+    assert.deepEqual([settled.number, settled.reprint, settled.billLine], ['GP-0001', true, 'Bill settled: BL-0001']);
+    assert.equal((await stored(id)).gatePass.billLine, 'Bill settled: BL-0001');
+    await leaving.left(NURSE, id);
+
+    // A late charge after leaving opens a continuation bill with money due: it never rewrites what the patient was given.
+    await bill({ totals: totals(300, 0) });
+    leaving.clock = () => at(26, 15);
+    const again = await leaving.gatePass(DESK, id);
+    assert.deepEqual([again.number, again.reprint, again.billLine, again.issuedBy], ['GP-0001', true, 'Bill settled: BL-0001', NURSE.name]);
+    const row = await stored(id);
+    assert.deepEqual([row.gatePass.billLine, row.gatePass.printedAt.length], ['Bill settled: BL-0001', 3]);
+
+    // A pass printed before the line was stored (older code): the reprint falls back to the bills as they stand.
+    await m.DischargeOrder.updateOne({ _id: id }, { $unset: { 'gatePass.billLine': 1 } });
+    assert.equal((await leaving.gatePass(DESK, id)).billLine, 'Balance due: billing informed');
+  });
+
   test('a continuation bill due after the gate pass makes left 409', async () => {
     const id = await ready();
     await leaving.gatePass(NURSE, id);

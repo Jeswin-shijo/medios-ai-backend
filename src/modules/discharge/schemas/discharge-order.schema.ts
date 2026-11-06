@@ -64,6 +64,11 @@ export class GatePass {
   /** Every print, the first included (clinic clock). */
   @Prop({ type: [Date], default: [] }) printedAt: Date[];
   @Prop({ type: ActorRefSchema, required: true }) by: ActorRef;
+  /**
+   * R49: what the pass said about money at its latest print while the order was Ready, so a reprint after leaving is
+   * a copy of the pass the patient left with, never today's bills. Absent on a pass printed before R49.
+   */
+  @Prop() billLine?: string;
 }
 export const GatePassSchema = SchemaFactory.createForClass(GatePass);
 
