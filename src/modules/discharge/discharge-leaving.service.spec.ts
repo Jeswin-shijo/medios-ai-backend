@@ -653,6 +653,67 @@ describe('DischargeLeavingService', () => {
     assert.deepEqual((await w.sent('discharge.completed')).map((x) => x.payload.orderId), [raced]);
   });
 
+  test('G1: a cancel whose plan step lands after Left without discharge completed the plan leaves it completed', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['running', 'running']);
+    // The cancel's order step lands, then Left without discharge completes the plan, then the cancel's plan step runs.
+    const realPlans = (orders as any).plans;
+    let fired = false;
+    (orders as any).plans = new Proxy(realPlans, {
+      get(target, prop) {
+        if (prop === 'updateOne') {
+          return (filter: unknown, update: { $set?: { state?: string } }, ...rest: unknown[]) => {
+            if (fired || update?.$set?.state !== 'planned') return target.updateOne(filter, update, ...rest);
+            fired = true;
+            const late = leaving
+              .leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: at(26, 10, 30) })
+              .then(() => target.updateOne(filter, update, ...rest).exec());
+            return { exec: () => late };
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+
+    await orders.cancel(DOC, id, 'Spiked a fever again');
+    assert.ok(fired, 'the interleaving happened');
+    assert.equal((await stored(id)).state, 'cancelled');
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.completedKind], ['completed', 'left-without-discharge']);
+    assert.ok(logged.some((l) => /cancelled after its stay ended/.test(l)), logged.join(' | '));
+    // The cancel still stops the order's clocks; Left without discharge found no open order.
+    assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['met', 'met']);
+    assert.deepEqual((await w.sent('discharge.completed')).map((x) => x.payload.orderId), ['']);
+  });
+
+  test('G2: an order given just as Left without discharge completes the plan is cancelled with its take-home order, and is 409', async () => {
+    const realPlace = w.takeHome.place.bind(w.takeHome);
+    // Left without discharge lands after order()'s first checks and before its plan step.
+    w.takeHome.place = async (...args: Parameters<typeof realPlace>) => {
+      await leaving.leftWithoutDischarge(NURSE, planId, { reason: 'Absconded', lastSeenAt: at(26, 10, 30) });
+      return realPlace(...args);
+    };
+    await assert.rejects(orders.order(DOC, planId, homeNone({ takeHome: { lines: [pantoprazole40] } })), (e: unknown) => {
+      assert.ok(e instanceof ConflictException, String(e));
+      assert.equal((e as ConflictException).message, 'The stay already ended');
+      return true;
+    });
+    const rows = await m.DischargeOrder.find({ plan: planId }).lean<any[]>();
+    assert.equal(rows.length, 1);
+    const [row] = rows;
+    assert.deepEqual([row.state, row.cancelled?.reason, row.cancelled?.by], ['cancelled', 'The stay already ended', { id: DOC.id, name: DOC.name }]);
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.completedKind, plan.order], ['completed', 'left-without-discharge', undefined]);
+    // Its take-home medicine is cancelled through Pharmacy; nothing was announced for it, and no clock runs.
+    const [th] = await m.PharmacyLine.find({ order: row.takeHomeOrder }).lean<any[]>();
+    assert.deepEqual([th.status, th.cancelled?.reason], ['cancelled', 'Discharge order not saved']);
+    assert.deepEqual(sends.filter((x) => x.payload.orderId === String(row._id)).map((x) => x.type), []);
+    assert.equal((await clocksOf(row._id)).length, 0);
+    assert.ok(logged.some((l) => /stay ended while it was being given/.test(l)), logged.join(' | '));
+  });
+
   test('a staff user cannot record left without discharge', async () => {
     for (const who of [DESK, DOC, PHARM, LAB]) {
       await assert.rejects(leaving.leftWithoutDischarge(who, planId, { reason: 'Absconded', lastSeenAt: at(26, 9) }), ForbiddenException, who.name);

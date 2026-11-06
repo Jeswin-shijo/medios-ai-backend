@@ -44,6 +44,8 @@ const WINDOW_OPEN_LATER = 'The discharge window is already open. Cancel and re-o
 /** The message that stops the clocks when an order ends in this state. */
 const STOP_MESSAGE: Partial<Record<OrderState, string>> = { cancelled: 'discharge.cancelled', left: 'discharge.completed' };
 const PLAN_COMPLETE = 'This discharge is complete.';
+/** G2: Left without discharge completed the plan while this order was being given. */
+const STAY_ENDED = 'The stay already ended';
 
 export interface FollowUpChoice {
   inDays: number;
@@ -251,7 +253,10 @@ export class DischargeOrdersService {
       throw e;
     }
 
-    await this.plans.updateOne({ _id: plan._id, state: { $ne: 'completed' } }, { $set: { state: 'ordered', order: saved._id } }).exec();
+    // G2: guarded on the stay not having ended. A plan still pointing at a just-cancelled order is not completed, so it
+    // takes this one; a plan Left without discharge completed after the checks above undoes the order instead.
+    const moved = await this.plans.updateOne({ _id: plan._id, state: { $ne: 'completed' } }, { $set: { state: 'ordered', order: saved._id } }).exec();
+    if (!moved.matchedCount) await this.stayEnded(actor, saved._id, placed, now);
     await this.plansService.closeReminder(String(plan._id));
     await this.announce(saved, 'discharge.ordered', plan.bedLabel, 'Discharge ordered', {
       orderId: String(saved._id), planId: String(plan._id), admissionId: String(plan.admission), bedLabel: plan.bedLabel, kind: saved.kind, plannedLeaveAt: saved.plannedLeaveAt,
@@ -369,8 +374,14 @@ export class DischargeOrdersService {
       )
       .exec();
     if (!cancelled) throw new ConflictException(stateRefusal((await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state));
-    // Only while it still points at this order: a new order given meanwhile keeps the plan.
-    await this.plans.updateOne({ _id: order.plan, order: order._id }, { $set: { state: 'planned' }, $unset: { order: 1 } }).exec();
+    // Only while it still points at this order (a new order given meanwhile keeps the plan), and never once the stay has
+    // ended (G1): Left without discharge may complete the plan between this order's cancel and this step.
+    const reopened = await this.plans
+      .updateOne({ _id: order.plan, order: order._id, state: { $ne: 'completed' } }, { $set: { state: 'planned' }, $unset: { order: 1 } })
+      .exec();
+    if (!reopened.matchedCount && (await this.plans.exists({ _id: order.plan, state: 'completed' }).exec())) {
+      this.logger.warn(`Discharge order ${String(order._id)} cancelled after its stay ended: the plan stays completed`);
+    }
     // R35: a summary signed for this discharge is no longer the patient's discharge summary.
     await this.archiveSummary(order._id);
     const bedLabel = await this.bedLabelOf(order.plan);
@@ -623,6 +634,21 @@ export class DischargeOrdersService {
       .exec()
       .catch((e: Error) => this.logger.warn(`Discharge order ${String(order._id)}: ${type} not recorded as sent (${e.message})`));
     return true;
+  }
+
+  /**
+   * G2: the stay ended (Left without discharge completed the plan) after this order's first checks. Nothing was
+   * announced for it yet, and no window opened: the order is cancelled ("The stay already ended") unless Left without
+   * discharge already ended it, its take-home order is cancelled through Pharmacy, and the doctor gets 409. A booked
+   * follow-up stays (R4).
+   */
+  private async stayEnded(actor: Actor, orderId: Types.ObjectId, placed: string | null, now: Date): Promise<never> {
+    this.logger.warn(`Discharge order ${String(orderId)}: its stay ended while it was being given; the order is cancelled`);
+    await this.orders
+      .updateOne({ _id: orderId, state: { $in: OPEN_ORDER_STATES } }, { $set: { state: 'cancelled', cancelled: { by: by(actor), reason: STAY_ENDED, at: now } } })
+      .exec();
+    if (placed) await this.undoTakeHome(placed);
+    throw new ConflictException(STAY_ENDED);
   }
 
   /** Cancels a take-home order whose discharge order was not saved. A failure is logged: the caller's error matters more. */
