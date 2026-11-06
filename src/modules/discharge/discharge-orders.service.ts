@@ -36,7 +36,11 @@ const TEXT_MAX = 300;
 const NOTE_MAX = 1000;
 const FOLLOW_UP_NOTE_MAX = 300;
 const NOT_SAVED = 'Discharge order not saved';
+const DEATH_LEAVES_NOW = 'After a death the leaving time is the time of the order.';
 const ALREADY_ORDERED = 'This stay already has a discharge order.';
+const WINDOW_OPEN_LATER = 'The discharge window is already open. Cancel and re-order to leave later.';
+/** The message that stops the clocks when an order ends in this state. */
+const STOP_MESSAGE: Partial<Record<OrderState, string>> = { cancelled: 'discharge.cancelled', left: 'discharge.completed' };
 const PLAN_COMPLETE = 'This discharge is complete.';
 
 export interface FollowUpChoice {
@@ -261,9 +265,12 @@ export class DischargeOrdersService {
     const died = order.kind === 'died';
     const set: Record<string, unknown> = {};
     let planned: Date | null = null;
+    const { leaveMinutes } = await this.settings.get();
     if (patch.plannedLeaveAt !== undefined) {
-      if (died) throw new BadRequestException('After a death the leaving time is the time of the order.');
+      if (died) throw new BadRequestException(DEATH_LEAVES_NOW);
       planned = leavingTime(patch.plannedLeaveAt, now);
+      // R29: an open window's clocks are fixed; the time may move earlier, or within the target, never past it.
+      if (order.windowOpenedAt && planned.getTime() > order.windowAt.getTime() + leaveMinutes * MIN_MS) throw new ConflictException(WINDOW_OPEN_LATER);
       set.plannedLeaveAt = planned;
     }
     if (patch.diagnosis !== undefined) set.diagnosis = text(patch.diagnosis, 'The diagnosis', 1, TEXT_MAX);
@@ -322,7 +329,6 @@ export class DischargeOrdersService {
       this.touchBeds();
       // A window not open yet moves with the planned time; one opened, or started early, stays.
       if (!order.windowOpenedAt && !order.startedNow) {
-        const { leaveMinutes } = await this.settings.get();
         const windowAt = windowStart(order.orderedAt, planned, leaveMinutes);
         const moved = await this.orders.updateOne({ _id: order._id, windowOpenedAt: null, startedNow: null }, { $set: { windowAt } }).exec();
         if (moved.matchedCount && windowAt.getTime() <= now.getTime()) await this.openWindow(order._id, now);
@@ -354,6 +360,9 @@ export class DischargeOrdersService {
     const bedLabel = await this.bedLabelOf(order.plan);
     if (bedLabel) {
       await this.announce(cancelled, 'discharge.cancelled', bedLabel, 'Discharge cancelled', { orderId: String(order._id), admissionId: String(order.admission), bedLabel });
+      // A window claimed but not yet announced was opening as this cancel landed: its window-opened may be stored after
+      // this stop, starting clocks nothing stops. Whichever of the two finishes last leaves the stop due again (I1).
+      if (cancelled.windowOpenedAt && !cancelled.announced.includes('discharge.window-opened')) await this.stopDueAgain(order._id, 'cancelled');
     }
     this.touchBeds();
     return this.reread(order._id);
@@ -403,8 +412,10 @@ export class DischargeOrdersService {
     return opened;
   }
 
-  /** The order form's live safety flags for take-home lines, on the plan's case (nothing is saved). */
-  async preview(input: { planId: string; lines: LineInput[] }): Promise<PreviewResult> {
+  /** The order form's live safety flags for take-home lines, on the plan's case (nothing is saved). DIS_ORDER only. */
+  async preview(actor: Actor, input: { planId: string; lines: LineInput[] }): Promise<PreviewResult> {
+    // The flags show the patient's allergies: the same roles as the order.
+    this.mayOrder(actor);
     if (!isObj(input)) throw new BadRequestException('Send the plan and the medicines to check.');
     const plan = await this.planOf(input.planId);
     const caseId = await this.caseOf(plan);
@@ -452,12 +463,32 @@ export class DischargeOrdersService {
     } catch (e) {
       this.logger.warn(`Discharge order ${String(order._id)}: window-opened not sent (${(e as Error).message})`);
     }
-    if (sent) return true;
+    if (sent) {
+      // A cancel (or a leaving) that landed after the claim may have sent its stop before this start (I1).
+      const state = (await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
+      if (state && !OPEN_ORDER_STATES.includes(state)) await this.stopDueAgain(order._id, state);
+      return true;
+    }
     await this.orders
       .updateOne({ _id: order._id, windowOpenedAt: openedAt }, { $unset: { windowOpenedAt: 1 } })
       .exec()
       .catch((e: Error) => this.logger.warn(`Discharge order ${String(order._id)}: window claim not released (${e.message})`));
     return false;
+  }
+
+  /**
+   * I1: the order ended while its window was opening, so its stop message may have been stored before
+   * `discharge.window-opened` started the clocks, and a stop that comes first is not kept. The stop is taken out of
+   * `announced`, so the one-minute pass sends it again. Not here: the Coordinator would drop a repeat within 60 s.
+   */
+  private async stopDueAgain(orderId: Types.ObjectId, state: OrderState): Promise<void> {
+    const stop = STOP_MESSAGE[state];
+    if (!stop) return;
+    this.logger.warn(`Discharge order ${String(orderId)}: ${state} while its window was opening; ${stop} is left for the one-minute pass to send again`);
+    await this.orders
+      .updateOne({ _id: orderId }, { $pull: { announced: stop } })
+      .exec()
+      .catch((e: Error) => this.logger.warn(`Discharge order ${String(orderId)}: ${stop} not marked to send again (${e.message})`));
   }
 
   // ---------- helpers ----------
@@ -499,19 +530,21 @@ export class DischargeOrdersService {
       throw new BadRequestException('Only a transfer order has a receiving hospital.');
     }
     // A death leaves at the order's own time; the rest from now to the end of tomorrow.
+    if (died && given(input.plannedLeaveAt)) throw new BadRequestException(DEATH_LEAVES_NOW);
     const plannedLeaveAt = died ? now : given(input.plannedLeaveAt) ? leavingTime(input.plannedLeaveAt, now) : new Date(now.getTime() + leaveMinutes * MIN_MS);
 
     const label = KIND_LABEL[kind as DischargeKind].toLowerCase();
     const takeHomeRule = LINE_RULE[kind as DischargeKind]['take-home'];
     const takeHome: Choice = input.takeHome === 'none' ? 'none' : input.takeHome === undefined ? undefined : 'given';
     if (takeHomeRule === '-' && takeHome === 'given') throw new BadRequestException(`A ${label} order takes no take-home medicines.`);
-    if (kind === 'home' && !takeHome) throw new BadRequestException('Choose the take-home medicines, or tick No take-home medicines.');
+    // R30: a required take-home line needs the doctor's choice, or it could never be done.
+    if (takeHomeRule === 'R' && !takeHome) throw new BadRequestException('Choose the take-home medicines, or tick No take-home medicines.');
     const lines = takeHome === 'given' ? takeHomeLines(input.takeHome) : null;
 
     const followUpRule = LINE_RULE[kind as DischargeKind]['follow-up'];
     const followUpGiven: Choice = input.followUp === 'none' ? 'none' : input.followUp === undefined ? undefined : 'given';
     if (followUpRule === '-' && followUpGiven === 'given') throw new BadRequestException(`A ${label} order takes no follow-up.`);
-    if (kind === 'home' && !followUpGiven) throw new BadRequestException('Choose a follow-up, or tick No follow-up needed.');
+    if (followUpRule === 'R' && !followUpGiven) throw new BadRequestException('Choose a follow-up, or tick No follow-up needed.');
     const followUp = followUpGiven === 'given' ? followUpChoice(input.followUp) : null;
 
     return {

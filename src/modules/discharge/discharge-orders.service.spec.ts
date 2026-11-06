@@ -55,6 +55,9 @@ describe('DischargeOrdersService', () => {
   let sends: { type: string; caseId: string | null; payload: Record<string, unknown>; summary: string }[];
   /** When set, the next sends of this type fail as a Coordinator outage would. */
   let failNext: { type: string; times: number } | null;
+  /** Run inside a send, just before it reaches the Coordinator, and just after: to force an interleaving. */
+  let beforeForward: ((type: string) => Promise<void>) | null;
+  let afterForward: ((type: string) => Promise<void>) | null;
   let logged: string[];
 
   const sendsOf = (type: string) => sends.filter((s) => s.type === type);
@@ -118,6 +121,8 @@ describe('DischargeOrdersService', () => {
     reg.onModuleInit();
     sends = [];
     failNext = null;
+    beforeForward = null;
+    afterForward = null;
     const send = reg.send.bind(reg);
     reg.send = async (type, onCase, payload, summary) => {
       sends.push({ type, caseId: onCase, payload, summary });
@@ -125,7 +130,10 @@ describe('DischargeOrdersService', () => {
         failNext.times -= 1;
         return false;
       }
-      return send(type, onCase, payload, summary);
+      await beforeForward?.(type);
+      const went = await send(type, onCase, payload, summary);
+      await afterForward?.(type);
+      return went;
     };
     plans = new DischargePlansService(reg, w.messages, rules, settings, m.DischargePlan, m.Admission, m.Bed, m.Ward, m.Case, m.TaskAlertItem, m.Patient);
     const bedEvents = new BedEvents();
@@ -332,6 +340,8 @@ describe('DischargeOrdersService', () => {
       { kind: 'transfer', followUp: undefined, receivingHospital: 'Medical College Hospital, Trivandrum' },
       { receivingHospital: 'Medical College Hospital, Trivandrum' },
       { kind: 'transfer', receivingHospital: 'Medical College Hospital, Trivandrum', transferReason: 'Cardiothoracic surgery' },
+      // R30: a transfer's take-home line is required too, so the doctor chooses medicines or none.
+      { kind: 'transfer', followUp: undefined, takeHome: undefined, receivingHospital: 'Medical College Hospital, Trivandrum', transferReason: 'Cardiothoracic surgery' },
     ];
     for (const extra of bad) {
       await assert.rejects(orders.order(DOC, planId, home(extra)), BadRequestException, JSON.stringify(extra));
@@ -360,13 +370,15 @@ describe('DischargeOrdersService', () => {
       { condition: 'stable' as const },
       { takeHome: { lines: [pantoprazole40] } },
       { followUp: { inDays: 7, doctorId: String(shajin._id) } },
+      // A death leaves at the order's own time: a sent leaving time is refused, as the other foreign fields are.
+      { plannedLeaveAt: at(27, 10) },
     ]) {
       await assert.rejects(orders.order(DOC, planId, died(extra)), BadRequestException, JSON.stringify(extra));
     }
     assert.equal(await m.DischargeOrder.countDocuments(), 0);
 
     // The leaving time of a death is the order's own time, so its window opens at once.
-    const o = await orders.order(DOC, planId, died({ plannedLeaveAt: at(27, 10) }));
+    const o = await orders.order(DOC, planId, died());
     const row = await stored(o._id);
     assert.deepEqual([row.timeOfDeath.getTime(), row.causeOfDeath, row.condition, row.plannedLeaveAt.getTime(), row.windowAt.getTime()], [
       at(26, 10, 40).getTime(), 'Cardiogenic shock', undefined, NOW.getTime(), NOW.getTime(),
@@ -537,6 +549,88 @@ describe('DischargeOrdersService', () => {
     await assert.rejects(orders.edit(DOC, id, { plannedLeaveAt: at(28, 9) }), BadRequestException);
   });
 
+  test('R29: once the window is open, the planned time cannot move past its target', async () => {
+    // Ordered at 11:00 for 13:00: 13:00 less the 2 h target is the order time, so the window opens at 11:00.
+    const o = await orders.order(DOC, planId, home({ plannedLeaveAt: at(26, 13), followUp: 'none' }));
+    assert.ok(o?._id && (await stored(o._id))?.windowOpenedAt, 'the window is open');
+    const id = String(o._id);
+    orders.clock = () => at(26, 12);
+    await assert.rejects(orders.edit(DOC, id, { plannedLeaveAt: at(27, 10) }), (e: unknown) => {
+      assert.ok(e instanceof ConflictException);
+      assert.equal((e as ConflictException).message, 'The discharge window is already open. Cancel and re-order to leave later.');
+      return true;
+    });
+    await assert.rejects(orders.edit(DOC, id, { plannedLeaveAt: at(26, 13, 1) }), ConflictException);
+    assert.equal((await stored(id)).plannedLeaveAt.getTime(), at(26, 13).getTime());
+    // Earlier, or anywhere up to the window's target, is fine; the window and its clocks stay.
+    await orders.edit(DOC, id, { plannedLeaveAt: at(26, 12, 30) });
+    await orders.edit(DOC, id, { plannedLeaveAt: at(26, 13) });
+    const row = await stored(id);
+    assert.deepEqual([row.plannedLeaveAt.getTime(), row.windowAt.getTime()], [at(26, 13).getTime(), NOW.getTime()]);
+    assert.equal(sendsOf('discharge.window-opened').length, 1);
+  });
+
+  test('I1: a cancel that lands while the window opens leaves discharge.cancelled due again', async () => {
+    orders.clock = () => EVENING;
+    const o = await orders.order(DOC, planId, tomorrow());
+    assert.ok(o?._id && (await stored(o._id)), 'the order is saved');
+    const id = String(o._id);
+    // The cancel lands after the window is claimed and before window-opened reaches the Coordinator: its stop goes first.
+    beforeForward = async (type) => {
+      if (type !== 'discharge.window-opened') return;
+      beforeForward = null;
+      await orders.cancel(DOC, id, 'Spiked a fever again');
+    };
+    assert.equal(await orders.openDueWindows(at(27, 8)), 1);
+    const row = await stored(id);
+    assert.equal(row.state, 'cancelled');
+    const order = await m.AgentMessage.find({ type: { $in: ['discharge.cancelled', 'discharge.window-opened'] } }).sort({ createdAt: 1, _id: 1 }).lean<any[]>();
+    assert.deepEqual(order.map((x) => x.type), ['discharge.cancelled', 'discharge.window-opened']);
+    // The late start opened clocks the earlier stop could not stop, so the record says the stop is due again.
+    assert.deepEqual((await clocksOf(id)).map((c) => [c.def, c.state]), [['discharge-leave', 'running'], ['discharge-summary', 'running']]);
+    assert.ok(row.announced.includes('discharge.window-opened'));
+    assert.ok(!row.announced.includes('discharge.cancelled'), row.announced.join(', '));
+    assert.ok(logged.some((l) => /cancelled while its window was opening/.test(l)), logged.join(' | '));
+    // Sent again by the one-minute pass (after the Coordinator's 60 s dedupe), it stops them.
+    await w.messages.send({
+      case: caseId, from: 'discharge', to: ['coordinator'], type: 'discharge.cancelled', priority: 'medium', summary: `${BED}: Discharge cancelled (Home)`,
+      payload: { orderId: id, admissionId, bedLabel: BED }, dedupeKey: `discharge.cancelled:${id}:again`,
+    });
+    assert.deepEqual((await clocksOf(id)).map((c) => [c.def, c.state]), [['discharge-leave', 'met'], ['discharge-summary', 'met']]);
+  });
+
+  test('I1: the stop is due again also when the cancel finishes after the window opened', async () => {
+    orders.clock = () => EVENING;
+    const o = await orders.order(DOC, planId, tomorrow());
+    assert.ok(o?._id && (await stored(o._id)), 'the order is saved');
+    const id = String(o._id);
+    let cancelStored!: () => void;
+    const isStored = new Promise<void>((resolve) => (cancelStored = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let cancelling: Promise<unknown> | null = null;
+    // The cancel's stop is stored first, then window-opened, and only then does the cancel record its own message.
+    beforeForward = async (type) => {
+      if (type !== 'discharge.window-opened') return;
+      beforeForward = null;
+      cancelling = orders.cancel(DOC, id, 'Spiked a fever again');
+      await isStored;
+    };
+    afterForward = async (type) => {
+      if (type !== 'discharge.cancelled') return;
+      afterForward = null;
+      cancelStored();
+      await gate;
+    };
+    assert.equal(await orders.openDueWindows(at(27, 8)), 1);
+    release();
+    await cancelling;
+    const row = await stored(id);
+    assert.equal(row.state, 'cancelled');
+    assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['running', 'running']);
+    assert.ok(!row.announced.includes('discharge.cancelled'), row.announced.join(', '));
+  });
+
   test('a plan with no case orders on the patient\'s open case', async () => {
     await m.DischargePlan.updateOne({ _id: planId }, { $unset: { case: 1 } });
     const o = await orders.order(DOC, planId, home({ followUp: 'none' }));
@@ -549,7 +643,11 @@ describe('DischargeOrdersService', () => {
 
   test('preview shows the take-home flags on the plan\'s case', async () => {
     await w.orders.order(DOC, { patientId: w.patientId, priority: 'urgent', lines: [enoxaparin60] });
-    const preview = (await orders.preview({ planId, lines: [enoxaparin60] })) as any;
+    // The flags show allergies: only the ordering roles may see them.
+    for (const who of [NURSE, DESK, PHARM]) {
+      await assert.rejects(orders.preview(who, { planId, lines: [enoxaparin60] }), ForbiddenException, who.name);
+    }
+    const preview = (await orders.preview(DOC, { planId, lines: [enoxaparin60] })) as any;
     assert.equal(preview.lines.length, 1);
     assert.deepEqual(
       preview.lines[0].flags.filter((f: any) => f.kind === 'continues').map((f: any) => [f.severity, f.text]),
