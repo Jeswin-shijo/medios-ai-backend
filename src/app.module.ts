@@ -42,6 +42,7 @@ import { LabModule } from './modules/lab/lab.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { RevenueModule } from './modules/revenue/revenue.module';
+import { DischargeModule } from './modules/discharge/discharge.module';
 import { OpdModule } from './modules/opd/opd.module';
 import { ReceptionModule } from './modules/reception/reception.module';
 import { HealthController } from './health.controller';
@@ -96,6 +97,7 @@ import { HealthController } from './health.controller';
     PharmacyModule,
     SchedulingModule,
     RevenueModule,
+    DischargeModule,
     OpdModule,
     ReceptionModule,
   ],

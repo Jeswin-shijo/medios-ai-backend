@@ -96,11 +96,16 @@ export const DISCHARGE_CLOCKS: ClockDef[] = [
   },
 ];
 
-/** The other agents' messages that wake the Discharge Agent. Each only wakes it; the handler re-reads the records. */
+/**
+ * The other agents' messages that wake the Discharge Agent. Each only wakes it; the handler re-reads the records. A new
+ * Lab order makes the Lab line wait at once, and a payment that clears a final bill makes the bill line done at once,
+ * without waiting for the one-minute pass (Task 9 M4).
+ */
 export const WAKE_TYPES = [
   'bed.assigned',
   'bed.transferred',
   'bed.discharged',
+  'lab.ordered',
   'lab.resulted',
   'lab.cancelled',
   'lab.critical',
@@ -110,6 +115,7 @@ export const WAKE_TYPES = [
   'pharmacy.stopped',
   'pharmacy.rejected',
   'scheduling.followup-booked',
+  'revenue.payment',
   'revenue.bill-final',
   'revenue.bill-settled',
 ] as const;

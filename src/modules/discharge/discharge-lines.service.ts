@@ -4,6 +4,7 @@ import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
 import { formatRupees } from '../../common/utils/money';
 import type { Actor } from '../beds/actor';
+import { BedsService } from '../beds/beds.service';
 import { CasesService } from '../coordinator/cases.service';
 import { MessagesService } from '../coordinator/messages.service';
 import { FollowUpDocument, FollowUpItem } from '../follow-ups/schemas/follow-up.schema';
@@ -12,9 +13,9 @@ import { LabRequest, LabRequestDocument } from '../lab/schemas/lab-request.schem
 import { PharmacyLine, PharmacyLineDocument, PharmacyLineStatus } from '../pharmacy/schemas/pharmacy-line.schema';
 import { Bill, BillDocument, BillState } from '../revenue/schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from '../revenue/schemas/charge-line.schema';
-import { UserRole } from '../users/schemas/user.schema';
 import { DischargeKind, KIND_LABEL, LINE_KEYS, LINE_LABEL, LINE_OWNER, LINE_RULE, LineKey } from './discharge-catalogue';
 import { DischargeRegistration, WAKE_TYPES } from './discharge-coordinator.registration';
+import { DIS_ADMIN, DIS_ORDER, DIS_WARD } from './discharge-roles';
 import {
   DischargeLineEntry,
   DischargeOrder,
@@ -27,10 +28,6 @@ import {
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 import { DischargeSummary, DischargeSummaryDocument } from './schemas/discharge-summary.schema';
 
-/** DIS_ORDER: the doctor's lines, "follow up later" and the "not needed" choices. */
-const ORDER_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.DOCTOR];
-/** DIS_WARD: the nurse's hand-ticked lines. */
-const WARD_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.NURSE];
 const READY = 'discharge.ready';
 const NOTE_MAX = 300;
 const REASON_MAX = 300;
@@ -167,6 +164,11 @@ export class DischargeLinesService {
     @InjectModel(FollowUpItem.name) private readonly followUps: Model<FollowUpDocument>,
     @InjectModel(Bill.name) private readonly bills: Model<BillDocument>,
     @InjectModel(ChargeLine.name) private readonly chargeLines: Model<ChargeLineDocument>,
+    /**
+     * The bed board shows a leaving patient as Ready, so a move to or from Ready tells it to re-read (Task 9 M2). Absent
+     * only where the service is built by hand (seeds, specs).
+     */
+    private readonly beds?: BedsService,
   ) {
     // The bed.* types are the plans service's; every other type only wakes this one, which reads the records again.
     for (const type of WAKE_TYPES) {
@@ -223,7 +225,7 @@ export class DischargeLinesService {
     const hand = HAND_LINES.includes(key);
     if (!hand && !CHOICE_LINES.includes(key)) throw new BadRequestException("This line is read from the agents' records; it can't be ticked.");
     const nurseLine = LINE_OWNER[key] === 'nurse';
-    if (!actor || !(nurseLine ? WARD_ROLES : ORDER_ROLES).includes(actor.role)) {
+    if (!actor || !(nurseLine ? DIS_WARD : DIS_ORDER).includes(actor.role)) {
       throw new ForbiddenException(nurseLine ? 'Only a nurse or an admin can tick this line.' : 'Only a doctor or an admin can do this.');
     }
     if (!isObj(input)) throw new BadRequestException("Send the line's new state.");
@@ -259,7 +261,7 @@ export class DischargeLinesService {
    * 409: a critical result is never put off. 400 for a kind with no Lab line; 404 for a request not on this stay.
    */
   async followUpLater(actor: Actor, orderId: string, requestId: string): Promise<DischargeOrderDocument> {
-    if (!actor || !ORDER_ROLES.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can put a result off to follow up later.');
+    if (!actor || !DIS_ORDER.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can put a result off to follow up later.');
     const order = await this.openOrder(orderId);
     if (LINE_RULE[order.kind].lab === '-') throw new BadRequestException(`A ${KIND_LABEL[order.kind].toLowerCase()} discharge has no Lab results line.`);
     const request = isValidObjectId(requestId)
@@ -284,7 +286,7 @@ export class DischargeLinesService {
    * follows it again. 403 for other roles; 409 when a bill exists.
    */
   async overrideBill(actor: Actor, orderId: string, reason: string): Promise<DischargeOrderDocument> {
-    if (!actor || actor.role !== UserRole.ADMIN) throw new ForbiddenException('Only an admin can mark the bill line done.');
+    if (!actor || !DIS_ADMIN.includes(actor.role)) throw new ForbiddenException('Only an admin can mark the bill line done.');
     const why = text(reason, 'The reason', 1, REASON_MAX);
     const order = await this.openOrder(orderId);
     if (await this.bills.exists({ kind: 'admission', admission: order.admission }).exec()) {
@@ -520,7 +522,8 @@ export class DischargeLinesService {
   /**
    * Moves the order to match its lines as they are stored now, each move guarded on those lines, so two refreshes
    * at once move it once. Becoming Ready counts the time (`readyCount`) and announces `discharge.ready` under that
-   * count's key (R31); losing it takes the announcement off `announced`. The plan follows the order.
+   * count's key (R31); losing it takes the announcement off `announced`. The plan follows the order, and a move either
+   * way tells the bed board to re-read (its Leaving soon badge shows Ready).
    */
   private async settleReady(order: LeanOrder, caseId: string | null, bedLabel: string | null): Promise<void> {
     const required = requiredKeys(order.kind);
@@ -533,17 +536,29 @@ export class DischargeLinesService {
       )
       .lean<LeanOrder>()
       .exec();
+    let moved = !!gained;
     if (gained) {
       await this.announceReady(gained, caseId, bedLabel);
     } else {
-      await this.orders
+      const lost = await this.orders
         .updateOne(
           { _id: order._id, state: 'ready', $or: [{ lines: { $elemMatch: notDone } }, ...required.map((k) => ({ 'lines.key': { $ne: k } }))] },
           { $set: { state: 'ordered' }, $pull: { announced: READY } },
         )
         .exec();
+      moved = lost.modifiedCount > 0;
     }
     await this.syncPlan(order);
+    if (moved) this.touchBeds();
+  }
+
+  /** Tells open bed boards to re-read. A failure is logged, never thrown: the checklist stands either way. */
+  private touchBeds(): void {
+    try {
+      this.beds?.touch();
+    } catch (e) {
+      this.logger.warn(`Bed board not refreshed (${(e as Error).message})`);
+    }
   }
 
   /** `discharge.ready` for the n-th time the order became ready; recorded in `announced` once it went, if still that time. */
@@ -595,8 +610,8 @@ export class DischargeLinesService {
   }
 
   /**
-   * revenue.bill-final / revenue.bill-settled: only an admission bill whose stay has an open order matters. Anything
-   * else, such as a kiosk walk-in bill (they settle all day), is a quiet no-op.
+   * revenue.payment / revenue.bill-final / revenue.bill-settled: only an admission bill whose stay has an open order
+   * matters. Anything else, such as a kiosk walk-in bill (they settle all day), is a quiet no-op.
    */
   private async onBill(m: Msg): Promise<void> {
     const billId = str(m.payload.billId);

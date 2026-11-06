@@ -9,20 +9,16 @@ import { Bed, BedDocument } from '../beds/schemas/bed.schema';
 import { EscalationsService } from '../coordinator/escalations.service';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { Bill, BillDocument, BillState } from '../revenue/schemas/bill.schema';
-import { UserRole } from '../users/schemas/user.schema';
 import { CompletionKind, KIND_LABEL, LINE_LABEL } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService, missing, readyLinesFilter } from './discharge-lines.service';
 import { DischargeOrdersService } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
+import { DIS_LEAVE, DIS_WARD } from './discharge-roles';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES, OrderState } from './schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 
-/** DIS_LEAVE: who prints the gate pass and lets the patient, or the body, go. */
-const LEAVE_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.NURSE, UserRole.STAFF];
-/** DIS_WARD: who records a patient who left without discharge. */
-const WARD_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.NURSE];
 const GATE_PASS_COUNTER = 'discharge-gatepass';
 const GATE_PASS_PREFIX = 'GP';
 const COMPLETED = 'discharge.completed';
@@ -35,6 +31,8 @@ const NOT_FINISHED = "The checklist isn't finished";
 const CHANGED = 'Something changed on the checklist';
 const PLAN_COMPLETE = 'This discharge is complete.';
 const ALREADY_LEFT = 'The patient has already left.';
+/** R45: a stay that ended with no gate pass (Left without discharge, a death) has none to reprint. */
+const NO_PASS = 'No gate pass was printed for this discharge.';
 /** R44: a deceased patient is never marked Left without discharge. */
 const DEATH_IS_RELEASED = 'Use Body released for a death.';
 
@@ -143,12 +141,16 @@ export class DischargeLeavingService {
   /**
    * Prints the gate pass (Home, Transfer, Against advice) once the order is Ready, after reading the checklist again:
    * a change no agent announces (a charge on a final bill, say) must never print one. The first print takes the next
-   * GP number; every print is recorded, and a later one is a REPRINT of the same pass. 403 for other roles than a
-   * nurse, the front desk or an admin; 400 for a death; 409 "The checklist isn't finished: <lines>".
+   * GP number; every print is recorded, and a later one is a REPRINT of the same pass. R45: once the patient has left,
+   * the stored pass reprints ("Left today"), with no Ready check and no new number; a stay that ended without one is
+   * 409. 403 for other roles than a nurse, the front desk or an admin; 400 for a death; 409 "The checklist isn't
+   * finished: <lines>".
    */
   async gatePass(actor: Actor, orderId: string): Promise<GatePassView> {
     this.mayLeave(actor);
-    const order = await this.openOrder(orderId);
+    const order = await this.orderOf(orderId);
+    if (order.state === 'left') return this.reprintLeft(order);
+    if (!OPEN_ORDER_STATES.includes(order.state)) throw new ConflictException(stateRefusal(order.state));
     if (order.kind === 'died') throw new BadRequestException('A death has no gate pass: use Body released.');
     const fresh = await this.lines.refresh(String(order._id));
     this.mustBeReady(fresh, NOT_FINISHED);
@@ -168,17 +170,34 @@ export class DischargeLeavingService {
       .findOneAndUpdate({ _id: fresh._id, state: 'ready', 'gatePass.number': { $exists: true } }, { $push: { 'gatePass.printedAt': now } }, { new: true })
       .exec();
     if (!printed?.gatePass) throw await this.lost(fresh._id);
+    return this.passView(printed, reprint, plan, admission);
+  }
+
+  /** R45: the pass of a patient who has left, printed again. The same number; each print is still recorded. */
+  private async reprintLeft(order: DischargeOrderDocument): Promise<GatePassView> {
+    if (!order.gatePass?.number) throw new ConflictException(NO_PASS);
+    const [plan, admission] = await Promise.all([this.planOf(order.plan), this.admissionOf(order.admission)]);
+    const printed = await this.orders
+      .findOneAndUpdate({ _id: order._id, state: 'left', 'gatePass.number': order.gatePass.number }, { $push: { 'gatePass.printedAt': this.clock() } }, { new: true })
+      .exec();
+    if (!printed?.gatePass) throw await this.lost(order._id);
+    return this.passView(printed, true, plan, admission);
+  }
+
+  /** What the printed pass says: the stay's facts, the first print's issuer and time, and the bills as they stand now. */
+  private async passView(printed: DischargeOrderDocument, reprint: boolean, plan: DischargePlanDocument, admission: AdmissionFacts): Promise<GatePassView> {
+    const gatePass = printed.gatePass!;
     const [config, billLine] = await Promise.all([this.settings.get(), this.billLine(printed)]);
     return {
-      number: printed.gatePass.number,
+      number: gatePass.number,
       reprint,
       patient: { name: plan.patientName, uhid: plan.patientUhid },
       bedLabel: plan.bedLabel,
       admittedAt: admission.admittedAt,
       plannedLeaveAt: printed.plannedLeaveAt,
       billLine,
-      issuedBy: printed.gatePass.by.name,
-      issuedAt: printed.gatePass.printedAt[0],
+      issuedBy: gatePass.by.name,
+      issuedAt: gatePass.printedAt[0],
       header: config.gatePassHeader,
     };
   }
@@ -285,7 +304,7 @@ export class DischargeLeavingService {
    * stay untouched undoes the claim and the order; one after the stay ended lets it stand (review I1).
    */
   async leftWithoutDischarge(actor: Actor, planId: string, input: LeftWithoutDischargeInput): Promise<DischargePlanDocument> {
-    if (!actor || !WARD_ROLES.includes(actor.role)) throw new ForbiddenException('Only a nurse or an admin can record a patient who left without discharge.');
+    if (!actor || !DIS_WARD.includes(actor.role)) throw new ForbiddenException('Only a nurse or an admin can record a patient who left without discharge.');
     if (!isObj(input)) throw new BadRequestException('Send the reason and when the patient was last seen.');
     const reason = text(input.reason, 'The reason', 1, REASON_MAX);
     const lastSeenAt = moment(input.lastSeenAt, 'The last-seen time');
@@ -450,7 +469,7 @@ export class DischargeLeavingService {
   // ---------- helpers ----------
 
   private mayLeave(actor: Actor): void {
-    if (!actor || !LEAVE_ROLES.includes(actor.role)) throw new ForbiddenException('Only a nurse, the front desk or an admin can do this.');
+    if (!actor || !DIS_LEAVE.includes(actor.role)) throw new ForbiddenException('Only a nurse, the front desk or an admin can do this.');
   }
 
   /** 409 unless the order (just read again) is still open and Ready, naming the required lines not done. */
@@ -488,10 +507,16 @@ export class DischargeLeavingService {
     }
   }
 
-  /** An order still in progress, else 404 or 409. */
-  private async openOrder(orderId: string): Promise<DischargeOrderDocument> {
+  /** The order, in any state, else 404. */
+  private async orderOf(orderId: string): Promise<DischargeOrderDocument> {
     const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).exec() : null;
     if (!order) throw new NotFoundException('Discharge order not found');
+    return order;
+  }
+
+  /** An order still in progress, else 404 or 409. */
+  private async openOrder(orderId: string): Promise<DischargeOrderDocument> {
+    const order = await this.orderOf(orderId);
     if (!OPEN_ORDER_STATES.includes(order.state)) throw new ConflictException(stateRefusal(order.state));
     return order;
   }

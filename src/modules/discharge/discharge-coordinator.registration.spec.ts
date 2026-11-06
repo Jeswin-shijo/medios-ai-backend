@@ -182,10 +182,10 @@ describe('DischargeRegistration', () => {
     // It wakes on these, each another agent's real message type.
     assert.deepEqual([...WAKE_TYPES], [
       'bed.assigned', 'bed.transferred', 'bed.discharged',
-      'lab.resulted', 'lab.cancelled', 'lab.critical', 'lab.critical-acked',
+      'lab.ordered', 'lab.resulted', 'lab.cancelled', 'lab.critical', 'lab.critical-acked',
       'pharmacy.issued', 'pharmacy.cancelled', 'pharmacy.stopped', 'pharmacy.rejected',
       'scheduling.followup-booked',
-      'revenue.bill-final', 'revenue.bill-settled',
+      'revenue.payment', 'revenue.bill-final', 'revenue.bill-settled',
     ]);
     assert.deepEqual(def().handles!.map((h) => h.type), [...WAKE_TYPES]);
     const theirs = new Set([...BED_MESSAGE_TYPES, ...LAB_MESSAGE_TYPES, ...PHARMACY_MESSAGE_TYPES, ...SCHEDULING_MESSAGE_TYPES, ...REVENUE_MESSAGE_TYPES].map((t) => t.type));

@@ -333,10 +333,47 @@ describe('DischargeLeavingService', () => {
     assert.equal(adm.status, 'discharged');
     assert.equal((await bedOf()).state, 'cleaning');
     assert.equal((await stored(id)).state, 'left');
-    // And again later: the patient has already left.
+    // And again later: the patient has already left (the gate pass only reprints, R45).
     await assert.rejects(leaving.left(NURSE, id), /The patient has already left\./);
-    await assert.rejects(leaving.gatePass(NURSE, id), /The patient has already left\./);
+    assert.equal((await leaving.gatePass(NURSE, id)).reprint, true);
     assert.deepEqual(logged, []);
+  });
+
+  test('R45: a left order with a gate pass reprints the same pass; a left order without one is 409', async () => {
+    const id = await ready();
+    leaving.clock = () => at(26, 11, 20);
+    await leaving.gatePass(NURSE, id);
+    leaving.clock = () => at(26, 11, 30);
+    await leaving.left(NURSE, id);
+    const taken = (await m.CoordinatorCounter.findOne({ key: 'discharge-gatepass' }).lean<any>()).last;
+
+    // "Left today" reprints it later: the same number, issuer and first print time; no Ready check, no new number.
+    leaving.clock = () => at(26, 15);
+    const again = await leaving.gatePass(DESK, id);
+    assert.deepEqual([again.number, again.reprint, again.issuedBy, time(again.issuedAt), again.billLine, again.bedLabel], [
+      'GP-0001', true, NURSE.name, at(26, 11, 20).getTime(), 'Bill settled: BL-0001', BED,
+    ]);
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.gatePass.number, row.gatePass.printedAt.map(time)], ['left', 'GP-0001', [at(26, 11, 20).getTime(), at(26, 15).getTime()]]);
+    assert.equal((await m.CoordinatorCounter.findOne({ key: 'discharge-gatepass' }).lean<any>()).last, taken, 'no number is taken');
+    for (const who of [DOC, PHARM, LAB]) await assert.rejects(leaving.gatePass(who, id), ForbiddenException, who.name);
+
+    // A stay that ended without a pass (Left without discharge ended its order): there is nothing to reprint.
+    const other = await anotherStay('MHK202600908', 'Mary Jeni', 15);
+    const o2 = await orders.order(DOC, other.planId, homeNone());
+    await leaving.leftWithoutDischarge(NURSE, other.planId, { reason: LWD_REASON, lastSeenAt: at(26, 10) });
+    assert.equal((await stored(o2._id)).state, 'left');
+    await assert.rejects(leaving.gatePass(NURSE, String(o2._id)), (e: unknown) => {
+      assert.ok(e instanceof ConflictException, String(e));
+      assert.equal((e as ConflictException).message, 'No gate pass was printed for this discharge.');
+      return true;
+    });
+    // A cancelled order still has no pass to print.
+    const third = await anotherStay('MHK202600909', 'John Peter', 16);
+    const o3 = await orders.order(DOC, third.planId, homeNone());
+    await orders.cancel(DOC, String(o3._id), 'Spiked a fever again');
+    await assert.rejects(leaving.gatePass(NURSE, String(o3._id)), /This discharge order was cancelled\./);
+    assert.equal((await m.CoordinatorCounter.findOne({ key: 'discharge-gatepass' }).lean<any>()).last, taken);
   });
 
   test('a continuation bill due after the gate pass makes left 409', async () => {

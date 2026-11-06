@@ -13,16 +13,14 @@ import { Case, CaseDocument } from '../coordinator/schemas/case.schema';
 import { PatientEvents } from '../patients/patient-events';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
-import { UserRole } from '../users/schemas/user.schema';
 import { DischargeRegistration } from './discharge-coordinator.registration';
+import { DIS_ORDER } from './discharge-roles';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { atClinicTime } from './discharge-time';
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_KEY = 11000;
-/** DIS_ORDER: who may move a target date. */
-const ORDER_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.DOCTOR];
 const NOTE_MAX = 300;
 const PLAN_COMPLETE = 'This discharge is complete: its target date can no longer change.';
 /** A target day a doctor sets is due at this clinic time. */
@@ -193,7 +191,7 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
    * characters; 404 for an unknown plan; 409 once the discharge is complete.
    */
   async setTarget(actor: Actor, planId: string, targetDay: string, note?: string): Promise<DischargePlanDocument> {
-    if (!actor || !ORDER_ROLES.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can change the target date.');
+    if (!actor || !DIS_ORDER.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can change the target date.');
     const targetAt = atClinicTime(targetDay, TARGET_TIME);
     const now = this.clock();
     if (targetDay < isoDate(now)) throw new BadRequestException('The target date cannot be before today.');

@@ -56,6 +56,9 @@ describe('DischargeLinesService', () => {
   let logged: string[];
   let savedClinic: string | undefined;
   let seq: number;
+  /** How often the lines service told the bed board to re-read; `touch` may be replaced to fail. */
+  let touches: number;
+  let touch: () => void;
 
   const stored = (id: unknown) => m.DischargeOrder.findById(id).lean<any>();
   const planOf = (id = planId) => m.DischargePlan.findById(id).lean<any>();
@@ -149,8 +152,12 @@ describe('DischargeLinesService', () => {
     const waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, undefined as any);
     const followUps = new SchedulingFollowupsService(m.Patient, m.FollowUpItem, m.Case, opd, doctors, appts, waitlist, w.messages);
 
+    touches = 0;
+    touch = () => void (touches += 1);
+    const bedBoard = { touch: () => touch() } as unknown as BedsService;
     lines = new DischargeLinesService(
       reg, w.messages, w.cases, m.DischargeOrder, m.DischargePlan, m.DischargeSummary, m.LabRequest, m.LabLine, m.PharmacyLine, m.FollowUpItem, m.Bill, m.ChargeLine,
+      bedBoard,
     );
     (lines as any).logger = logger;
     lines.clock = () => NOW;
@@ -759,7 +766,7 @@ describe('DischargeLinesService', () => {
     assert.deepEqual(WAKE_TYPES.filter((t) => !reg.wake.has(t)), []);
     const types = WAKE_TYPES.filter((t) => !t.startsWith('bed.') && !t.startsWith('revenue.'));
     assert.deepEqual(types, [
-      'lab.resulted', 'lab.cancelled', 'lab.critical', 'lab.critical-acked',
+      'lab.ordered', 'lab.resulted', 'lab.cancelled', 'lab.critical', 'lab.critical-acked',
       'pharmacy.issued', 'pharmacy.cancelled', 'pharmacy.stopped', 'pharmacy.rejected', 'scheduling.followup-booked',
     ]);
     for (const type of types) {
@@ -828,5 +835,60 @@ describe('DischargeLinesService', () => {
     assert.equal(await lines.refreshAdmission(String(otherAdmission)), 0);
     assert.equal(await lines.refreshCase(caseId), 1);
     assert.equal(await lines.refreshCase('nope'), 0);
+  });
+
+  test('wake (M4): a payment that clears a final bill makes the bill line done at once; a new Lab order makes a Ready order wait', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(1000, 600) });
+    await sign(o._id);
+    await lines.tick(NURSE, id, 'teaching', { state: 'done' });
+    assert.deepEqual([await stateOf(id, 'bill'), (await stored(id)).state], [['waiting', '₹400 due'], 'ordered']);
+
+    // The desk takes the rest: Revenue's payment message wakes the agent, with no minute pass.
+    await m.Bill.updateOne({ _id: b._id }, { $set: { totals: totals(1000, 1000) } });
+    await revenue('revenue.payment', b, { receiptNumber: 'RC-0001', amount: 400, mode: 'cash' });
+    assert.deepEqual([await stateOf(id, 'bill'), (await stored(id)).state], [['done', 'Final bill ready: nothing due'], 'ready']);
+
+    // A doctor orders one more test: Lab's message makes the Ready order wait again, at once.
+    await labRequest([{ test: 'crp', status: 'ordered' }]);
+    const ordered = await m.AgentMessage.create({
+      case: caseId, from: 'lab', to: ['coordinator'], type: 'lab.ordered', priority: 'medium', summary: 'x', payload: {}, dedupeKey: `lab.ordered:${new Types.ObjectId()}`,
+    });
+    const handlers = w.registry.subscribers('lab.ordered').filter((s) => s.agent === 'discharge');
+    assert.equal(handlers.length, 1, 'the Discharge agent handles lab.ordered');
+    await handlers[0].handler(String(ordered._id));
+    assert.deepEqual([await stateOf(id, 'lab'), (await stored(id)).state], [['waiting', '1 result waiting'], 'ordered']);
+    assert.deepEqual(logged, []);
+  });
+
+  test('M2: a move to or from Ready tells the bed board to re-read; nothing else does, and a board that fails never fails the checklist', async () => {
+    const o = await orders.order(DOC, planId, homeNone());
+    const id = String(o._id);
+    const b = await bill({ state: 'final', totals: totals(1000, 1000) });
+    await sign(o._id);
+    await lines.refresh(id);
+    assert.equal((await stored(id)).state, 'ordered');
+    assert.equal(touches, 0, 'no move, no touch');
+
+    await lines.tick(NURSE, id, 'teaching', { state: 'done' });
+    assert.deepEqual([(await stored(id)).state, touches], ['ready', 1]);
+    await lines.refresh(id);
+    assert.equal(touches, 1, 'still Ready: no touch');
+
+    // A late charge: Ready is lost.
+    await m.Bill.updateOne({ _id: b._id }, { $set: { totals: totals(1300, 1000) } });
+    await lines.refresh(id);
+    assert.deepEqual([(await stored(id)).state, touches], ['ordered', 2]);
+
+    // Paid again, but the board's stream fails: the order is Ready all the same, and the failure is logged.
+    touch = () => {
+      throw new Error('stream closed');
+    };
+    await m.Bill.updateOne({ _id: b._id }, { $set: { totals: totals(1300, 1300) } });
+    await lines.refresh(id);
+    assert.equal((await stored(id)).state, 'ready');
+    assert.equal(logged.length, 1, logged.join(' | '));
+    assert.match(logged[0], /Bed board not refreshed \(stream closed\)/);
   });
 });

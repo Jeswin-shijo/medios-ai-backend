@@ -1,8 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import type { Actor } from '../beds/actor';
 import { SettingsService } from '../settings/settings.service';
-import { UserRole } from '../users/schemas/user.schema';
 import { DEFAULT_DISCHARGE_CONFIG, DischargeConfig } from './discharge-catalogue';
+import { DIS_ADMIN } from './discharge-roles';
 import { isHhmm } from './discharge-time';
 
 const KNOWN: (keyof DischargeConfig)[] = ['leaveMinutes', 'summaryMinutes', 'reminderTime', 'warningSigns', 'gatePassHeader'];
@@ -36,7 +36,7 @@ export class DischargeSettingsService {
 
   /** Admin only. Known keys only; anything out of range is a 400. Text is saved trimmed. */
   async save(actor: Actor, patch: Partial<DischargeConfig>): Promise<DischargeConfig> {
-    if (actor?.role !== UserRole.ADMIN) throw new ForbiddenException('Only an admin can change discharge settings.');
+    if (!actor || !DIS_ADMIN.includes(actor.role)) throw new ForbiddenException('Only an admin can change discharge settings.');
     if (!isObj(patch)) throw new BadRequestException('Send the settings to change');
     for (const key of Object.keys(patch)) {
       if (!KNOWN.includes(key as keyof DischargeConfig)) throw new BadRequestException(`"${key}" is not a discharge setting`);

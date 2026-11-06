@@ -9,11 +9,11 @@ import type { LineInput, PreviewResult } from '../pharmacy/pharmacy-orders.servi
 import { PharmacyTakeHomeService } from '../pharmacy/pharmacy-take-home.service';
 import { PharmacyLine, PharmacyLineDocument } from '../pharmacy/schemas/pharmacy-line.schema';
 import { FollowUpOutcome, SchedulingFollowupsService } from '../scheduling/scheduling-followups.service';
-import { UserRole } from '../users/schemas/user.schema';
 import { CONDITIONS, Condition, DISCHARGE_KINDS, DischargeKind, KIND_LABEL, LINE_KEYS, LINE_RULE, LineKey } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService } from './discharge-lines.service';
 import { DischargePlansService } from './discharge-plans.service';
+import { DIS_ORDER } from './discharge-roles';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { DischargeSummaryService } from './discharge-summary.service';
 import { toRealTime, windowStart } from './discharge-time';
@@ -30,8 +30,6 @@ import {
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 import { DischargeSummary, DischargeSummaryDocument } from './schemas/discharge-summary.schema';
 
-/** DIS_ORDER: who gives, changes, cancels and starts a discharge order. */
-const ORDER_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.DOCTOR];
 const MIN_MS = 60_000;
 const DUPLICATE_KEY = 11000;
 const TEXT_MAX = 300;
@@ -527,7 +525,7 @@ export class DischargeOrdersService {
   // ---------- helpers ----------
 
   private mayOrder(actor: Actor): void {
-    if (!actor || !ORDER_ROLES.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can do this.');
+    if (!actor || !DIS_ORDER.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can do this.');
   }
 
   /** Every field of the order checked against its kind, before anything is placed or booked. */

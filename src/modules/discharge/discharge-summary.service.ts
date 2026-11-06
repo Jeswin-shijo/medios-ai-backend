@@ -19,18 +19,16 @@ import { PharmacyOrder, PharmacyOrderDocument } from '../pharmacy/schemas/pharma
 import { procedureByKey } from '../scheduling/scheduling-catalogue';
 import { ProcedureBooking, ProcedureBookingDocument } from '../scheduling/schemas/procedure-booking.schema';
 import { TimelineService } from '../timeline/timeline.service';
-import { UserRole } from '../users/schemas/user.schema';
 import { CourseFacts, DischargeAiService, TestFlag, templateCourse } from './discharge-ai';
 import { DischargeKind, KIND_LABEL, SUMMARY_SECTIONS, SUMMARY_TITLE, SummarySection } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService } from './discharge-lines.service';
+import { DIS_ORDER } from './discharge-roles';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES, OrderState, takeHomeOrderIds } from './schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 import { CourseSource, DischargeSummary, DischargeSummaryDocument, SummaryCourse } from './schemas/discharge-summary.schema';
 
-/** DIS_ORDER: who edits, signs and re-signs a summary. */
-const ORDER_ROLES: UserRole[] = [UserRole.ADMIN, UserRole.DOCTOR];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_KEY = 11000;
 /** The longest text one section (or the course paragraph) may hold. */
@@ -916,7 +914,7 @@ export class DischargeSummaryService {
   // ---------- helpers ----------
 
   private mayEdit(actor: Actor): void {
-    if (!actor || !ORDER_ROLES.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can do this.');
+    if (!actor || !DIS_ORDER.includes(actor.role)) throw new ForbiddenException('Only a doctor or an admin can do this.');
   }
 
   private async orderOf(orderId: string): Promise<LeanOrder> {
