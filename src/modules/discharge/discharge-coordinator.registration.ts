@@ -236,21 +236,23 @@ export class DischargeRegistration implements OnModuleInit {
 
   /**
    * A5: the orders in progress; no fixed capacity; and of the orders that left today (clinic day), the share
-   * that left within the target of their window's start (null when none has left today).
+   * that left within the target of their window's start (null when none has left today). R21: only an order that
+   * ended as its own kind is timed; one a Left without discharge ended is never a discharge.
    */
   private async status(): Promise<AgentStatusReport> {
     const now = this.clock();
     const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    const [open, left, config] = await Promise.all([
+    const [open, ended, config] = await Promise.all([
       this.orders.countDocuments({ state: { $in: OPEN_ORDER_STATES } }).exec(),
       this.orders
         .find({ state: 'left', leftAt: { $gte: dayStart, $lt: dayEnd } })
-        .select('windowAt leftAt')
-        .lean<{ windowAt: Date; leftAt: Date }[]>()
+        .select('kind endedAs windowAt leftAt')
+        .lean<{ kind: string; endedAs?: string; windowAt: Date; leftAt: Date }[]>()
         .exec(),
       this.settings.get(),
     ]);
+    const left = ended.filter((o) => o.endedAs === o.kind);
     const target = config.leaveMinutes * MINUTE_MS;
     const onTime = left.filter((o) => new Date(o.leftAt).getTime() - new Date(o.windowAt).getTime() <= target).length;
     return { open, capacity: null, onTimePct: left.length ? Math.round((onTime / left.length) * 100) : null };

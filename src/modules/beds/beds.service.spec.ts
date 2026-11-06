@@ -598,13 +598,15 @@ describe('BedsService', () => {
     patients.written = (u) => steps.push(`patient ${u.status}`);
     const listening = events.bedChanges$.subscribe((c) => steps.push(`announced ${c.kind}`));
 
+    const pressed = clinicNow().getTime();
     await service.discharge(b1, B, String(admission._id), { viaDischarge: true, at, patientStatus: 'Deceased' });
     listening.unsubscribe();
 
     assert.deepEqual(steps, ['patient Deceased', 'announced discharged']);
     const cleaning = await bed(b1);
     assert.equal(cleaning.state, 'cleaning');
-    assert.equal(cleaning.stateSince.getTime(), at.getTime());
+    // R25: `at` ends the stay (dischargedAt) only; the bed went to cleaning now, so it is not shown as late for cleaning.
+    assert.ok(cleaning.stateSince.getTime() >= pressed && cleaning.stateSince.getTime() <= clinicNow().getTime(), cleaning.stateSince.toISOString());
     const stored = await Admission.findById(admission._id).lean().exec();
     assert.equal(stored.status, 'discharged');
     assert.equal(stored.dischargedAt.getTime(), at.getTime());

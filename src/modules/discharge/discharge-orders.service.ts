@@ -501,8 +501,9 @@ export class DischargeOrdersService {
    * I1: the order ended while its window was opening, so its stop message may have been stored before
    * `discharge.window-opened` started the clocks, and a stop that comes first is not kept. The stop is taken out of
    * `announced`, so the one-minute pass sends it again. Not here: the Coordinator would drop a repeat within 60 s.
+   * Shared with the leaving service, whose Patient left, Body released and Left without discharge end orders too.
    */
-  private async stopDueAgain(orderId: Types.ObjectId, state: OrderState): Promise<void> {
+  async stopDueAgain(orderId: Types.ObjectId, state: OrderState): Promise<void> {
     const stop = STOP_MESSAGE[state];
     if (!stop) return;
     this.logger.warn(`Discharge order ${String(orderId)}: ${state} while its window was opening; ${stop} is left for the one-minute pass to send again`);
@@ -656,7 +657,7 @@ export class DischargeOrdersService {
   }
 
   /** R24: the plan's case, else the patient's open case, else their newest one; null when they have none. */
-  private async caseOf(plan: DischargePlanDocument): Promise<string | null> {
+  async caseOf(plan: Pick<DischargePlan, 'case' | 'patient'>): Promise<string | null> {
     if (plan.case) return String(plan.case);
     const c = await this.cases.forPatient(String(plan.patient));
     return c ? String(c._id) : null;

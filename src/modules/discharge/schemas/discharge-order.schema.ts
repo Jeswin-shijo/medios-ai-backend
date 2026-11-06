@@ -1,7 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 import { ActorRef, ActorRefSchema } from '../../revenue/schemas/actor-ref';
-import { CONDITIONS, Condition, DISCHARGE_KINDS, DischargeKind, LINE_KEYS, LineKey } from '../discharge-catalogue';
+import { COMPLETION_KINDS, CONDITIONS, CompletionKind, Condition, DISCHARGE_KINDS, DischargeKind, LINE_KEYS, LineKey } from '../discharge-catalogue';
 
 export type DischargeOrderDocument = DischargeOrder & Document;
 
@@ -174,6 +174,13 @@ export class DischargeOrder {
 
   @Prop({ type: ActorRefSchema })
   leftBy?: ActorRef;
+
+  /**
+   * How the stay ended (R21): the order's own kind at Patient left or Body released; `left-without-discharge` when a
+   * patient who had already gone was recorded. Only an order whose `endedAs` is its `kind` is timed as a discharge.
+   */
+  @Prop({ type: String, enum: COMPLETION_KINDS })
+  endedAs?: CompletionKind;
 
   @Prop({ type: BodyReceiverSchema })
   bodyReceiver?: BodyReceiver;

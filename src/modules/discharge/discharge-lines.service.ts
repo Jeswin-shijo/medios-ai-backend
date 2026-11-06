@@ -540,7 +540,9 @@ export class DischargeLinesService {
       return;
     }
     const n = order.readyCount;
-    const sent = await this.registration.send(READY, caseId, { orderId, bedLabel, kind: order.kind }, `${bedLabel}: Ready to leave (${KIND_LABEL[order.kind]})`, {
+    // A death ends in Body released, not a leaving.
+    const what = order.kind === 'died' ? 'Ready for release' : 'Ready to leave';
+    const sent = await this.registration.send(READY, caseId, { orderId, bedLabel, kind: order.kind }, `${bedLabel}: ${what} (${KIND_LABEL[order.kind]})`, {
       dedupeKey: `${READY}:${orderId}:${n}`,
     });
     if (!sent) return;

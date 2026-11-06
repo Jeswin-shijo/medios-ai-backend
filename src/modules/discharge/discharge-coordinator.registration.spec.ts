@@ -342,11 +342,17 @@ describe('DischargeRegistration', () => {
     await order('ordered');
     await order('ready');
     await order('cancelled');
-    await order('left', { windowAt: at(9), leftAt: at(10, 30) }); // 90 min
-    await order('left', { windowAt: at(10), leftAt: at(12) }); // 120 min: on the target counts as on time
-    await order('left', { windowAt: at(11), leftAt: at(13, 30) }); // 150 min: over
-    await order('left', { windowAt: at(8, 0, 25), leftAt: at(16, 0, 25) }); // yesterday: not today's
+    await order('left', { windowAt: at(9), leftAt: at(10, 30), endedAs: 'home' }); // 90 min
+    await order('left', { windowAt: at(10), leftAt: at(12), endedAs: 'home' }); // 120 min: on the target counts as on time
+    await order('left', { windowAt: at(11), leftAt: at(13, 30), endedAs: 'home' }); // 150 min: over
+    await order('left', { windowAt: at(8, 0, 25), leftAt: at(16, 0, 25), endedAs: 'home' }); // yesterday: not today's
+    // R21: an order a Left without discharge ended is never timed as a discharge, however late it was.
+    await order('left', { windowAt: at(6), leftAt: at(11), endedAs: 'left-without-discharge' });
+    await order('left', { kind: 'against-advice', windowAt: at(7), leftAt: at(12), endedAs: 'left-without-discharge' });
     assert.deepEqual(await def().status(), { open: 2, capacity: null, onTimePct: 67 });
+    // A death released within its target counts like any other ending of its own kind.
+    await order('left', { kind: 'died', windowAt: at(12), leftAt: at(12, 45), endedAs: 'died' });
+    assert.equal((await def().status()).onTimePct, 75);
     // The target comes from Settings → Discharge.
     await settings.save(ADMIN, { leaveMinutes: 150 });
     assert.equal((await def().status()).onTimePct, 100);

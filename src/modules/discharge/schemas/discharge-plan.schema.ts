@@ -21,6 +21,21 @@ export class TargetChange {
 }
 export const TargetChangeSchema = SchemaFactory.createForClass(TargetChange);
 
+/** A patient who had already gone, as a nurse or an admin recorded it. The reason stays here, never in a message. */
+@Schema({ _id: false })
+export class LeftWithoutDischargeRecord {
+  /** 1 to 300 characters. */
+  @Prop({ required: true }) reason: string;
+  /** Clinic clock: when the patient was last seen; the stay (and its bed days) ends here. */
+  @Prop({ type: Date, required: true }) lastSeenAt: Date;
+  @Prop({ type: ActorRefSchema, required: true }) by: ActorRef;
+  /** Clinic clock: when it was recorded. */
+  @Prop({ type: Date, required: true }) at: Date;
+  /** Real time `discharge.completed` went, for a stay with no order (an order records it in its own `announced`). */
+  @Prop({ type: Date }) announcedAt?: Date;
+}
+export const LeftWithoutDischargeRecordSchema = SchemaFactory.createForClass(LeftWithoutDischargeRecord);
+
 /** One per real admission, opened at bed assignment and completed when the patient leaves. */
 @Schema({ timestamps: true })
 export class DischargePlan {
@@ -82,6 +97,9 @@ export class DischargePlan {
 
   @Prop({ type: String, enum: COMPLETION_KINDS })
   completedKind?: CompletionKind;
+
+  @Prop({ type: LeftWithoutDischargeRecordSchema })
+  leftWithoutDischarge?: LeftWithoutDischargeRecord;
 }
 
 export const DischargePlanSchema = SchemaFactory.createForClass(DischargePlan);

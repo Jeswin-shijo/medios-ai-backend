@@ -78,7 +78,10 @@ export interface OpenDischargeOrder {
 
 /** How a stay ends. Only the Discharge Agent passes `viaDischarge`, which a real admission needs. */
 export interface DischargeBedOptions {
-  /** When the stay ended (clinic clock): the bed's `stateSince` and the admission's `dischargedAt`. Default now. */
+  /**
+   * When the stay ended (clinic clock): the admission's `dischargedAt`, so bed days stop there. Default now. The bed
+   * goes to cleaning now whatever this says (R25): a backdated `stateSince` would show it as late for cleaning.
+   */
   at?: Date;
   /** The patient's status afterwards. Default 'Discharged'. */
   patientStatus?: 'Discharged' | 'Deceased' | 'Left without discharge';
@@ -668,12 +671,13 @@ export class BedsService {
     if (!opts.viaDischarge && admissionId && (await this.admissions.exists({ _id: admissionId, sample: { $ne: true } }).exec())) {
       throw new ConflictException(USE_DISCHARGE_ORDER);
     }
-    const at = opts.at ?? clinicNow();
+    const now = clinicNow();
+    const at = opts.at ?? now;
     let before: BedDocument;
     try {
       before = await this.transition(
         { _id: bedId, state: 'occupied', admission: admissionId ?? null },
-        { $set: { state: 'cleaning', stateSince: at, admission: null, sample: false }, $unset: { occupantGender: 1 } },
+        { $set: { state: 'cleaning', stateSince: now, admission: null, sample: false }, $unset: { occupantGender: 1 } },
         BED_CHANGED,
       );
     } catch (err) {

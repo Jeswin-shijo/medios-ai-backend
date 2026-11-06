@@ -607,7 +607,8 @@ describe('DischargeLinesService', () => {
     assert.deepEqual(keyStates(row.lines), [['order', 'done'], ['summary', 'done'], ['death-certificate', 'done'], ['body-handover', 'done'], ['bill', 'waiting']]);
     assert.equal(row.state, 'ready');
     const [ready] = await w.sent('discharge.ready');
-    assert.deepEqual([ready.summary, ready.payload.kind], [`${BED}: Ready to leave (Died)`, 'died']);
+    // A body is released, not sent home: the Coordinator's log says so (Task 9's M10).
+    assert.deepEqual([ready.summary, ready.payload.kind], [`${BED}: Ready for release (Died)`, 'died']);
   });
 
   // ---------- Messages ----------
