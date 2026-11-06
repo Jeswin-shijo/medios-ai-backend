@@ -382,4 +382,17 @@ describe('DischargeRegistration', () => {
     assert.match(logged[1], /discharge\.ready/);
     assert.match(logged[2], /discharge\.nope/);
   });
+
+  test('R31: send with a dedupeKey goes again within the minute under a new key, and not under the same one', async () => {
+    const ready = { orderId: 'o1', bedLabel: 'GWA-12', kind: 'home' };
+    const summary = 'GWA-12: Ready to leave (Home)';
+    assert.equal(await reg.send('discharge.ready', caseId, ready, summary, { dedupeKey: 'discharge.ready:o1:1' }), true);
+    // The same key within the minute: the Coordinator drops it (still counted as sent).
+    assert.equal(await reg.send('discharge.ready', caseId, ready, summary, { dedupeKey: 'discharge.ready:o1:1' }), true);
+    // The identical payload under the next key: a Ready regained within the minute is announced again.
+    assert.equal(await reg.send('discharge.ready', caseId, ready, summary, { dedupeKey: 'discharge.ready:o1:2' }), true);
+    const sent = await m.AgentMessage.find({ type: 'discharge.ready' }).sort({ createdAt: 1, _id: 1 }).lean();
+    assert.deepEqual(sent.map((s) => s.dedupeKey), ['discharge.ready:o1:1', 'discharge.ready:o1:2']);
+    assert.equal(logged.length, 0);
+  });
 });

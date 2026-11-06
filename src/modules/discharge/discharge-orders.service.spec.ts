@@ -19,6 +19,7 @@ import { SchedulingWaitlistService } from '../scheduling/scheduling-waitlist.ser
 import { SettingsService } from '../settings/settings.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { DischargeRegistration } from './discharge-coordinator.registration';
+import { DischargeLinesService } from './discharge-lines.service';
 import { DischargeOrdersService, OrderInput } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
@@ -45,6 +46,7 @@ describe('DischargeOrdersService', () => {
   let reg: DischargeRegistration;
   let plans: DischargePlansService;
   let orders: DischargeOrdersService;
+  let lines: DischargeLinesService;
   let shajin: any;
   let caseId: string;
   let planId: string;
@@ -124,14 +126,14 @@ describe('DischargeOrdersService', () => {
     beforeForward = null;
     afterForward = null;
     const send = reg.send.bind(reg);
-    reg.send = async (type, onCase, payload, summary) => {
+    reg.send = async (type, onCase, payload, summary, opts) => {
       sends.push({ type, caseId: onCase, payload, summary });
       if (failNext?.type === type && failNext.times > 0) {
         failNext.times -= 1;
         return false;
       }
       await beforeForward?.(type);
-      const went = await send(type, onCase, payload, summary);
+      const went = await send(type, onCase, payload, summary, opts);
       await afterForward?.(type);
       return went;
     };
@@ -149,8 +151,13 @@ describe('DischargeOrdersService', () => {
     const waitlist = new SchedulingWaitlistService(m.WaitItem, m.Appointment, m.Patient, m.FollowUpItem, m.TaskAlertItem, doctors, appts, undefined as any);
     const followUps = new SchedulingFollowupsService(m.Patient, m.FollowUpItem, m.Case, opd, doctors, appts, waitlist, w.messages);
 
+    lines = new DischargeLinesService(
+      reg, w.messages, w.cases, m.DischargeOrder, m.DischargePlan, m.DischargeSummary, m.LabRequest, m.LabLine, m.PharmacyLine, m.FollowUpItem, m.Bill, m.ChargeLine,
+    );
+    (lines as any).logger = logger;
+    lines.clock = () => NOW;
     orders = new DischargeOrdersService(
-      reg, plans, settings, w.cases, beds, w.takeHome, followUps, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
+      reg, plans, settings, w.cases, beds, w.takeHome, followUps, lines, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
     );
     (orders as any).logger = logger;
     orders.clock = () => NOW;
@@ -181,10 +188,11 @@ describe('DischargeOrdersService', () => {
     // max(order time, leaving time less the 2 h target): the target already reaches back past the order.
     assert.equal(row.windowAt.getTime(), NOW.getTime());
     assert.ok(row.windowOpenedAt, 'the window is open');
-    // The order line is done by the ordering doctor; every other Home line waits (Task 9 computes them).
+    // The order line is done by the ordering doctor; the lines service then reads the rest from the agents' records:
+    // no Lab request is waiting, the follow-up is booked, the medicine is still to be issued and the stay has no bill.
     assert.deepEqual(
       row.lines.map((l: any) => [l.key, l.state]),
-      [['order', 'done'], ['summary', 'waiting'], ['lab', 'waiting'], ['take-home', 'waiting'], ['follow-up', 'waiting'], ['teaching', 'waiting'], ['bill', 'waiting']],
+      [['order', 'done'], ['summary', 'waiting'], ['lab', 'done'], ['take-home', 'waiting'], ['follow-up', 'done'], ['teaching', 'waiting'], ['bill', 'needs-person']],
     );
     assert.deepEqual([row.lines[0].by, row.lines[0].at.getTime()], [{ id: DOC.id, name: DOC.name }, NOW.getTime()]);
 
@@ -271,11 +279,22 @@ describe('DischargeOrdersService', () => {
     const o = await orders.order(DOC, planId, tomorrow());
     assert.ok(await stored(o._id), 'the order is saved');
     assert.equal(sendsOf('discharge.window-opened').length, 0);
+    assert.equal((await stored(o._id)).lines.find((l: any) => l.key === 'lab').state, 'done', 'no Lab request yet');
+    // A test sent to the lab meanwhile: Start now refreshes the checklist too.
+    const request = await m.LabRequest.create({
+      number: 'LR-0001', patient: w.patientId, patientUhid: w.patientUhid, patientName: 'Ravi Kumar', case: caseId,
+      orderedBy: { id: DOC.id, name: DOC.name }, priority: 'urgent', orderedAt: EVENING, collectBy: new Date(),
+    });
+    await m.LabLine.create({ request: request._id, test: 'crp', status: 'received', tatDueAt: new Date() });
 
     const pressed = at(26, 20, 30);
     orders.clock = () => pressed;
     await orders.startNow(DOC, String(o._id));
     const row = await stored(o._id);
+    assert.deepEqual(
+      [row.lines.find((l: any) => l.key === 'lab').state, row.lines.find((l: any) => l.key === 'lab').detail],
+      ['waiting', '1 result waiting'],
+    );
     assert.equal(row.windowAt.getTime(), pressed.getTime());
     assert.deepEqual([row.startedNow?.by, row.startedNow?.at?.getTime()], [{ id: DOC.id, name: DOC.name }, pressed.getTime()]);
     assert.ok(row.windowOpenedAt);
@@ -356,7 +375,7 @@ describe('DischargeOrdersService', () => {
     }));
     const row = await stored(t._id);
     assert.deepEqual([row.receivingHospital, row.transferReason], ['Medical College Hospital, Trivandrum', 'Cardiothoracic surgery']);
-    assert.deepEqual(row.lines.map((l: any) => [l.key, l.state]), [['order', 'done'], ['summary', 'waiting'], ['lab', 'waiting'], ['take-home', 'not-needed'], ['teaching', 'waiting'], ['bill', 'waiting']]);
+    assert.deepEqual(row.lines.map((l: any) => [l.key, l.state]), [['order', 'done'], ['summary', 'waiting'], ['lab', 'done'], ['take-home', 'not-needed'], ['teaching', 'waiting'], ['bill', 'needs-person']]);
   });
 
   test('Died with a future time of death is 400', async () => {
@@ -385,7 +404,7 @@ describe('DischargeOrdersService', () => {
     ]);
     assert.ok(row.windowOpenedAt);
     assert.deepEqual(row.lines.map((l: any) => [l.key, l.state]), [
-      ['order', 'done'], ['summary', 'waiting'], ['death-certificate', 'waiting'], ['body-handover', 'waiting'], ['bill', 'waiting'],
+      ['order', 'done'], ['summary', 'waiting'], ['death-certificate', 'waiting'], ['body-handover', 'waiting'], ['bill', 'needs-person'],
     ]);
     assert.deepEqual([row.takeHomeOrder, row.followUp, (await takeHomes()).length], [undefined, undefined, 0]);
     assert.equal((await w.sent('discharge.window-opened'))[0].summary, `${BED}: Discharge window opened (Died)`);
@@ -532,10 +551,11 @@ describe('DischargeOrdersService', () => {
     assert.deepEqual((await takeHomes()).map((t) => String(t._id)), [first, String(row.addedTakeHomeOrders[0])]);
     assert.deepEqual((await linesOf(row.addedTakeHomeOrders[0])).map((l) => [l.medicine, l.status]), [['amoxicillin', 'to-check']]);
 
-    // A follow-up, as none is stored: the not-needed line waits again.
+    // A follow-up, as none is stored: the not-needed line waits again, and the refresh after the edit finds it booked.
     await orders.edit(DOC, id, { followUp: { inDays: 7, doctorId: String(shajin._id) } });
     row = await stored(id);
-    assert.deepEqual([row.followUp.status, row.noFollowUp, row.lines.find((l: any) => l.key === 'follow-up').state], ['booked', false, 'waiting']);
+    const followUpLine = row.lines.find((l: any) => l.key === 'follow-up');
+    assert.deepEqual([row.followUp.status, row.noFollowUp, followUpLine.state, followUpLine.by], ['booked', false, 'done', undefined]);
     await assert.rejects(orders.edit(DOC, id, { followUp: { inDays: 10, doctorId: String(shajin._id) } }), ConflictException);
     assert.equal(await m.FollowUpItem.countDocuments(), 1);
 
@@ -629,6 +649,17 @@ describe('DischargeOrdersService', () => {
     assert.equal(row.state, 'cancelled');
     assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['running', 'running']);
     assert.ok(!row.announced.includes('discharge.cancelled'), row.announced.join(', '));
+  });
+
+  test('a checklist that fails to refresh never undoes the order: logged, and the one-minute pass reads it again', async () => {
+    lines.refresh = async () => {
+      throw new Error('database down');
+    };
+    const o = await orders.order(DOC, planId, home({ followUp: 'none' }));
+    const row = await stored(o._id);
+    assert.deepEqual([row?.state, (await planOf()).state, String(row?._id)], ['ordered', 'ordered', String(o._id)]);
+    assert.deepEqual(sends.map((s) => s.type), ['discharge.ordered', 'discharge.window-opened']);
+    assert.ok(logged.some((l) => /checklist not refreshed \(database down\)/.test(l)), logged.join(' | '));
   });
 
   test('a plan with no case orders on the patient\'s open case', async () => {

@@ -12,6 +12,7 @@ import { FollowUpOutcome, SchedulingFollowupsService } from '../scheduling/sched
 import { UserRole } from '../users/schemas/user.schema';
 import { CONDITIONS, Condition, DISCHARGE_KINDS, DischargeKind, KIND_LABEL, LINE_KEYS, LINE_RULE, LineKey } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
+import { DischargeLinesService } from './discharge-lines.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { toRealTime, windowStart } from './discharge-time';
@@ -181,6 +182,8 @@ export class DischargeOrdersService {
     private readonly beds: BedsService,
     private readonly takeHome: PharmacyTakeHomeService,
     private readonly followUps: SchedulingFollowupsService,
+    /** The checklist, read from the agents' records (it never depends on this service). */
+    private readonly lines: DischargeLinesService,
     @InjectModel(DischargePlan.name) private readonly plans: Model<DischargePlanDocument>,
     @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>,
     @InjectModel(DischargeSummary.name) private readonly summaries: Model<DischargeSummaryDocument>,
@@ -248,7 +251,7 @@ export class DischargeOrdersService {
     });
     this.touchBeds();
     if (saved.windowAt.getTime() <= now.getTime()) await this.openWindow(saved._id, now);
-    return this.reread(saved._id);
+    return this.refreshLines(saved._id);
   }
 
   /**
@@ -334,7 +337,7 @@ export class DischargeOrdersService {
         if (moved.matchedCount && windowAt.getTime() <= now.getTime()) await this.openWindow(order._id, now);
       }
     }
-    return this.reread(order._id);
+    return this.refreshLines(order._id);
   }
 
   /**
@@ -387,7 +390,7 @@ export class DischargeOrdersService {
       throw new ConflictException(stateRefusal(current?.state));
     }
     await this.openWindow(started._id, now);
-    return this.reread(order._id);
+    return this.refreshLines(order._id);
   }
 
   /**
@@ -652,5 +655,18 @@ export class DischargeOrdersService {
     const order = await this.orders.findById(orderId).exec();
     if (!order) throw new NotFoundException('Discharge order not found');
     return order;
+  }
+
+  /**
+   * The checklist read again from the agents' records, as the last step of an order, an edit or Start now.
+   * A failure is logged and never undoes what was saved: the one-minute pass refreshes every open order.
+   */
+  private async refreshLines(orderId: Types.ObjectId): Promise<DischargeOrderDocument> {
+    try {
+      return await this.lines.refresh(String(orderId));
+    } catch (e) {
+      this.logger.warn(`Discharge order ${String(orderId)}: checklist not refreshed (${(e as Error).message})`);
+      return this.reread(orderId);
+    }
   }
 }

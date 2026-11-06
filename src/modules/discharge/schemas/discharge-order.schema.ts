@@ -181,6 +181,14 @@ export class DischargeOrder {
   /** The message types sent for this order; the one-minute pass re-sends one a record says is due but is missing here. */
   @Prop({ type: [String], default: [] })
   announced: string[];
+
+  /**
+   * How many times the order became Ready (R31): `discharge.ready` goes with the dedupe key
+   * `discharge.ready:<orderId>:<readyCount>`, so a Ready lost and regained within the Coordinator's minute is
+   * announced again. Losing Ready takes `discharge.ready` out of `announced`, so a send that failed is due again.
+   */
+  @Prop({ default: 0 })
+  readyCount: number;
 }
 
 /** Every Pharmacy take-home order of a discharge order, the first one first. */

@@ -129,7 +129,10 @@ function namesPatient(summary: string, name: string): boolean {
 export class DischargeRegistration implements OnModuleInit {
   private readonly logger = new Logger(DischargeRegistration.name);
 
-  /** Message handlers by type, set by the services that react (later tasks), so this file need not import them. A type with none does nothing. */
+  /**
+   * Message handlers by type, set by the services that react, so this file need not import them: the plans service
+   * sets the bed.* ones, the lines service every other type. A type with none does nothing.
+   */
   readonly wake = new Map<string, (messageId: string) => Promise<void>>();
 
   /** The clinic clock, for "today" in the status; a spec replaces it. */
@@ -155,15 +158,19 @@ export class DischargeRegistration implements OnModuleInit {
    * longer one). As a safety net, a summary holding the case's patient name is not sent; with no case it cannot
    * be checked, so callers must keep names out. Never throws. True when the message went, or the same one went
    * within the last minute (the Coordinator drops the repeat); false, with a warning, when it was not sent.
+   * `opts.dedupeKey` replaces the Coordinator's identical-payload key (R31), for a message that must go again within
+   * the minute, such as a Ready regained (`discharge.ready:<orderId>:<n>`); a repeat of the same key is still dropped.
    */
-  async send(type: string, caseId: string | null, payload: Record<string, unknown>, summary: string): Promise<boolean> {
+  async send(type: string, caseId: string | null, payload: Record<string, unknown>, summary: string, opts: { dedupeKey?: string } = {}): Promise<boolean> {
     try {
       const patientName = caseId ? (await this.cases.get(caseId))?.patientName : null;
       if (patientName && namesPatient(summary, patientName)) {
         this.logger.warn(`${type} not sent: its summary names the patient (case ${caseId})`);
         return false;
       }
-      await this.messages.send({ case: caseId, from: 'discharge', to: ['coordinator'], type, priority: 'medium', summary, payload });
+      await this.messages.send({
+        case: caseId, from: 'discharge', to: ['coordinator'], type, priority: 'medium', summary, payload, ...(opts?.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
+      });
       return true;
     } catch (e) {
       this.logger.warn(`${type} not sent${caseId ? ` (case ${caseId})` : ''}: ${(e as Error).message}`);
