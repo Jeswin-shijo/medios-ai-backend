@@ -133,6 +133,31 @@ describe('RevenueKioskService', () => {
     assert.equal((await m.Bill.findById(opdBill._id).lean())!.totals.balance, 300);
   });
 
+  test("a visit by a patient still admitted after the stay's bill settled is an OPD visit: no continuation bill, the stay untouched", async () => {
+    // Discharge design 4.5: a case-linked late charge for this stay would open a continuation bill. A kiosk visit carries no
+    // case and is not a stay's charge, so it keeps to the day's walk-in bill and the appointment's own OPD bill.
+    const adm = await m.Admission.create({
+      patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3,
+      status: 'active', admittedAt: new Date(Date.now() - 3 * 86_400_000), admittedBy: 'Nurse',
+    });
+    const settled = await m.Bill.create({
+      number: 'BL-0900', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, kind: 'admission', state: 'settled', case: new Types.ObjectId(),
+      admission: adm._id, openedAt: new Date(Date.now() - 3 * 86_400_000), finalAt: new Date(), settledAt: new Date(), payer: 'self',
+      totals: { charges: 9000, discounts: 0, payments: 9000, refunds: 0, balance: 0 },
+    });
+    const untouched = await m.Bill.findById(settled._id).lean();
+
+    const walkIn = (await m.Bill.findById((await svc.record(visit())).billId).lean())!;
+    assert.equal(walkIn.kind, 'walk-in');
+    const a = await appt();
+    const onAppointment = (await m.Bill.findById((await svc.record(visit({ appointmentId: String(a._id) }))).billId).lean())!;
+    assert.deepEqual([onAppointment.kind, String(onAppointment.appointment)], ['opd', String(a._id)]);
+
+    assert.equal(await m.Bill.countDocuments({ kind: 'admission' }), 1, 'no continuation bill');
+    assert.equal(await m.Bill.countDocuments({ continuationOf: { $ne: null } } as any), 0);
+    assert.deepEqual(await m.Bill.findById(settled._id).lean(), untouched, 'the settled stay bill is untouched');
+  });
+
   test('the bill of an earlier day: routing uses the day of the visit', async () => {
     const record = await svc.record(visit({ day: '2026-01-05' }));
     const bill = (await m.Bill.findById(record.billId).lean())!;
