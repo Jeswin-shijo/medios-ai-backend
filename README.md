@@ -286,7 +286,7 @@ MONGODB_URI=... npm run import-beds -- path/to/beds.csv
 - Every imported bed starts free. The script prints every problem it finds (`Row N: ...`, N counting data rows without the header) and changes nothing if there are any.
 - It refuses to run while any bed is occupied or held (`Beds are in use (N occupied or held)...`), and also while any admission, bed suggestion or Bed Agent request exists (`Admission history exists. Importing replaces all beds and would delete 4 admissions, 2 bed suggestions, 10 bed requests and 168 hourly snapshots...`); it changes nothing in either case. `--force` replaces the wards and beds anyway.
 - Every import that goes ahead also deletes all admissions, bed suggestions, Bed Agent requests and hourly bed snapshots, because they point at or describe the old beds, and marks the requests' open alerts in Tasks & Alerts as Completed. Hourly snapshots alone never stop an import: the API takes one at every start.
-- It prints the database host (never the full address). Unlike `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
+- It prints the database host (never the full address). Unlike `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line (it refuses to run without one).
 
 ---
 
