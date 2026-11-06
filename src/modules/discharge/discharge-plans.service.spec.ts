@@ -172,11 +172,13 @@ describe('DischargePlansService', () => {
   });
 
   test('a sample admission gets no plan', async () => {
-    // A seeded sample occupant: a made-up patient id, no Patient record and no case.
+    // A seeded sample occupant: a made-up patient id, no Patient record and no case. Its bed points back to it, as
+    // seed-beds leaves it, so only the sample check keeps it out.
     const sample = await m.Admission.create({
       patient: new Types.ObjectId(), patientUhid: 'SAMPLE-0001', patientName: 'Sample inpatient', bed: hduBed._id, roomClass: 'hdu', expectedStayDays: 2,
       admittedAt: at(25, 10), admittedBy: 'Seed', sample: true,
     });
+    await m.Bed.updateOne({ _id: hduBed._id }, { $set: { state: 'occupied', admission: sample._id, sample: true } });
     assert.equal(await plans.ensurePlan(String(sample._id), null), null);
     await assigned(sample._id, null);
     // Nor does a stay that has ended, or one that does not exist; a real stay beside them does.
@@ -195,6 +197,19 @@ describe('DischargePlansService', () => {
     for (const t of ['bed.assigned', 'bed.transferred', 'bed.discharged']) await assert.doesNotReject(handler(t)(String(new Types.ObjectId())), t);
     assert.equal(logged.length, 3);
     assert.ok(logged.every((l) => / not found/.test(l)), logged.join(' | '));
+  });
+
+  test('bed.transferred for a sample occupant makes no plan', async () => {
+    // A sample moved to HDU • Bed 1: as after any move, the new bed points back to the stay. The bridge sends no case.
+    const sample = await m.Admission.create({
+      patient: new Types.ObjectId(), patientUhid: 'SAMPLE-0002', patientName: 'Sample inpatient', bed: hduBed._id, roomClass: 'hdu', expectedStayDays: 2,
+      admittedAt: at(25, 10), admittedBy: 'Seed', sample: true, transfers: [{ fromBed: spareBed._id, toBed: hduBed._id, at: at(26, 10), by: 'Nurse Anjali Thomas' }],
+    });
+    await m.Bed.updateOne({ _id: hduBed._id }, { $set: { state: 'occupied', admission: sample._id, sample: true } });
+    await bedMessage('bed.transferred', null, { bedId: String(hduBed._id), bedLabel: HDU_1, fromBedLabel: 'Ward A • Bed 14', admissionId: String(sample._id), ward: 'HDU (step-down)' });
+    assert.equal(await m.DischargePlan.countDocuments(), 0);
+    assert.deepEqual(sends, [], 'nothing is sent');
+    assert.deepEqual(logged, []);
   });
 
   test('setTarget logs the change, sets 11:00 and sends discharge.planned', async () => {
