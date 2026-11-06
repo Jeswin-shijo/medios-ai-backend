@@ -133,9 +133,13 @@ export class DischargeOrder {
   @Prop({ default: '' })
   note: string;
 
-  /** The Pharmacy take-home order. */
+  /** The Pharmacy take-home order: the first one, placed with the order or by the first edit that adds medicines. */
   @Prop({ type: MongooseSchema.Types.ObjectId })
   takeHomeOrder?: Types.ObjectId;
+
+  /** Later take-home orders: an edit that adds medicines to an order that has one places another (see `takeHomeOrderIds`). */
+  @Prop({ type: [MongooseSchema.Types.ObjectId], default: [] })
+  addedTakeHomeOrders: Types.ObjectId[];
 
   @Prop({ default: false })
   noTakeHome: boolean;
@@ -178,6 +182,12 @@ export class DischargeOrder {
   @Prop({ type: [String], default: [] })
   announced: string[];
 }
+
+/** Every Pharmacy take-home order of a discharge order, the first one first. */
+export const takeHomeOrderIds = (o: Pick<DischargeOrder, 'takeHomeOrder' | 'addedTakeHomeOrders'>): string[] => [
+  ...(o.takeHomeOrder ? [String(o.takeHomeOrder)] : []),
+  ...(o.addedTakeHomeOrders ?? []).map(String),
+];
 
 export const DischargeOrderSchema = SchemaFactory.createForClass(DischargeOrder);
 // One order per plan that is not cancelled. `left` counts too, so a plan whose patient has left is never ordered again.

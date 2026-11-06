@@ -33,8 +33,11 @@ export const ceftriaxone1: LineInput = { medicine: 'ceftriaxone', product: 'ceft
 export const pantoprazole40: LineInput = { medicine: 'pantoprazole', product: 'pantoprazole-tab-40', dose: 40, route: 'oral', frequency: 'OD', durationDays: 7 };
 export const omeprazole20: LineInput = { medicine: 'omeprazole', product: 'omeprazole-cap-20', dose: 20, route: 'oral', frequency: 'OD', durationDays: 7 };
 
-/** The pharmacy agent wired to a test database, with a stub Lab agent that can send lab.resulted. */
-export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose?: boolean } = {}) {
+/**
+ * The pharmacy agent wired to a test database, with a stub Lab agent that can send lab.resulted. `stubDischarge: false`
+ * leaves the Discharge agent out, for a spec that registers the real one.
+ */
+export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose?: boolean; stubDischarge?: boolean } = {}) {
   const registry = new AgentRegistry();
   const events = new CoordinatorEvents();
   const messages = new MessagesService(m.AgentMessage, registry, events);
@@ -57,7 +60,9 @@ export async function buildWorld(m: ReturnType<typeof models>, opts: { stubClose
     status: async () => ({ open: 0, capacity: 0, onTimePct: null }),
   });
   // A stub Discharge agent, so a spec can send discharge.completed and discharge.cancelled.
-  registry.register({ key: 'discharge', messageTypes: DISCHARGE_MESSAGE_TYPES, status: async () => ({ open: 0, capacity: 0, onTimePct: null }) });
+  if (opts.stubDischarge !== false) {
+    registry.register({ key: 'discharge', messageTypes: DISCHARGE_MESSAGE_TYPES, status: async () => ({ open: 0, capacity: 0, onTimePct: null }) });
+  }
   const takeHome = new PharmacyTakeHomeService(orders, checks, m.PharmacyOrder, m.PharmacyLine);
   const p = await m.Patient.create({ uhid: 'MHK202600901', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000001', vitals: { weightKg: 64 } });
   const patientId = String(p._id);
