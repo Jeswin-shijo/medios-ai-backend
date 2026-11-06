@@ -24,13 +24,13 @@ import { SettingsService } from '../settings/settings.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { CourseFacts, DischargeAiService, leaks, templateCourse, templateDaySummary } from './discharge-ai';
-import { DEFAULT_WARNING_SIGNS, SUMMARY_SECTIONS } from './discharge-catalogue';
+import { DEFAULT_WARNING_SIGNS } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService } from './discharge-lines.service';
 import { DischargeOrdersService, OrderInput } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
-import { DischargeSummaryService } from './discharge-summary.service';
+import { DischargeSummaryService, EDITABLE_SECTIONS, SUMMARY_CHANGED, summaryText } from './discharge-summary.service';
 import { COURSE_SOURCES } from './schemas/discharge-summary.schema';
 
 const ADMIN = { id: 'a1', name: 'Admin', role: UserRole.ADMIN };
@@ -307,7 +307,7 @@ describe('DischargeSummaryService', () => {
     const followUp = await m.FollowUpItem.findById((await stored(o._id)).followUp.followUpId).lean<any>();
     assert.ok(followUp?.followUpDate && followUp.followUpTime, 'the follow-up is booked');
     assert.equal(s.kind, 'home');
-    assert.deepEqual(Object.keys(s.sections), SUMMARY_SECTIONS('home').filter((k) => k !== 'course'));
+    assert.deepEqual(Object.keys(s.sections), EDITABLE_SECTIONS('home'));
     assert.deepEqual(s.sections, {
       details: details('Date of discharge: 26 Sep 2026'),
       reason: REASON,
@@ -318,9 +318,10 @@ describe('DischargeSummaryService', () => {
       medicines: [PANTOPRAZOLE, AMOXICILLIN].join('\n'),
       followUp: `${followUp.followUpDate} at ${followUp.followUpTime} with Dr. Shajin`,
       warningSigns: DEFAULT_WARNING_SIGNS,
+      note: NOTE,
     });
-    // The AI is off in this world: the course is the rules' paragraph, and the doctor's note follows it.
-    assert.deepEqual(s.course, { text: `${STAY_COURSE}\n\n${NOTE}`, source: 'rules' });
+    // The AI is off in this world: the course is the rules' paragraph alone (R39: the note is its own section).
+    assert.deepEqual(s.course, { text: STAY_COURSE, source: 'rules' });
     assert.deepEqual([s.edited, s.versions, s.signedAt, s.signedBy, s.documentId, s.draftedAt.getTime()], [[], [], undefined, undefined, undefined, NOW.getTime()]);
 
     // A follow-up that found no slot is on the waitlist.
@@ -345,12 +346,12 @@ describe('DischargeSummaryService', () => {
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its letter');
     assert.equal(s.kind, 'transfer');
-    assert.deepEqual(Object.keys(s.sections), SUMMARY_SECTIONS('transfer').filter((k) => k !== 'course'));
+    assert.deepEqual(Object.keys(s.sections), EDITABLE_SECTIONS('transfer'));
     assert.ok(!('followUp' in s.sections), 'no follow-up section');
     assert.deepEqual([s.sections.receivingHospital, s.sections.transferReason], [HOSPITAL, TRANSFER_WHY]);
     assert.equal(s.sections.details, details('Date of transfer: 26 Sep 2026'));
-    assert.deepEqual([s.sections.condition, s.sections.medicines, s.sections.results], ['Stable', 'None', RESULTS]);
-    assert.equal(s.course.text, `${STAY_COURSE.replace('improved', 'stable')}\n\n${NOTE}`);
+    assert.deepEqual([s.sections.condition, s.sections.medicines, s.sections.results, s.sections.note], ['Stable', 'None', RESULTS, NOTE]);
+    assert.equal(s.course.text, STAY_COURSE.replace('improved', 'stable'));
 
     // R34: with no follow-up section, a result put off as "follow up later" is named for the receiving hospital.
     await lines.followUpLater(DOC, String(o._id), pending.requestId);
@@ -365,12 +366,12 @@ describe('DischargeSummaryService', () => {
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its death summary');
     assert.equal(s.kind, 'died');
-    assert.deepEqual(Object.keys(s.sections), ['details', 'reason', 'diagnosis', 'procedures', 'results', 'timeOfDeath', 'causeOfDeath']);
+    assert.deepEqual(Object.keys(s.sections), ['details', 'reason', 'diagnosis', 'procedures', 'results', 'timeOfDeath', 'causeOfDeath', 'note']);
     for (const gone of ['medicines', 'followUp', 'warningSigns', 'condition']) assert.ok(!(gone in s.sections), `no ${gone}`);
-    assert.deepEqual([s.sections.timeOfDeath, s.sections.causeOfDeath], ['26 Sep 2026, 10:40 AM', CAUSE]);
+    assert.deepEqual([s.sections.timeOfDeath, s.sections.causeOfDeath, s.sections.note], ['26 Sep 2026, 10:40 AM', CAUSE, NOTE]);
     assert.equal(s.sections.details, details('Date of death: 26 Sep 2026'));
     // The course stops at the time of death and has no condition at discharge.
-    assert.equal(s.course.text, `Admitted to the ICU for 1 day, then the general ward for 2 days. Echocardiogram. Investigations: Troponin I (critical), Complete blood count (abnormal), CRP (normal). Treated with 2 medicines.\n\n${NOTE}`);
+    assert.equal(s.course.text, `Admitted to the ICU for 1 day, then the general ward for 2 days. Echocardiogram. Investigations: Troponin I (critical), Complete blood count (abnormal), CRP (normal). Treated with 2 medicines.`);
     assert.deepEqual(logged, []);
   });
 
@@ -379,12 +380,13 @@ describe('DischargeSummaryService', () => {
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its note');
     assert.equal(s.kind, 'against-advice');
-    assert.deepEqual(Object.keys(s.sections), SUMMARY_SECTIONS('against-advice').filter((k) => k !== 'course'));
+    assert.deepEqual(Object.keys(s.sections), EDITABLE_SECTIONS('against-advice'));
     assert.equal(s.sections.condition, 'Unchanged. Leaving against medical advice: the risks were explained.');
     assert.match(s.sections.details, /^Date of leaving: 26 Sep 2026$/m);
     assert.deepEqual([s.sections.medicines, s.sections.followUp], ['None', 'None booked']);
-    // No note for the summary: the course is the paragraph alone.
+    // No note for the summary: the note section is empty.
     assert.deepEqual(s.course, { text: BARE_COURSE.replace('improved', 'unchanged'), source: 'rules' });
+    assert.equal(s.sections.note, '');
   });
 
   test('the AI input has no name, UHID, id, diagnosis or note', async () => {
@@ -403,8 +405,9 @@ describe('DischargeSummaryService', () => {
     for (const secret of secrets) assert.ok(!blob.includes(secret), `leaked ${secret}`);
     assert.ok(!leaks(blob), 'the leak check passes on the whole call');
     assert.ok(!/[a-f\d]{24}/i.test(blob) && !/\d{9,}/.test(blob));
-    // The AI's answer is the course paragraph; the doctor's note (never sent) follows it.
-    assert.deepEqual((await summaryOf(o._id)).course, { text: `${AI_TEXT}\n\n${NOTE}`, source: 'ai' });
+    // The AI's answer is the course paragraph; the doctor's note (never sent) is its own section.
+    const s = await summaryOf(o._id);
+    assert.deepEqual([s.course, s.sections.note], [{ text: AI_TEXT, source: 'ai' }, NOTE]);
     assert.deepEqual(logged, []);
   });
 
@@ -413,13 +416,13 @@ describe('DischargeSummaryService', () => {
     const o = await place(planId, homeNone());
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its summary');
-    assert.deepEqual(s.course, { text: `${BARE_COURSE}\n\n${NOTE}`, source: 'ai-sample' }, 'canned: the rules paragraph, marked as a sample');
+    assert.deepEqual(s.course, { text: BARE_COURSE, source: 'ai-sample' }, 'canned: the rules paragraph, marked as a sample');
     assert.equal(calls.length, 0, 'no AI service is called in sample mode');
     // R13: with the AI off the rules paragraph is stored as the rules', not as the AI's.
     assert.ok((COURSE_SOURCES as readonly string[]).includes('rules'));
     useAi('none');
     await summary.redraftCourse(DOC, String(o._id));
-    assert.deepEqual((await summaryOf(o._id)).course, { text: `${BARE_COURSE}\n\n${NOTE}`, source: 'rules' });
+    assert.deepEqual((await summaryOf(o._id)).course, { text: BARE_COURSE, source: 'rules' });
     assert.deepEqual(logged, []);
   });
 
@@ -428,11 +431,11 @@ describe('DischargeSummaryService', () => {
     useAi('claude', { text: `${NAME} (${UHID}) recovered well.` });
     const o = await place(planId, home());
     const id = String(o._id);
-    assert.deepEqual((await summaryOf(id))?.course, { text: `${STAY_COURSE}\n\n${NOTE}`, source: 'rules' });
+    assert.deepEqual((await summaryOf(id))?.course, { text: STAY_COURSE, source: 'rules' });
     // A gate-pass number is a leak too (GP- joins Revenue's list).
     useAi('claude', { text: 'Recovered well and left with gate pass GP-0007.' });
     await summary.redraftCourse(DOC, id);
-    assert.deepEqual((await summaryOf(id)).course, { text: `${STAY_COURSE}\n\n${NOTE}`, source: 'rules' });
+    assert.deepEqual((await summaryOf(id)).course, { text: STAY_COURSE, source: 'rules' });
     for (const bad of ['GP-0001', 'gp-0042', 'BL-0042', 'LR-0016', 'MO-0004', 'MHK202600901', 'Dr. Shajin', '507f1f77bcf86cd799439011', 'call 9100000070']) {
       assert.ok(leaks(bad), bad);
     }
@@ -440,7 +443,7 @@ describe('DischargeSummaryService', () => {
     // A clean answer is used.
     useAi('claude');
     await summary.redraftCourse(DOC, id);
-    assert.deepEqual((await summaryOf(id)).course, { text: `${AI_TEXT}\n\n${NOTE}`, source: 'ai' });
+    assert.deepEqual((await summaryOf(id)).course, { text: AI_TEXT, source: 'ai' });
   });
 
   test('R16: an empty sections object round-trips, in a signed version too, and a named section saves in place', async () => {
@@ -616,7 +619,7 @@ describe('DischargeSummaryService', () => {
 
     // An edit: the doctor never signs text they have not seen.
     meanwhile = () => summary.save(ADMIN, id, { reason: 'Changed meanwhile' });
-    await assert.rejects(summary.sign(DOC, id), (e: unknown) => e instanceof ConflictException && /just changed/.test((e as Error).message));
+    await assert.rejects(summary.sign(DOC, id), (e: unknown) => e instanceof ConflictException && /changed since you opened it/.test((e as Error).message));
     let s = await summaryOf(id);
     assert.deepEqual([s.signedAt, s.documentId, s.sections.reason], [undefined, undefined, 'Changed meanwhile']);
     assert.deepEqual((await m.ClinicalDocument.find().lean<any[]>()).map((d) => d.status), ['Archived']);
@@ -708,6 +711,203 @@ describe('DischargeSummaryService', () => {
     assert.equal(String(again._id), String(before._id));
     assert.deepEqual((await summaryOf(id)).sections, before.sections, 'drafting a cancelled order changes nothing');
     assert.equal(await m.ClinicalDocument.countDocuments(), 0);
+  });
+
+  // ---------- R38: save and sign what the doctor saw ----------
+
+  const changedSince = (e: unknown) => e instanceof ConflictException && (e.getResponse() as { code?: string }).code === SUMMARY_CHANGED;
+
+  test('R38: sign with a stale seen after a refresh is 409, with nothing signed and no Document; the current one signs', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const seen = (await summary.draft(id)).updatedAt!.toISOString();
+    // A result is released, and the summary is read again from the record before the doctor presses Sign.
+    await labRequest([{ test: 'crp', status: 'released', releasedAt: at(26, 10), results: [row('CRP', 3, 'mg/L')] }]);
+    await summary.draft(id);
+    const refreshed = await summaryOf(id);
+    assert.equal(refreshed.sections.results, 'CRP, 26 Sep 2026: 3 mg/L', 'the refresh changed a section');
+
+    await assert.rejects(summary.sign(DOC, id, seen), changedSince);
+    let s = await summaryOf(id);
+    assert.deepEqual([s.signedAt, s.signedBy, s.documentId], [undefined, undefined, undefined], 'nothing signed');
+    assert.equal(await m.ClinicalDocument.countDocuments(), 0, 'no document');
+    assert.equal((await w.sent('discharge.summary-signed')).length, 0);
+    await assert.rejects(summary.sign(DOC, id, 'not a time'), BadRequestException);
+
+    // Reloaded: the version the doctor sees now signs.
+    await summary.sign(DOC, id, refreshed.updatedAt.toISOString());
+    s = await summaryOf(id);
+    assert.ok(s.signedAt);
+    const [d] = await m.ClinicalDocument.find().lean<any[]>();
+    assert.match(d.description, /\nKey results\nCRP, 26 Sep 2026: 3 mg\/L\n/);
+  });
+
+  test('R38: save with a stale seen is 409 and marks nothing edited; with the current seen, only real changes are edits', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const opened = (await summary.draft(id)).toObject() as any;
+    // The editor sends every section back as it loaded them, with the reason rewritten.
+    const sent = { ...opened.sections, reason: 'Fever and cough' };
+    // Meanwhile the order's diagnosis changes and the summary follows it.
+    await orders.edit(DOC, id, { diagnosis: 'Pneumonia, resolved' });
+    await summary.draft(id);
+
+    await assert.rejects(summary.save(DOC, id, sent, 'Recovered on oral antibiotics.', opened.updatedAt.toISOString()), changedSince);
+    let s = await summaryOf(id);
+    assert.deepEqual([s.edited, s.sections.reason, s.sections.diagnosis, s.course.source], [[], REASON, 'Pneumonia, resolved', 'rules'], 'nothing written');
+
+    // Against the version reloaded, the sections sent back unchanged are not edits, and the refreshed diagnosis stays.
+    const reloaded = await summaryOf(id);
+    await summary.save(DOC, id, { ...reloaded.sections, reason: 'Fever and cough' }, undefined, reloaded.updatedAt.toISOString());
+    s = await summaryOf(id);
+    assert.deepEqual([s.edited, s.sections.reason, s.sections.diagnosis], [['reason'], 'Fever and cough', 'Pneumonia, resolved']);
+    await assert.rejects(summary.save(DOC, id, {}, undefined, 'not a time'), BadRequestException);
+  });
+
+  // ---------- R39: the note is its own section; R40: a template course follows the record ----------
+
+  test('R39: the note is its own section, refreshed from the order (also after an edit during the AI wait), never in course.text', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    let s = await summaryOf(id);
+    assert.deepEqual([s.sections.note, s.course.text], [NOTE, BARE_COURSE]);
+
+    await orders.edit(DOC, id, { note: 'Home with family; diet as advised' });
+    await summary.draft(id);
+    s = await summaryOf(id);
+    assert.equal(s.sections.note, 'Home with family; diet as advised');
+    assert.ok(!s.course.text.includes('family'), 'course.text never holds the note');
+    // The Document and the print show it after the course paragraph.
+    assert.ok(summaryText(s.kind, s.sections, s.course).includes(`Course in hospital\n${BARE_COURSE}\n\nHome with family; diet as advised\n\n`));
+    // A note written by hand is the doctor's: an order edit no longer moves it.
+    await summary.save(DOC, id, { note: 'Written by hand' });
+    await orders.edit(DOC, id, { note: 'Changed on the order' });
+    await summary.draft(id);
+    assert.equal((await summaryOf(id)).sections.note, 'Written by hand');
+
+    // An order edit that lands while the background draft waits for the AI shows on the next draft.
+    const mary = await another('MHK202600902', 'Mary Jeni');
+    let answer!: (v: { text: string; sample: boolean; source: 'ai' | 'rules' }) => void;
+    let asked!: () => void;
+    const waiting = new Promise<void>((resolve) => (asked = resolve));
+    (summary as any).ai = {
+      course: () => {
+        asked();
+        return new Promise((resolve) => (answer = resolve));
+      },
+    };
+    const second = await orders.order(DOC, mary.planId, homeNone());
+    await waiting;
+    await orders.edit(DOC, String(second._id), { note: 'Edited while the summary was drafting' });
+    answer({ text: AI_TEXT, sample: false, source: 'ai' });
+    await orders.idle();
+    await summary.draft(String(second._id));
+    s = await summaryOf(second._id);
+    assert.deepEqual([s.sections.note, s.course.text], ['Edited while the summary was drafting', AI_TEXT]);
+    assert.deepEqual(logged, []);
+  });
+
+  test("R40: a rules or sample course follows the record on refresh; the AI's or staff's paragraph never moves", async () => {
+    // Rules: the condition changes on the order, and the paragraph with it.
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    await orders.edit(DOC, id, { condition: 'stable' });
+    await summary.draft(id);
+    let s = await summaryOf(id);
+    assert.deepEqual([s.sections.condition, s.course], ['Stable', { text: BARE_COURSE.replace('improved', 'stable'), source: 'rules' }]);
+
+    // Sample: the same template, still marked as the sample.
+    useAi('sample');
+    const mary = await another('MHK202600902', 'Mary Jeni');
+    const b = await place(mary.planId, homeNone());
+    assert.deepEqual((await summaryOf(b._id)).course, { text: 'Admitted to the general ward for 1 day. Condition at discharge: improved.', source: 'ai-sample' });
+    await orders.edit(DOC, String(b._id), { condition: 'deteriorated' });
+    await summary.draft(String(b._id));
+    assert.deepEqual((await summaryOf(b._id)).course, { text: 'Admitted to the general ward for 1 day. Condition at discharge: deteriorated.', source: 'ai-sample' });
+
+    // The AI's paragraph stays (only Redraft asks it again).
+    useAi('claude');
+    const john = await another('MHK202600903', 'John Paul');
+    const c = await place(john.planId, homeNone());
+    await orders.edit(DOC, String(c._id), { condition: 'stable' });
+    await summary.draft(String(c._id));
+    assert.deepEqual((await summaryOf(c._id)).course, { text: AI_TEXT, source: 'ai' });
+
+    // So does the staff's.
+    await summary.save(DOC, id, {}, 'Written by hand.');
+    await orders.edit(DOC, id, { condition: 'improved' });
+    await summary.draft(id);
+    s = await summaryOf(id);
+    assert.deepEqual([s.sections.condition, s.course], ['Improved', { text: 'Written by hand.', source: 'staff' }]);
+  });
+
+  // ---------- safety minors ----------
+
+  test('M4: an identifier among the facts sends nothing, and only the coded fields ever reach the provider', async () => {
+    const { p, calls } = stubProvider('claude');
+    const leaky = { ...STAY_FACTS, procedures: ['MHK202600901'] };
+    const r = await aiOf(p).course(leaky);
+    assert.equal(calls.length, 0, 'no provider call');
+    assert.deepEqual(r, { text: templateCourse(leaky), sample: false, source: 'rules' });
+
+    const extra = {
+      ...STAY_FACTS, patientName: NAME, uhid: UHID, note: NOTE,
+      wards: [{ type: 'icu', days: 1, bed: BED }], tests: [{ name: 'CRP', flag: 'normal', value: 3, by: 'Dr. Shajin' }],
+    } as unknown as CourseFacts;
+    await aiOf(p).course(extra);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].input, { ...STAY_FACTS, wards: [{ type: 'icu', days: 1 }], tests: [{ name: 'CRP', flag: 'normal' }] });
+    const blob = JSON.stringify(calls[0]);
+    for (const secret of [NAME, UHID, NOTE, BED, 'Dr. Shajin']) assert.ok(!blob.includes(secret), `leaked ${secret}`);
+  });
+
+  test('M9: a failed re-read after the lock never turns a signature into an error: it stands, and the failure is logged', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    // The summary's second look at the order (after the lock) fails, as a database blip would.
+    let looks = 0;
+    (summary as any).orders = new Proxy(m.DischargeOrder, {
+      get(target, prop) {
+        if (prop === 'findById') {
+          return (...args: unknown[]) => {
+            looks += 1;
+            if (looks === 2) throw new Error('database away');
+            return (target as any).findById(...args);
+          };
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const signed = await summary.sign(DOC, id);
+    assert.ok(signed.signedAt && signed.documentId);
+    assert.equal(looks, 2);
+    assert.equal((await m.ClinicalDocument.findById(signed.documentId).lean<any>()).status, 'Signed');
+    assert.equal((await w.sent('discharge.summary-signed')).length, 1);
+    assert.equal((await lineOf(id, 'summary')).state, 'done');
+    assert.ok(logged.some((x) => /not read again after signing/.test(x) && /database away/.test(x)), logged.join(' | '));
+  });
+
+  test("M12: with only the patient's case to go on, records from before the admission are left out", async () => {
+    // Neither the order nor the plan has a case; the patient's open case also holds an earlier visit.
+    await m.DischargePlan.updateOne({ _id: planId }, { $unset: { case: 1 } });
+    const order = await m.DischargeOrder.create({
+      plan: planId, admission: admissionId, patient: w.patientId, kind: 'home', state: 'ordered', plannedLeaveAt: at(26, 12), windowAt: NOW,
+      diagnosis: DIAGNOSIS, condition: 'improved', noTakeHome: true, noFollowUp: true, orderedBy: { id: DOC.id, name: DOC.name }, orderedAt: NOW,
+    });
+    // Admitted on 23 Sep at 10:00: the 20 Sep records are an earlier visit's.
+    await labRequest([{ test: 'hba1c', status: 'released', releasedAt: at(20, 10), results: [row('HbA1c', 9.1, '%', 'high')] }]);
+    await labRequest([{ test: 'crp', status: 'released', releasedAt: at(24, 10), results: [row('CRP', 3, 'mg/L')] }]);
+    await procedure('upper-gi-endoscopy', 'done', { doneAt: at(20, 11) });
+    await procedure('echocardiogram', 'done', { doneAt: at(24, 15) });
+    await pharmacyOrder('Ward', [
+      { medicine: 'ceftriaxone', status: 'issued', issued: { at: at(20, 12) } },
+      { medicine: 'enoxaparin', status: 'issued', issued: { at: at(24, 12) } },
+    ]);
+    const s = await summary.draft(String(order._id));
+    assert.equal(s.sections.results, 'CRP, 24 Sep 2026: 3 mg/L');
+    assert.equal(s.sections.procedures, 'Echocardiogram (24 Sep 2026)');
+    assert.equal(s.course.text, BARE_COURSE.replace('Condition', 'Echocardiogram. Investigations: CRP (normal). Treated with 1 medicine. Condition'));
   });
 
   // ---------- R35: a cancelled order's signed summary is archived ----------
@@ -831,7 +1031,7 @@ describe('DischargeSummaryService', () => {
     assert.equal(await summaryOf(o._id), null, 'the draft is waiting for the AI');
     answer({ text: AI_TEXT, sample: false, source: 'ai' });
     await orders.idle();
-    assert.deepEqual((await summaryOf(o._id))?.course, { text: `${AI_TEXT}\n\n${NOTE}`, source: 'ai' });
+    assert.deepEqual((await summaryOf(o._id))?.course, { text: AI_TEXT, source: 'ai' });
 
     // Hanging: the order still returns, and reading the summary drafts it (the summary view heals a lost draft).
     const mary = await another('MHK202600902', 'Mary Jeni');

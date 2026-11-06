@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { ClinicalDocument, ClinicalDocumentDocument } from './schemas/document.schema';
 import { displayDateTime } from '../../common/utils/clinic-time';
+
+const ARCHIVED = 'This document is archived (a later version replaced it), so it cannot be signed.';
 
 @Injectable()
 export class DocumentsService {
@@ -35,12 +37,20 @@ export class DocumentsService {
     return created.save();
   }
 
+  /** Signs a document as the doctor. An archived one (a superseded version) is 409: it can never be signed again. */
   async signDocument(id: string, doctorName: string): Promise<ClinicalDocumentDocument> {
     const doc = await this.findOne(id);
-    doc.status = 'Signed';
-    doc.signedBy = doctorName;
-    doc.signedOn = displayDateTime();
-    return doc.save();
+    if (doc.status === 'Archived') throw new ConflictException(ARCHIVED);
+    // Guarded on the status, so an archive that lands meanwhile is never signed over.
+    const signed = await this.docModel
+      .findOneAndUpdate(
+        { _id: doc._id, status: { $ne: 'Archived' } },
+        { $set: { status: 'Signed', signedBy: doctorName, signedOn: displayDateTime() } },
+        { new: true },
+      )
+      .exec();
+    if (!signed) throw new ConflictException(ARCHIVED);
+    return signed;
   }
 
   /** Marks a superseded document Archived: it stays on the patient's record, never deleted. True when it changed. */

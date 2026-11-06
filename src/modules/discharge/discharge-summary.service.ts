@@ -20,7 +20,7 @@ import { procedureByKey } from '../scheduling/scheduling-catalogue';
 import { ProcedureBooking, ProcedureBookingDocument } from '../scheduling/schemas/procedure-booking.schema';
 import { TimelineService } from '../timeline/timeline.service';
 import { UserRole } from '../users/schemas/user.schema';
-import { CourseFacts, DischargeAiService, TestFlag } from './discharge-ai';
+import { CourseFacts, DischargeAiService, TestFlag, templateCourse } from './discharge-ai';
 import { DischargeKind, KIND_LABEL, SUMMARY_SECTIONS, SUMMARY_TITLE, SummarySection } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService } from './discharge-lines.service';
@@ -40,7 +40,6 @@ const ALREADY_SIGNED = 'The summary is signed. Use Edit and re-sign to change it
 const SIGNED_ONCE = 'The summary is already signed.';
 const NOT_SIGNED = 'The summary is not signed.';
 const NOT_DRAFTED = 'The summary is not drafted yet.';
-const CHANGED = 'The summary just changed. Review it and sign again.';
 const STAFF_COURSE = 'The course paragraph was written by hand: change it in the editor.';
 const AGAINST_ADVICE = 'Leaving against medical advice: the risks were explained.';
 /** Take-home lines the patient does not leave with. */
@@ -58,6 +57,20 @@ const FREQUENCY_WORDS: Record<string, string> = {
 const LEAVING_LABEL: Record<DischargeKind, string> = {
   home: 'Date of discharge', transfer: 'Date of transfer', 'against-advice': 'Date of leaving', died: 'Date of death',
 };
+
+/** R38: the 409 code when the summary changed after the editor loaded it (or while signing). */
+export const SUMMARY_CHANGED = 'SUMMARY_CHANGED';
+const changed = () =>
+  new ConflictException({ message: 'The summary changed since you opened it. Review it and try again.', code: SUMMARY_CHANGED });
+
+/**
+ * R39: the doctor's note for the summary, from the order. It is its own section, refilled from the order while
+ * nobody has edited it, and printed after the course paragraph; it never goes into `course.text` or to the AI.
+ */
+export const NOTE_SECTION = 'note';
+
+/** The sections staff may edit: the kind's sections, except the course (its own field), and the note. */
+export const EDITABLE_SECTIONS = (kind: DischargeKind): string[] => [...SUMMARY_SECTIONS(kind).filter((k) => k !== 'course'), NOTE_SECTION];
 
 /** The heading of each section, for the plain text, the print and the editor. */
 export const SUMMARY_SECTION_LABEL: Record<SummarySection, string> = {
@@ -100,8 +113,9 @@ export interface SummaryRow {
 }
 
 /**
- * The summary's plain text: each section that has text, under its heading, in the kind's order, the course paragraph
- * among them; then who signed and when. It is the signed Documents record's description.
+ * The summary's plain text: each section that has text, under its heading, in the kind's order; under "Course in
+ * hospital", the course paragraph and then the doctor's note (R39); then who signed and when. It is the signed
+ * Documents record's description, and what the print shows.
  */
 export function summaryText(
   kind: DischargeKind,
@@ -111,7 +125,13 @@ export function summaryText(
 ): string {
   const parts: string[] = [];
   for (const key of SUMMARY_SECTIONS(kind)) {
-    const text = (key === 'course' ? course?.text : sections?.[key])?.trim();
+    const text =
+      key === 'course'
+        ? [course?.text, sections?.[NOTE_SECTION]]
+            .map((t) => t?.trim())
+            .filter(Boolean)
+            .join('\n\n')
+        : sections?.[key]?.trim();
     if (text) parts.push(`${SUMMARY_SECTION_LABEL[key]}\n${text}`);
   }
   if (signed) parts.push(`Signed by ${signed.name} on ${displayDateTime(signed.at)}`);
@@ -168,6 +188,14 @@ const isDuplicate = (e: unknown) => (e as { code?: number })?.code === DUPLICATE
 const stateRefusal = (state: OrderState | undefined): string =>
   state === 'cancelled' ? 'This discharge order was cancelled.' : state === 'left' ? 'The patient has already left.' : 'Discharge order not found';
 
+/** R38: the summary's `updatedAt` as the editor loaded it (an ISO time), or undefined when not given; 400 when unreadable. */
+function seenAt(v: unknown): Date | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const d = typeof v === 'string' || v instanceof Date ? new Date(v) : null;
+  if (!d || isNaN(d.getTime())) throw new BadRequestException('"seen" must be the summary\'s updatedAt as an ISO time.');
+  return d;
+}
+
 /** A section's text from staff: trimmed, at most SECTION_MAX characters, or 400. */
 function sectionText(v: unknown, key: string): string {
   if (typeof v !== 'string') throw new BadRequestException(`"${key}" must be text.`);
@@ -211,8 +239,9 @@ const dayText = (day?: string): string | undefined => (day && /^\d{4}-\d{2}-\d{2
 /**
  * The discharge summary (design 4.4): the discharge summary, transfer letter, against-advice note or death summary of
  * an order. The rules draft every section from the owners' records (Beds, Lab, Pharmacy, Scheduling, the patient and
- * the order); the AI writes only the "Course in hospital" paragraph, from coded facts (`CourseFacts`), and the
- * doctor's note for the summary (never sent to the AI) follows it. A doctor or an admin edits and signs it: signing
+ * the order); the AI writes only the "Course in hospital" paragraph, from coded facts (`CourseFacts`). The doctor's
+ * note for the summary is its own section (R39), never sent to the AI, printed after that paragraph. A doctor or an
+ * admin edits and signs it, against the version they loaded (R38): signing
  * locks it, saves a Signed Documents record and a Timeline line, and tells the Coordinator, which stops the summary
  * clock. Edit and re-sign keeps the signed version and archives its document. Times are on the clinic clock.
  */
@@ -280,16 +309,25 @@ export class DischargeSummaryService {
   }
 
   /**
-   * A doctor or an admin saves their edits: any of the kind's sections (not the course, which is its own field), as
-   * text of at most 5000 characters. A section whose text changed is marked edited, so drafting again never
-   * overwrites it; an edited course becomes the staff's (`source: 'staff'`). Refused once signed (409): Edit and
-   * re-sign first. 403 for other roles; 400 for an unknown section; 404/409 for an unknown or closed order.
+   * A doctor or an admin saves their edits: any of the kind's sections or the note (not the course, which is its own
+   * field), as text of at most 5000 characters. A section whose text differs from the stored one is marked edited, so
+   * drafting again never overwrites it; an edited course becomes the staff's (`source: 'staff'`).
+   *
+   * R38: `seen` is the summary's `updatedAt` as the editor loaded it. When given, the save applies only to that very
+   * version (checked first, and again in the update), so the stored text it compares with is exactly what the doctor
+   * saw: a section sent back unchanged is never taken as an edit. When the summary changed since, it is 409
+   * `SUMMARY_CHANGED` and nothing is written. Without `seen` (internal callers, the seed) it compares with the summary
+   * as stored now.
+   *
+   * Refused once signed (409): Edit and re-sign first. 403 for other roles; 400 for an unknown section or an
+   * unreadable `seen`; 404/409 for an unknown or closed order.
    */
-  async save(actor: Actor, orderId: string, sections: Record<string, string>, course?: string): Promise<DischargeSummaryDocument> {
+  async save(actor: Actor, orderId: string, sections: Record<string, string>, course?: string, seen?: string): Promise<DischargeSummaryDocument> {
     this.mayEdit(actor);
     const order = await this.openOrder(orderId);
     if (!isObj(sections)) throw new BadRequestException('Send the sections to save.');
-    const allowed = SUMMARY_SECTIONS(order.kind).filter((k) => k !== 'course') as string[];
+    const loaded = seenAt(seen);
+    const allowed = EDITABLE_SECTIONS(order.kind);
     const next: Record<string, string> = {};
     for (const [key, value] of Object.entries(sections)) {
       if (key === 'course') throw new BadRequestException('Send the course paragraph as "course", not as a section.');
@@ -299,20 +337,24 @@ export class DischargeSummaryService {
     const courseText = course === undefined ? undefined : sectionText(course, 'course');
     const current = await this.current(order);
     if (current.signedAt) throw new ConflictException(ALREADY_SIGNED);
+    if (loaded && time(current.updatedAt) !== loaded.getTime()) throw changed();
 
     const set: Record<string, unknown> = {};
-    const changed: string[] = [];
+    const edits: string[] = [];
     for (const [key, text] of Object.entries(next)) {
       if ((current.sections?.[key] ?? '') === text) continue;
       set[`sections.${key}`] = text;
-      changed.push(key);
+      edits.push(key);
     }
     if (courseText !== undefined && courseText !== (current.course?.text ?? '')) set.course = { text: courseText, source: 'staff' };
     if (!Object.keys(set).length) return this.reread(current._id);
     const update: Record<string, unknown> = { $set: set };
-    if (changed.length) update.$addToSet = { edited: { $each: changed } };
-    const res = await this.summaries.updateOne({ _id: current._id, signedAt: null }, update).exec();
-    if (!res.matchedCount) throw new ConflictException(ALREADY_SIGNED);
+    if (edits.length) update.$addToSet = { edited: { $each: edits } };
+    const res = await this.summaries.updateOne({ _id: current._id, signedAt: null, ...(loaded ? { updatedAt: loaded } : {}) }, update).exec();
+    if (!res.matchedCount) {
+      const now = await this.summaries.findById(current._id).select('signedAt').lean<{ signedAt?: Date }>().exec();
+      throw now?.signedAt ? new ConflictException(ALREADY_SIGNED) : changed();
+    }
     return this.reread(current._id);
   }
 
@@ -323,13 +365,19 @@ export class DischargeSummaryService {
    * Then a Timeline line ("<Title> signed", Admission), `discharge.summary-signed` (stopping the summary clock) and the
    * checklist read again. 409 when already signed; 404 before it is drafted; 403 for other roles. An order cancelled
    * while it was signing archives what was just signed and answers 409 (R35).
+   *
+   * R38: `seen` is the summary's `updatedAt` as the editor loaded it. When given, a summary changed since (a refresh
+   * from the record, or someone's save) is 409 `SUMMARY_CHANGED` before any document is made, so the doctor never
+   * signs text they have not seen. Without `seen`, it signs the summary as stored.
    */
-  async sign(actor: Actor, orderId: string): Promise<DischargeSummaryDocument> {
+  async sign(actor: Actor, orderId: string, seen?: string): Promise<DischargeSummaryDocument> {
     this.mayEdit(actor);
     const order = await this.openOrder(orderId);
+    const loaded = seenAt(seen);
     const s = await this.summaries.findOne({ order: order._id }).lean<LeanSummary>().exec();
     if (!s) throw new NotFoundException(NOT_DRAFTED);
     if (s.signedAt) throw new ConflictException(SIGNED_ONCE);
+    if (loaded && time(s.updatedAt) !== loaded.getTime()) throw changed();
     const now = this.clock();
     const [plan, admission, patient] = await Promise.all([this.planOf(order), this.admissionOf(order), this.patientOf(order)]);
     const uhid = patient?.uhid ?? plan?.patientUhid;
@@ -361,10 +409,17 @@ export class DischargeSummaryService {
       // Signed or changed by someone else meanwhile: this signature did not happen, so neither does its document.
       await this.archive(documentId);
       const current = await this.summaries.findById(s._id).select('signedAt').lean<{ signedAt?: Date }>().exec();
-      throw new ConflictException(current?.signedAt ? SIGNED_ONCE : CHANGED);
+      throw current?.signedAt ? new ConflictException(SIGNED_ONCE) : changed();
     }
-    // R35: the order was cancelled while this was signing, after its cancel found nothing signed to archive.
-    const state = (await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
+    // R35: the order was cancelled while this was signing, after its cancel found nothing signed to archive. The
+    // document and the lock are saved by now, so a failed read is logged and the signing carries on as it stands
+    // (the minute pass archives a cancelled order's signed summary).
+    let state: OrderState | undefined;
+    try {
+      state = (await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
+    } catch (e) {
+      this.logger.warn(`Discharge order ${String(order._id)}: not read again after signing (${(e as Error).message}); the signature stands`);
+    }
     if (state === 'cancelled') {
       await this.archiveForCancel(String(order._id));
       throw new ConflictException(stateRefusal(state));
@@ -506,22 +561,38 @@ export class DischargeSummaryService {
 
   // ---------- drafting ----------
 
-  /** The sections nobody edited follow the record, while the order is open and the summary has never been signed. */
+  /**
+   * While the order is open and the summary has never been signed, what nobody edited follows the record: each
+   * section and the note (R39) not in `edited`, and a course paragraph that is the rules' or the sample's (R40: both
+   * are the deterministic template, so they match the refreshed sections; the AI's or staff's paragraph never moves).
+   */
   private async refreshDraft(s: LeanSummary, order: LeanOrder): Promise<void> {
     if (s.signedAt || s.archivedAt || s.versions?.length || !OPEN_ORDER_STATES.includes(order.state)) return;
-    const fresh = this.sections(await this.record(order));
+    const record = await this.record(order);
     const edited = new Set(s.edited ?? []);
     const set: Record<string, string> = {};
-    for (const [key, text] of Object.entries(fresh)) {
-      if (!edited.has(key) && (s.sections?.[key] ?? null) !== text) set[`sections.${key}`] = text;
+    const filter: Record<string, unknown> = { _id: s._id, signedAt: null, 'versions.0': { $exists: false } };
+    const keys: string[] = [];
+    for (const [key, text] of Object.entries(this.sections(record))) {
+      if (edited.has(key) || (s.sections?.[key] ?? null) === text) continue;
+      set[`sections.${key}`] = text;
+      keys.push(key);
     }
-    const keys = Object.keys(set).map((k) => k.slice('sections.'.length));
-    if (!keys.length) return;
-    // Only while those sections are still nobody's edit and nothing was signed meanwhile.
-    await this.summaries.updateOne({ _id: s._id, signedAt: null, 'versions.0': { $exists: false }, edited: { $nin: keys } }, { $set: set }).exec();
+    // Only while those sections are still nobody's edit.
+    if (keys.length) filter.edited = { $nin: keys };
+    if (s.course?.source === 'rules' || s.course?.source === 'ai-sample') {
+      const text = templateCourse(this.facts(record));
+      if (text !== s.course.text) {
+        set['course.text'] = text;
+        // Only over the paragraph as it was read: a redraft or a staff edit meanwhile wins.
+        Object.assign(filter, { 'course.source': s.course.source, 'course.text': s.course.text });
+      }
+    }
+    if (!Object.keys(set).length) return;
+    await this.summaries.updateOne(filter, { $set: set }).exec();
   }
 
-  /** The rules' text of each section of the kind (the course is its own field). */
+  /** The rules' text of each section of the kind (the course is its own field), and the doctor's note (R39). */
   private sections(r: StayRecord): Record<string, string> {
     const kinds = SUMMARY_SECTIONS(r.order.kind);
     const out: Record<string, string> = {};
@@ -529,6 +600,7 @@ export class DischargeSummaryService {
       if (key === 'course') continue;
       out[key] = this.section(key, r, kinds.includes('followUp'));
     }
+    out[NOTE_SECTION] = (r.order.note ?? '').trim();
     return out;
   }
 
@@ -629,27 +701,31 @@ export class DischargeSummaryService {
   }
 
   /**
-   * The course paragraph: the AI's (or its sample, or the rules' when it is off or refused, R13), then the doctor's
-   * note for the summary, which never goes to the AI.
+   * The course paragraph only: the AI's, or its sample, or the rules' when it is off or refused (R13). The doctor's
+   * note is its own section (R39) and never goes to the AI.
    */
   private async courseOf(r: StayRecord): Promise<SummaryCourse> {
     const res = await this.ai.course(this.facts(r));
-    const source: CourseSource = res.source === 'ai' ? (res.sample ? 'ai-sample' : 'ai') : 'rules';
-    const note = (r.order.note ?? '').trim();
-    return { text: note ? `${res.text}\n\n${note}` : res.text, source };
+    return { text: res.text, source: res.source === 'ai' ? (res.sample ? 'ai-sample' : 'ai') : 'rules' };
   }
 
-  /** Reads everything the summary is drafted from. Case-linked records use the order's case, else the plan's, else the patient's (R24). */
+  /**
+   * Reads everything the summary is drafted from. Case-linked records use the order's case, else the plan's, else
+   * the patient's (R24). That last one is only a guess, so then only records dated from the admission on are read
+   * (M12): an earlier visit's results, procedures and medicines never reach this stay's summary.
+   */
   private async record(order: LeanOrder): Promise<StayRecord> {
     const [plan, admission, patient, config] = await Promise.all([this.planOf(order), this.admissionOf(order), this.patientOf(order), this.settings.get()]);
-    const caseId = await this.caseOf(order, plan);
+    const stayCase = await this.caseOf(order, plan);
+    const caseId = stayCase.id;
+    const since = stayCase.guessed && admission ? new Date(admission.admittedAt) : undefined;
     const end = order.kind === 'died' && order.timeOfDeath ? new Date(order.timeOfDeath) : new Date(order.plannedLeaveAt);
     const [stay, procedures, lab, medicines, given, followUp] = await Promise.all([
       this.wardStays(admission, end),
-      this.doneProcedures(caseId),
-      this.labResults(caseId, order),
+      this.doneProcedures(caseId, since),
+      this.labResults(caseId, order, since),
       this.takeHomeLines(order),
-      this.givenCount(caseId),
+      this.givenCount(caseId, since),
       this.followUpItem(order),
     ]);
     return {
@@ -692,11 +768,11 @@ export class DischargeSummaryService {
     return { wards: out, ms: stop - start };
   }
 
-  /** Procedures done on the stay's case, oldest first, by name. */
-  private async doneProcedures(caseId: string | null): Promise<StayRecord['procedures']> {
+  /** Procedures done on the stay's case (from `since`, when given), oldest first, by name. */
+  private async doneProcedures(caseId: string | null, since?: Date): Promise<StayRecord['procedures']> {
     if (!caseId) return [];
     const done = await this.procedures
-      .find({ case: new Types.ObjectId(caseId), status: 'done' })
+      .find({ case: new Types.ObjectId(caseId), status: 'done', ...(since ? { doneAt: { $gte: since } } : {}) })
       .sort({ doneAt: 1, _id: 1 })
       .select('procedure doneAt')
       .lean<{ procedure: string; doneAt?: Date }[]>()
@@ -707,8 +783,11 @@ export class DischargeSummaryService {
     });
   }
 
-  /** Released tests on the stay's case (critical, then abnormal, then normal), and the ones put off still to come. */
-  private async labResults(caseId: string | null, order: LeanOrder): Promise<{ tests: TestResult[]; toCome: string[] }> {
+  /**
+   * Released tests on the stay's case (released from `since`, when given), critical first, then abnormal, then normal;
+   * and the ones put off as "follow up later" that are still to come (the doctor named those requests).
+   */
+  private async labResults(caseId: string | null, order: LeanOrder, since?: Date): Promise<{ tests: TestResult[]; toCome: string[] }> {
     if (!caseId) return { tests: [], toCome: [] };
     const requests = await this.labRequests.find({ case: new Types.ObjectId(caseId) }).select('_id').lean<{ _id: Id }[]>().exec();
     if (!requests.length) return { tests: [], toCome: [] };
@@ -720,7 +799,7 @@ export class DischargeSummaryService {
       .exec();
     const label = (test: string) => testByKey(test)?.label ?? test;
     const tests = lines
-      .filter((l) => l.status === 'released')
+      .filter((l) => l.status === 'released' && (!since || time(l.releasedAt) >= since.getTime()))
       .map((l) => ({ name: label(l.test), catalogued: !!testByKey(l.test), flag: flagOf(l.results), rows: l.results ?? [], releasedAt: l.releasedAt }))
       .sort((a, b) => FLAG_RANK[a.flag] - FLAG_RANK[b.flag] || time(a.releasedAt) - time(b.releasedAt));
     const later = new Set((order.followUpLater ?? []).map(String));
@@ -740,8 +819,11 @@ export class DischargeSummaryService {
       .exec();
   }
 
-  /** How many different medicines were given on the ward or in the ER on the stay's case (never a take-home or OPD one). */
-  private async givenCount(caseId: string | null): Promise<number> {
+  /**
+   * How many different medicines were given on the ward or in the ER on the stay's case (issued from `since`, when
+   * given); never a take-home or OPD one.
+   */
+  private async givenCount(caseId: string | null, since?: Date): Promise<number> {
     if (!caseId) return 0;
     const stayOrders = await this.pharmacyOrders
       .find({ case: new Types.ObjectId(caseId), setting: { $in: ['ER', 'Ward'] }, takeHome: { $ne: true } })
@@ -750,7 +832,7 @@ export class DischargeSummaryService {
       .exec();
     if (!stayOrders.length) return 0;
     const lines = await this.pharmacyLines
-      .find({ order: { $in: stayOrders.map((o) => o._id) }, status: { $in: GIVEN } })
+      .find({ order: { $in: stayOrders.map((o) => o._id) }, status: { $in: GIVEN }, ...(since ? { 'issued.at': { $gte: since } } : {}) })
       .select('medicine freeName')
       .lean<{ medicine: string | null; freeName?: string }[]>()
       .exec();
@@ -870,12 +952,16 @@ export class DischargeSummaryService {
     return this.patients.findById(order.patient).select('name uhid age gender').lean<NonNullable<StayRecord['patient']>>().exec();
   }
 
-  /** R24: the order's case, else its plan's, else the patient's open case (or newest); null when there is none. */
-  private async caseOf(order: LeanOrder, plan: LeanPlan | null): Promise<string | null> {
-    if (order.case) return String(order.case);
-    if (plan?.case) return String(plan.case);
+  /**
+   * R24: the order's case, else its plan's, else the patient's open case (or newest), which is `guessed` (M12);
+   * null when there is none.
+   */
+  private async caseOf(order: LeanOrder, plan: LeanPlan | null): Promise<{ id: string | null; guessed: boolean }> {
+    if (order.case) return { id: String(order.case), guessed: false };
+    if (plan?.case) return { id: String(plan.case), guessed: false };
+    // The patient's open case, else their newest: it may hold an earlier visit too.
     const c = await this.cases.forPatient(String(order.patient));
-    return c ? String(c._id) : null;
+    return { id: c ? String(c._id) : null, guessed: true };
   }
 
   private async reread(id: Id): Promise<DischargeSummaryDocument> {
