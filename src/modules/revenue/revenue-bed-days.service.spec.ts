@@ -211,14 +211,28 @@ describe('RevenueBedDaysService', () => {
     assert.equal(await m.ChargeLine.countDocuments({}), 2);
   });
 
-  test('a settled bill takes no more days and nothing throws', async () => {
+  test('a settled bill takes no more days: later ones go on a continuation bill, earlier ones are never charged, and nothing throws', async () => {
     const adm = await admit();
     const bill = await bills.open({ kind: 'admission', patientId: String(patient._id), admissionId: String(adm._id) });
-    await m.Bill.updateOne({ _id: bill._id }, { $set: { state: 'settled' } });
-    assert.equal(await svc.chargeDue(String(adm._id), at(72)), 0);
+    // Settled at 10 h mid-stay, with no discharge order, so with no checkout grace (R27). Day 1 was never charged.
+    await m.Bill.updateOne({ _id: bill._id }, { $set: { state: 'settled', finalAt: at(10), settledAt: at(10) } });
+    assert.equal(await svc.chargeDue(String(adm._id), at(72)), 6, 'days 2 to 4: a bed day and a nursing day each');
+    const stay = await stayOf(adm);
+    assert.deepEqual(stay.map((b: any) => [b.state, b.continuationOf ? String(b.continuationOf) : null]), [['settled', null], ['open', String(bill._id)]]);
+    assert.equal(await m.ChargeLine.countDocuments({ bill: bill._id }), 0, 'the settled bill takes nothing');
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': `${adm._id}:0` }), 0, 'day 1 started before the settlement, so it is never charged afterwards');
+
+    // A settled bill with no settledAt (settle always writes one) allows nothing more: no line, no continuation bill.
+    const other = await m.Patient.create({ uhid: 'MHK202600967', name: 'Lata', age: 40, gender: 'Female', phone: '9100000067' });
+    const old = await admit({ patient: other._id, patientUhid: other.uhid, patientName: other.name });
+    const unstamped = await bills.open({ kind: 'admission', patientId: String(other._id), admissionId: String(old._id) });
+    await m.Bill.updateOne({ _id: unstamped._id }, { $set: { state: 'settled' } });
+    assert.equal(await svc.chargeDue(String(old._id), at(72)), 0);
+    assert.equal((await stayOf(old)).length, 1);
+
     assert.equal(await svc.chargeDue('not-an-id'), 0);
     await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', ward: '', admissionId: String(new Types.ObjectId()) });
-    assert.equal(await m.ChargeLine.countDocuments({}), 0);
+    assert.equal(await m.ChargeLine.countDocuments({}), 6);
   });
 
   test('a missing price charges 0 and is flagged', async () => {
@@ -246,16 +260,17 @@ describe('RevenueBedDaysService', () => {
   const stayOf = (adm: any) => m.Bill.find({ kind: 'admission', admission: adm._id }).sort({ openedAt: 1, _id: 1 }).lean();
 
   test('a bed period starting 3 h after settlement is not charged, 5 h after is charged on the continuation bill', async () => {
-    // Two stays admitted at T0. Each bill is settled before the second period starts (at 24 h): A 3 h before it, B 5 h before.
+    // Two stays admitted at T0, each with its discharge order open. Each bill is settled before the second period starts (at
+    // 24 h): A 3 h before it, B 5 h before.
     const other = await m.Patient.create({ uhid: 'MHK202600964', name: 'Lata', age: 40, gender: 'Female', phone: '9100000064' });
     const a = await admit();
     const b = await admit({ patient: other._id, patientUhid: other.uhid, patientName: other.name });
     await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(a._id), ward: '' });
     await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(b._id), ward: '' }, null);
+    await order(a, {});
+    await order(b, { orderedAt: at(18), windowAt: at(18) });
     const settledA = (await settleAt(a, 21))!;
     const settledB = (await settleAt(b, 19))!;
-    // A discharge order cancelled before the settlement does not cut the grace.
-    await order(a, { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: at(20) } });
 
     assert.equal(await svc.tick(at(25)), 2, "B's day 2: a bed day and a nursing day");
     const stayB = await stayOf(b);
@@ -312,5 +327,43 @@ describe('RevenueBedDaysService', () => {
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${cont._id}:final` }), 1);
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${settled._id}:final` }), 0);
     assert.equal((await stayOf(adm)).length, 2);
+  });
+
+  test('a cancel inside the grace: a period starting between the settlement and the cancel stays uncharged', async () => {
+    const adm = await admit();
+    await deliver('bed.assigned', { bedId: String(bedA._id), bedLabel: 'GA-01', admissionId: String(adm._id), ward: '' });
+    // Ordered at 20 h, settled at 23 h, cancelled at 25 h: the grace is [23 h, 25 h), and day 2 starts at 24 h.
+    await order(adm, { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: at(25) } });
+    const settled = (await settleAt(adm, 23))!;
+    assert.equal(await svc.tick(at(30)), 0, 'day 2 started inside the grace, before the cancel');
+    assert.equal(await svc.tick(at(48)), 2, 'day 3 starts after the cancel');
+    const stay = await stayOf(adm);
+    assert.equal(stay.length, 2);
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': `${adm._id}:1` }), 0, 'day 2 is never charged');
+    assert.equal(await m.ChargeLine.countDocuments({ bill: stay[1]._id, 'source.ref': `${adm._id}:2` }), 2);
+    assert.deepEqual(await m.Bill.findById(settled._id).lean(), settled, 'the settled bill is untouched');
+  });
+
+  test('a settlement with no open discharge order has no grace: a period starting 1 h later is charged on a continuation bill', async () => {
+    const p2 = await m.Patient.create({ uhid: 'MHK202600965', name: 'Lata', age: 40, gender: 'Female', phone: '9100000065' });
+    const p3 = await m.Patient.create({ uhid: 'MHK202600966', name: 'Arul', age: 55, gender: 'Male', phone: '9100000066' });
+    const none = await admit();
+    const early = await admit({ patient: p2._id, patientUhid: p2.uhid, patientName: p2.name });
+    const checkout = await admit({ patient: p3._id, patientUhid: p3.uhid, patientName: p3.name });
+    for (const a of [none, early, checkout]) await bills.open({ kind: 'admission', patientId: String(a.patient), admissionId: String(a._id) });
+    // `none` never had an order; `early`'s was cancelled before the settlement; `checkout`'s is open (the control).
+    await order(early, { orderedAt: at(18), windowAt: at(18), state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: at(20) } });
+    await order(checkout, {});
+    // All three are settled at 23 h, an hour before day 2 starts.
+    for (const a of [none, early, checkout]) await settleAt(a, 23);
+
+    assert.equal(await svc.tick(at(25)), 4, 'day 2 of the two stays with no order open at settlement');
+    for (const a of [none, early]) {
+      const stay = await stayOf(a);
+      assert.equal(stay.length, 2);
+      assert.equal(await m.ChargeLine.countDocuments({ bill: stay[1]._id, 'source.ref': `${a._id}:1` }), 2);
+    }
+    assert.equal(await m.ChargeLine.countDocuments({ 'source.ref': `${checkout._id}:1` }), 0, 'the checkout grace holds while the order is open');
+    assert.equal((await stayOf(checkout)).length, 1);
   });
 });

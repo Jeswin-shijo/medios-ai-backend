@@ -99,7 +99,7 @@ describe('seedRevenue', () => {
     const reconcile = new RevenueReconcileService(
       reg, bills, final, payments, estimates, deposits, refunds, capture, bedDays, opd,
       m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.TaskAlertItem, m.Clock,
-      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission,
+      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission, m.DischargeOrder,
     );
     return { reconcile, bedDays, registry };
   };

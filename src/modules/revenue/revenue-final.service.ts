@@ -85,7 +85,7 @@ export class FinalBillService {
         this.logger.warn(`discharge.window-opened: no active bill for admission ${admissionId ?? '(none)'}; no final bill requested`);
         return;
       }
-      await this.request('agent', String(bill._id), { leavingAt: date(payload.plannedLeaveAt) });
+      await this.request('agent', String(bill._id), { leavingAt: date(payload.plannedLeaveAt) ?? undefined });
     } catch (e) {
       this.logger.warn(`discharge.window-opened: final bill not requested (${(e as Error).message})`);
     }
@@ -101,6 +101,13 @@ export class FinalBillService {
       .lean()
       .exec();
     return date(order?.plannedLeaveAt);
+  }
+
+  /** For an admission bill whose patient is still admitted: the planned leaving time of the stay's order in progress, or null. */
+  private async leavingFor(bill: { kind: string; admission?: unknown }): Promise<Date | null> {
+    if (bill.kind !== 'admission' || !bill.admission) return null;
+    if (!(await this.admissions.exists({ _id: bill.admission, status: 'active' }))) return null;
+    return this.leavingAt(bill.admission);
   }
 
   private async onErLeft(messageId: string): Promise<void> {
@@ -129,7 +136,8 @@ export class FinalBillService {
    * Asks the desk to prepare the bill: writes the `:final` task first (the marker that the ask was made), then sends
    * `revenue.final-requested` (the 60-minute clock, real time) through the never-throwing announce. A failed send leaves an
    * open, unannounced task, which the reconcile pass re-sends (R29). Only an open ER or admission bill; a replay finds the task
-   * and does nothing. `leavingAt` (a discharge window) gives the task the planned leaving time. Returns true when it asked.
+   * and does nothing. The task names the planned leaving time while the stay's discharge order is in progress: `leavingAt` (the
+   * window message's) or, when it is not given, the open order's. Returns true when it asked.
    */
   async request(_actor: Actor | 'agent', billId: string, opts: { leavingAt?: Date | null } = {}): Promise<boolean> {
     if (!isValidObjectId(billId)) return false;
@@ -137,8 +145,9 @@ export class FinalBillService {
     if (!bill || bill.state !== 'open' || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
     const link = finalLink(bill._id);
     if (await this.alerts.exists({ link })) return false;
+    const leavingAt = opts.leavingAt !== undefined ? opts.leavingAt : await this.leavingFor(bill);
     try {
-      await this.alerts.create({ ...this.finalTaskFields(bill, opts), link });
+      await this.alerts.create({ ...this.finalTaskFields(bill, { leavingAt }), link });
     } catch (e) {
       if ((e as { code?: number }).code !== 11000) throw e;
       return false;
@@ -172,7 +181,7 @@ export class FinalBillService {
       const bill = isValidObjectId(billId) ? await this.billModel.findById(billId).exec() : null;
       if (!bill || bill.state !== 'open' || !bill.announcedAt || (bill.kind !== 'er' && bill.kind !== 'admission')) return false;
       const link = finalLink(bill._id);
-      const fields = this.finalTaskFields(bill, { leavingAt: bill.kind === 'admission' ? await this.leavingAt(bill.admission) : null });
+      const fields = this.finalTaskFields(bill, { leavingAt: await this.leavingFor(bill) });
       const r = await this.alerts.updateOne({ link }, { $setOnInsert: { ...fields, link } }, { upsert: true }).exec();
       return !!r.upsertedCount;
     } catch (e) {

@@ -341,6 +341,27 @@ describe('Estimates, deposits and top-ups', () => {
     assert.equal((await tasks()).length, 0);
   });
 
+  test('a routine procedure booked after settlement, patient still admitted, opens no admission bill', async () => {
+    const adm = await admit();
+    await assigned(adm);
+    const stay = (await m.Bill.findOne({ kind: 'admission', admission: adm._id }).lean())!;
+    await m.Bill.updateOne({ _id: stay._id }, { $set: { state: 'settled', finalAt: T0, settledAt: T0, 'totals.payments': stay.totals.charges, 'totals.balance': 0 } });
+    await m.TaskAlertItem.deleteMany({});
+    await booked(await booking('routine'));
+    assert.equal(await m.Bill.countDocuments({ kind: 'admission', admission: adm._id }), 1, 'no empty continuation bill');
+    const walkIn = (await m.Bill.findOne({ kind: 'walk-in' }).lean())!;
+    assert.ok(walkIn, 'the booking goes where it did before continuation bills: the walk-in bill');
+    assert.equal((await tasks()).filter((t) => !t.link.startsWith(`revenue-bill:${walkIn._id}:`)).length, 0, 'no deposit is asked on an admission bill');
+
+    // A continuation bill that a real charge opened is joined, like any active bill of the case.
+    const continuation = await bills.forCharge({ patientId: String(patient._id), caseId: String(caseDoc._id) });
+    assert.equal(String(continuation.continuationOf), String(stay._id));
+    await price('proc:ct-head', 7000, 'procedure');
+    await booked(await booking('routine', 'ct-head'));
+    assert.ok(await m.Estimate.exists({ bill: continuation._id }), 'the estimate is drafted on the continuation bill');
+    assert.equal(await m.Bill.countDocuments({ kind: 'admission', admission: adm._id }), 2);
+  });
+
   test('a second dip after a met top-up raises the task again and starts a new clock', async () => {
     await assigned(await admit());
     const id = String((await m.Bill.findOne({ kind: 'admission' }).lean())!._id);

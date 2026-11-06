@@ -81,8 +81,9 @@ export class RevenueDepositsService {
     const caseId = m.case ?? String(booking.case);
     // A STAT booking never opens a bill: it joins one that exists, or nothing happens.
     if (booking.priority === 'stat' && !(await this.hasActiveBill(String(booking.patient), caseId))) return;
-    // The routing is the same as for any charge.
-    const bill = await this.bills.forCharge({ patientId: String(booking.patient), caseId });
+    // The routing is the same as for any charge, except that a booking charges nothing, so it never opens a continuation bill:
+    // an empty one would hold the patient's discharge with nothing to prepare.
+    const bill = await this.bills.forCharge({ patientId: String(booking.patient), caseId }, { openContinuation: false });
     const billId = String(bill._id);
     try {
       await this.estimates.draft(billId);
@@ -96,7 +97,10 @@ export class RevenueDepositsService {
     }
   }
 
-  /** The bill forCharge would pick, without opening one. */
+  /**
+   * Whether the bill a booking would join already exists: the case's active ER or admission bill (a continuation bill included),
+   * or the day's OPD or walk-in bill. It mirrors `forCharge(…, { openContinuation: false })` and never opens one.
+   */
   private async hasActiveBill(patientId: string, caseId: string): Promise<boolean> {
     const active = { $in: ACTIVE_BILL_STATES };
     if (isValidObjectId(caseId) && (await this.billModel.exists({ case: new Types.ObjectId(caseId), kind: { $in: ['er', 'admission'] }, state: active }))) return true;

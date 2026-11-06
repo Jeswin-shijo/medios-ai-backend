@@ -417,6 +417,22 @@ describe('FinalBillService', () => {
     assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~14:30');
   });
 
+  test('the desk route while an order is open gets the leaving subtitle', async () => {
+    const adm = await admitted();
+    const b = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(adm._id) });
+    await order(adm._id);
+    // POST /revenue/bills/:id/final/request calls request(actor, id) with no options.
+    assert.equal(await final.request(DESK, String(b._id)), true);
+    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~16:05');
+
+    // Once the patient has left, the stay's bill says so, even if the order was not yet marked as left.
+    const gone = await m.Admission.create({ patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'discharged', admittedAt: T0, dischargedAt: new Date(), admittedBy: 'Nurse' });
+    const left = await bills.open({ kind: 'admission', patientId: String(patient._id), admissionId: String(gone._id) });
+    await order(gone._id, { state: 'ready' });
+    assert.equal(await final.request(DESK, String(left._id)), true);
+    assert.equal((await finalTask(left._id))[0].subtitle, 'The patient has been discharged');
+  });
+
   test('the still-admitted warning reads Discharge ordered while an order is active', async () => {
     const adm = await admitted();
     const b = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(adm._id) });

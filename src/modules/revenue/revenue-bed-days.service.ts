@@ -55,7 +55,7 @@ export class RevenueBedDaysService {
     private readonly deposits: RevenueDepositsService,
     private readonly final: FinalBillService,
     private readonly settings: RevenueSettingsService,
-    /** Read-only: a discharge order cancelled after the stay's bill was settled ends the checkout grace. */
+    /** Read-only: the stay's discharge orders decide its checkout grace (an order in progress at settlement; its cancel ends it). */
     @InjectModel(DischargeOrder.name) private readonly dischargeOrders: Model<DischargeOrderDocument>,
   ) {
     registration.capture.set('bed.assigned', (id) => this.run('bed.assigned', id, (m) => this.onAssigned(m)));
@@ -326,22 +326,24 @@ export class RevenueBedDaysService {
   }
 
   /**
-   * Which period starts a stay may still charge once a bill of it is settled (design 4.5, R6). A settled bill stands for
-   * everything that started before its settlement, so only periods from the latest settlement on count. Of those, none that
-   * starts inside a settlement's checkout grace `[settledAt, settledAt + graceHours)` is ever charged, whichever bill is
-   * active now, except that a discharge order cancelled after the settlement ends that grace at the cancel time. All on the
-   * clinic clock. A settled bill with no settledAt allows nothing.
+   * Which period starts a stay may still charge once a bill of it is settled (design 4.5, R6, R26, R27). A settled bill stands
+   * for everything that started before its settlement, so only periods from the latest settlement on count. The grace is a
+   * checkout grace: a settlement made while the stay's discharge order was in progress gets `[settledAt, settledAt +
+   * graceHours)`, cut short at that order's cancel time if it was cancelled later. No period starting inside a grace is ever
+   * charged, whichever bill is active now. A mid-stay settlement, with no order in progress, gets none. All on the clinic
+   * clock. A settled bill with no settledAt allows nothing.
    */
   private async afterSettlement(admissionId: unknown, settled: { settledAt?: Date }[]): Promise<(start: number) => boolean> {
     const graceMs = (await this.settings.get()).graceHours * HOUR_MS;
-    const cancels = (await this.dischargeOrders.find({ admission: admissionId, state: 'cancelled' }).select('cancelled').lean().exec())
-      .map((o) => (o.cancelled?.at ? new Date(o.cancelled.at).getTime() : NaN))
-      .filter((t) => !isNaN(t))
-      .sort((a, b) => a - b);
+    const orders = await this.dischargeOrders.find({ admission: admissionId }).select('state orderedAt cancelled leftAt').lean().exec();
+    const ms = (d?: Date) => (d ? new Date(d).getTime() : Infinity);
+    /** When the order stopped being in progress: cancelled, or the patient left. */
+    const endOf = (o: (typeof orders)[number]) => (o.state === 'cancelled' ? ms(o.cancelled?.at) : o.state === 'left' ? ms(o.leftAt) : Infinity);
     const graces = settled.map((b) => {
       const from = b.settledAt ? new Date(b.settledAt).getTime() : Infinity;
-      const cancel = cancels.find((t) => t > from) ?? Infinity;
-      return { from, to: Math.min(from + graceMs, cancel) };
+      const open = orders.find((o) => new Date(o.orderedAt).getTime() <= from && endOf(o) > from);
+      if (!open) return { from, to: from };
+      return { from, to: Math.min(from + graceMs, open.state === 'cancelled' ? endOf(open) : Infinity) };
     });
     const latest = Math.max(...graces.map((g) => g.from));
     return (start) => start >= latest && !graces.some((g) => start >= g.from && start < g.to);
