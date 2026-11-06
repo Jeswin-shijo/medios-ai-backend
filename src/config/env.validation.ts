@@ -17,6 +17,11 @@ export function validateEnv(config: Record<string, unknown>) {
     errors.push('JWT_SECRET is a publicly known example value; generate a new one.');
   }
 
+  // There is no fallback database: on a shared machine a guessed localhost one may belong to another project.
+  if (!String(config.MONGODB_URI ?? '').trim()) {
+    errors.push('MONGODB_URI is required: the address of the MongoDB database to use (mongodb:// or mongodb+srv://), in .env or the host\'s settings. The API does not fall back to a local database.');
+  }
+
   const origins = String(config.CORS_ORIGIN ?? '');
   if (origins.split(',').some((o) => o.trim() === '*')) {
     errors.push('CORS_ORIGIN cannot be "*": the API uses credentialed requests. List the allowed origins, comma-separated.');
@@ -62,6 +67,13 @@ export function validateEnv(config: Record<string, unknown>) {
   const toolsSecret = config.CALL_TOOLS_SECRET;
   if (toolsSecret !== undefined && toolsSecret !== '' && String(toolsSecret).length < 24) {
     errors.push('CALL_TOOLS_SECRET must be 24+ random characters; it authenticates the inbound agent\'s mid-call tools.');
+  }
+  for (const name of ['SMS_PROVIDER', 'PAYMENT_PROVIDER']) {
+    const value = String(config[name] ?? (production ? 'none' : 'sample')).toLowerCase();
+    if (!['none', 'sample'].includes(value)) errors.push(`${name} must be none or sample.`);
+  }
+  if (config.PUBLIC_WEB_URL !== undefined && config.PUBLIC_WEB_URL !== '' && !/^https?:\/\/\S+$/.test(String(config.PUBLIC_WEB_URL))) {
+    errors.push('PUBLIC_WEB_URL must be an http(s) address.');
   }
   if (config.CLINIC_DATE !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(config.CLINIC_DATE))) {
     errors.push('CLINIC_DATE must be YYYY-MM-DD.');

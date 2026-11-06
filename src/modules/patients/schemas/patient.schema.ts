@@ -151,6 +151,10 @@ export class Patient {
 
   @Prop({ default: '' })
   doNotCallReason: string;
+
+  /** Set when the record was not made at the front desk, e.g. "Registered at kiosk Front kiosk". */
+  @Prop()
+  registeredVia?: string;
 }
 
 export const PatientSchema = SchemaFactory.createForClass(Patient);

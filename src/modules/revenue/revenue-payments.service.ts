@@ -19,9 +19,26 @@ export interface PaymentInput {
   kind: PaymentKind;
 }
 
+/** A payment the reception kiosk took. */
+export interface KioskPaymentInput {
+  amount: number;
+  /** How the patient paid, as the receipt shows it: `Cash at counter`, `UPI · <ref> · SAMPLE`. */
+  reference: string;
+  /** One payment per source: `op-visit:<id>`. */
+  source: string;
+  /** Who received it (R34): for cash the staff member who took it at the counter, for UPI and card the kiosk device. */
+  by: { id: string; name: string };
+  /** When the money came in (clinic clock). */
+  at: Date;
+}
+
 export const MAX_PAYMENT = 1_000_000;
-/** `kiosk` is reserved for a later kiosk payment path and is not accepted from the desk. */
+/** `kiosk` is the reception kiosk's own mode (recordKiosk) and is not accepted from the desk. */
 const DESK_MODES = ['cash', 'upi', 'card'];
+
+const checkAmount = (amount: number) => {
+  if (!Number.isInteger(amount) || amount < 1 || amount > MAX_PAYMENT) throw new BadRequestException('The amount must be a whole number of rupees, from 1 to 10,00,000');
+};
 
 /** Desk payments and their receipts. A payment is never deleted: cancelling it is a separate, admin-only record. */
 @Injectable()
@@ -39,7 +56,7 @@ export class PaymentsService {
   /** Records a payment and gives the receipt number (RC-0001). Refused on a settled bill. */
   async record(actor: Actor, billId: string, input: PaymentInput): Promise<PaymentDocument> {
     const { amount, mode, kind } = input;
-    if (!Number.isInteger(amount) || amount < 1 || amount > MAX_PAYMENT) throw new BadRequestException('The amount must be a whole number of rupees, from 1 to 10,00,000');
+    checkAmount(amount);
     if (!DESK_MODES.includes(mode)) throw new BadRequestException('The payment mode must be cash, upi or card');
     if (!PAYMENT_KINDS.includes(kind)) throw new BadRequestException('The payment kind must be deposit, part or settlement');
     const bill = await this.bills.get(billId);
@@ -54,9 +71,48 @@ export class PaymentsService {
       by: { id: actor.id, name: actor.name },
       at: clinicNow(),
     });
+    return this.book(bill, payment);
+  }
+
+  /**
+   * A payment the reception kiosk took (spec 4.5): mode `kiosk`, the real method in the reference, and a settlement of the
+   * fee, as the desk records an OPD fee. Once per source: a repeat, or two at once, give back the first. Refused on a settled bill.
+   */
+  async recordKiosk(billId: string, input: KioskPaymentInput): Promise<PaymentDocument> {
+    const earlier = await this.payments.findOne({ source: input.source }).exec();
+    if (earlier) return earlier;
+    checkAmount(input.amount);
+    const bill = await this.bills.get(billId);
+    if (bill.state === 'settled') throw new ConflictException('This bill is settled');
+    let payment: PaymentDocument;
+    try {
+      payment = await this.payments.create({
+        receiptNumber: await this.bills.nextNumber('revenue-receipt', 'RC'),
+        bill: bill._id,
+        amount: input.amount,
+        mode: 'kiosk',
+        reference: input.reference.trim().slice(0, 80),
+        source: input.source,
+        kind: 'settlement',
+        by: { id: input.by.id, name: input.by.name },
+        at: input.at,
+      });
+    } catch (e) {
+      const err = e as { code?: number; keyPattern?: Record<string, unknown> };
+      if (err.code === 11000 && err.keyPattern && 'source' in err.keyPattern) {
+        const won = await this.payments.findOne({ source: input.source }).exec();
+        if (won) return won;
+      }
+      throw e;
+    }
+    return this.book(bill, payment);
+  }
+
+  /** Puts a new payment on the bill's totals, then tells the Coordinator and settles an OPD bill that is now done. */
+  private async book(bill: BillDocument, payment: PaymentDocument): Promise<PaymentDocument> {
     try {
       // Guarded: a bill that settled a moment ago takes no payment, and the receipt is removed again.
-      await this.bills.adjust(String(bill._id), { payments: amount }, { onlyActive: true });
+      await this.bills.adjust(String(bill._id), { payments: payment.amount }, { onlyActive: true });
     } catch (e) {
       await this.payments.deleteOne({ _id: payment._id }).exec();
       throw e;

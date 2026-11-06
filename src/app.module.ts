@@ -43,6 +43,7 @@ import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { RevenueModule } from './modules/revenue/revenue.module';
 import { OpdModule } from './modules/opd/opd.module';
+import { ReceptionModule } from './modules/reception/reception.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -96,6 +97,7 @@ import { HealthController } from './health.controller';
     SchedulingModule,
     RevenueModule,
     OpdModule,
+    ReceptionModule,
   ],
   controllers: [HealthController],
   // Guards run in this order: rate limit, then authentication, then role checks.

@@ -10,7 +10,7 @@ import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-a
 import { BillExplainInput, RevenueAiService, RevenueSummaryInput, RevenueTextResult } from './revenue-ai';
 import { ACTIVE_BILL_STATES, Bill, BillDocument } from './schemas/bill.schema';
 import { ChargeLine, ChargeLineDocument } from './schemas/charge-line.schema';
-import { Payment, PaymentDocument } from './schemas/payment.schema';
+import { Payment, PaymentDocument, PAYMENT_MODES, PaymentMode } from './schemas/payment.schema';
 import { Refund, RefundDocument } from './schemas/refund.schema';
 import { RevenueSnapshot, RevenueSnapshotDocument } from './schemas/revenue-snapshot.schema';
 
@@ -84,7 +84,8 @@ export interface RevenueOverview {
   day: string;
   cards: Record<RevenueCardKey, RevenueCard>;
   needsAction: NeedsActionRow[];
-  byMode: { cash: number; upi: number; card: number };
+  /** `kiosk`: taken at the reception kiosk (the real method is in each payment's reference). */
+  byMode: { cash: number; upi: number; card: number; kiosk: number };
   needsPrice: NeedsPriceRow[];
   recent: RecentPaymentRow[];
 }
@@ -209,9 +210,9 @@ export class RevenueOverviewService {
     return this.payments.find({ at: { $gte: from, $lt: to }, cancelled: { $exists: false } }).select('amount mode').lean<{ amount: number; mode: string }[]>().exec();
   }
 
-  private async modeTotals(date: string): Promise<{ cash: number; upi: number; card: number }> {
-    const out = { cash: 0, upi: 0, card: 0 };
-    for (const p of await this.dayPayments(date)) if (p.mode === 'cash' || p.mode === 'upi' || p.mode === 'card') out[p.mode] += p.amount;
+  private async modeTotals(date: string): Promise<RevenueOverview['byMode']> {
+    const out = { cash: 0, upi: 0, card: 0, kiosk: 0 };
+    for (const p of await this.dayPayments(date)) if ((PAYMENT_MODES as readonly string[]).includes(p.mode)) out[p.mode as PaymentMode] += p.amount;
     return out;
   }
 

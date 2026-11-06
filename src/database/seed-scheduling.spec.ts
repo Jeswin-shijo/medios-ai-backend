@@ -141,7 +141,7 @@ describe('seedScheduling', () => {
     await connectTestDb();
     await resetTestDb();
     savedClinic = process.env.CLINIC_DATE;
-    // The seed does not read .env: it must not depend on CLINIC_DATE.
+    // The seed may run without CLINIC_DATE (.env is read only when MONGODB_URI is not passed): it must not depend on it.
     delete process.env.CLINIC_DATE;
     mock.timers.enable({ apis: ['Date'], now: NOW });
 

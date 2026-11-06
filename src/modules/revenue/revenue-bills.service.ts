@@ -187,11 +187,15 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Which bill a charge goes on (spec 4.1; the continuation step is Discharge design 4.5). `openContinuation: false` is for a
-   * caller that charges nothing (a procedure booking): it never opens a continuation bill, so it joins the case's active bill
-   * or falls through to the day's OPD or walk-in bill, as before continuation bills.
+   * Which bill a charge goes on (spec 4.1; the continuation step is Discharge design 4.5). `day` (YYYY-MM-DD, default the
+   * clinic day) picks the OPD or walk-in bill. `openContinuation: false` is for a caller that charges nothing (a procedure
+   * booking): it never opens a continuation bill, so it joins the case's active bill or falls through to the day's OPD or
+   * walk-in bill, as before continuation bills. A charge with no case (a kiosk visit) never reaches the stay's bills.
    */
-  async forCharge(input: { patientId: string; caseId?: string | null }, opts: { openContinuation?: boolean } = {}): Promise<BillDocument> {
+  async forCharge(
+    input: { patientId: string; caseId?: string | null; day?: string },
+    opts: { openContinuation?: boolean } = {},
+  ): Promise<BillDocument> {
     const patient = oid(input.patientId, 'patientId');
     if (input.caseId && isValidObjectId(input.caseId)) {
       const caseId = new Types.ObjectId(input.caseId);
@@ -206,7 +210,7 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
         if (continuation) return continuation;
       }
     }
-    const day = isoDate(clinicNow());
+    const day = input.day ?? isoDate(clinicNow());
     const opd = await this.bills.findOne({ patient, kind: 'opd', day, state: { $in: ACTIVE_BILL_STATES } }).sort({ openedAt: -1 }).exec();
     if (opd) return opd;
     return this.open({ kind: 'walk-in', patientId: input.patientId, day });

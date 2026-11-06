@@ -1,6 +1,6 @@
 import mongoose, { Model, Schema } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
 import { User, UserSchema } from '../modules/users/schemas/user.schema';
@@ -28,6 +28,11 @@ import { QueueSequence, QueueSequenceSchema } from '../modules/queue/schemas/que
 import { PatientCard, PatientCardSchema } from '../modules/queue/schemas/patient-card.schema';
 import { Department, DepartmentSchema } from '../modules/opd/schemas/department.schema';
 import { OpDoctor, OpDoctorSchema } from '../modules/opd/schemas/op-doctor.schema';
+import { OpVisit, OpVisitSchema } from '../modules/reception/schemas/op-visit.schema';
+import { OpSequence, OpSequenceSchema } from '../modules/reception/schemas/op-sequence.schema';
+import { ReceptionSession, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
+import { OtpChallenge, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
+import { formatTokenLabel, newSecret } from '../modules/reception/format';
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
 import { seedEr } from './seed-er';
@@ -44,7 +49,14 @@ import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 // patient whose chart is filled in). Records go through the real Mongoose schemas,
 // so enums, required fields and timestamps are enforced exactly as in the API.
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital';
+// Use the same database the API would: read .env (an explicit MONGODB_URI wins), never guess one.
+const envFile = join(__dirname, '..', '..', '.env');
+if (!process.env.MONGODB_URI && existsSync(envFile)) process.loadEnvFile(envFile);
+if (!process.env.MONGODB_URI) {
+  console.error('Refusing to seed: MONGODB_URI is not set (put it in .env or pass it explicitly).');
+  process.exit(1);
+}
+const MONGODB_URI = process.env.MONGODB_URI as string;
 // Demo accounts for local development only; never seed these into a real deployment.
 const DEMO_EMAIL = 'doctor@medios.ai';
 const ADMIN_EMAIL = 'admin@medios.ai';
@@ -59,6 +71,14 @@ const STAFF_ACCOUNTS = [
 const BCRYPT_ROUNDS = 12;
 /** The clinic day the fixtures describe (CLINIC_DATE in development). */
 const DEMO_DAY = '2026-09-26';
+
+/** The database name in a MongoDB URI, never the URI itself: it may hold credentials (they end at the last '@'). */
+function databaseName(uri: string): string {
+  const rest = uri.replace(/^mongodb(\+srv)?:\/\//, '');
+  const hosts = rest.slice(rest.lastIndexOf('@') + 1);
+  const slash = hosts.indexOf('/');
+  return (slash === -1 ? '' : hosts.slice(slash + 1).split('?')[0]) || '(default)';
+}
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
@@ -121,10 +141,20 @@ const DEMO_CARDS = [
  * The demo day's token queue, in step with its appointments: everyone who has
  * arrived holds a token, numbered in the order they came. Display links are kept.
  */
-async function seedQueue() {
+async function seedQueue(shajin: { _id: any; name: string; room: string; tokenPrefix: string; departmentName: string }) {
   const tokens = model(QueueToken, QueueTokenSchema);
-  await tokens.deleteMany({});
-  await model(QueueSequence, QueueSequenceSchema).deleteMany({});
+  // Dropped, not emptied, so the new indexes replace the old unique ones.
+  await recreate(tokens);
+  await recreate(model(QueueSequence, QueueSequenceSchema));
+  for (const [cls, schema] of [
+    [OpVisit, OpVisitSchema],
+    [OpSequence, OpSequenceSchema],
+    [ReceptionSession, ReceptionSessionSchema],
+    [OtpChallenge, OtpChallengeSchema],
+  ] as const) {
+    await recreate(model(cls, schema as Schema));
+  }
+  const doctorId = String(shajin._id);
 
   const arrived = await model(Appointment, AppointmentSchema)
     .find({ date: DEMO_DAY, status: { $in: ['Completed', 'In Consultation', 'Checked In', 'Waiting'] } })
@@ -143,7 +173,13 @@ async function seedQueue() {
     return {
       date: DEMO_DAY,
       number: i + 1,
-      label: String(i + 1),
+      label: formatTokenLabel(shajin.tokenPrefix, i + 1),
+      series: doctorId,
+      doctorId,
+      doctorName: shajin.name,
+      department: shajin.departmentName,
+      room: shajin.room,
+      trackCode: newSecret(16),
       status: a.status === 'Completed' ? 'completed' : a.status === 'In Consultation' ? 'called' : 'waiting',
       uhid: a.uhid,
       patientName: a.patientName,
@@ -151,7 +187,7 @@ async function seedQueue() {
       appointmentTime: a.time,
       source: 'front-desk',
       issuedBy: 'Front Desk',
-      ...(seen && { counter: 'Consultation Room', calledAt, firstCalledAt: calledAt, calledBy: 'Dr. Shajin' }),
+      ...(seen && { counter: shajin.room, calledAt, firstCalledAt: calledAt, calledBy: 'Dr. Shajin' }),
       ...(a.status === 'Completed' && { completedAt: new Date(calledAt.getTime() + 15 * MINUTE) }),
       ...(a.status !== 'Completed' && { activeKey: `${DEMO_DAY}:${a.uhid}` }),
       createdAt: issuedAt,
@@ -159,7 +195,7 @@ async function seedQueue() {
     };
   });
   await tokens.insertMany(records);
-  await model(QueueSequence, QueueSequenceSchema).create({ date: DEMO_DAY, last: records.length });
+  await model(QueueSequence, QueueSequenceSchema).create({ date: DEMO_DAY, series: doctorId, last: records.length });
   console.log(`✅ ${records.length} queue tokens`);
 
   // Demo cards for patients not checked in yet, so the kiosk can be tried without
@@ -172,7 +208,8 @@ async function seedQueue() {
 
 async function seed() {
   const DEMO_PASSWORD = resolveDemoPassword(); // refuses a remote database without SEED_DEMO_PASSWORD, before anything is wiped
-  console.log('🌱 Connecting to MongoDB at', MONGODB_URI);
+  // Name only: the URI may hold credentials.
+  console.log('🌱 Seeding database', databaseName(MONGODB_URI));
   await mongoose.connect(MONGODB_URI);
 
   const [doctor] = fixture('users');
@@ -232,9 +269,11 @@ async function seed() {
   await model(AgentCall, AgentCallSchema).deleteMany({});
   await model(InboundSession, InboundSessionSchema).deleteMany({});
   await model(CallerLookup, CallerLookupSchema).deleteMany({});
-  await seedQueue();
+  // The fixture appointments are Dr. Shajin's (the Scheduling seed below gives them his id), so their tokens are on his line.
+  const departmentName = buildDepartments().find((d) => d.code === shajin.departmentCode)!.name;
+  await seedQueue({ _id: shajin._id, name: shajin.name, room: shajin.room, tokenPrefix: shajin.tokenPrefix, departmentName });
   // Wards, beds and the two real admissions (the patients come first); also clears admissions and bed suggestions.
-  // Their times fall on the clinic day: the seed does not read .env, so CLINIC_DATE may be unset.
+  // Their times fall on the clinic day: CLINIC_DATE may be unset (the seed reads .env only when MONGODB_URI is not passed).
   await seedBeds(process.env.CLINIC_DATE ?? DEMO_DAY);
   // Cases, messages, an approval, an escalation and snapshots for the Coordinator, built on the bed requests above.
   await seedCoordinator(process.env.CLINIC_DATE ?? DEMO_DAY);

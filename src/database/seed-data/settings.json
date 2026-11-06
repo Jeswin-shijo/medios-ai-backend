@@ -74,5 +74,9 @@
     "showNamesOnDisplay": false,
     "announce": true,
     "upcomingOnDisplay": 6
+  },
+  "reception": {
+    "defaultDoctorId": "",
+    "upiPayeeName": "St. Mary's Multi Speciality Hospital"
   }
 }

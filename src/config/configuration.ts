@@ -17,7 +17,8 @@ export default () => ({
   nodeEnv,
   isProduction,
   database: {
-    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital',
+    // Required and validated at startup (see env.validation.ts); there is no fallback database.
+    uri: process.env.MONGODB_URI,
   },
   jwt: {
     // Required and validated at startup (see env.validation.ts); there is no fallback secret.
@@ -74,6 +75,13 @@ export default () => ({
     model: process.env.AI_MODEL || 'claude-opus-5-5',
     apiKey: process.env.ANTHROPIC_API_KEY || '',
     timeoutMs: int(process.env.AI_TIMEOUT_MS, 8000),
+  },
+  reception: {
+    // Reception kiosk: 'sample' (nothing is sent or charged; screens say SAMPLE) or 'none'.
+    smsProvider: (process.env.SMS_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
+    paymentProvider: (process.env.PAYMENT_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
+    // Public web address for patient tracking links, when Settings does not give one.
+    publicWebUrl: (process.env.PUBLIC_WEB_URL || '').trim().replace(/\/+$/, ''),
   },
   swagger: {
     enabled: process.env.SWAGGER_ENABLED ? process.env.SWAGGER_ENABLED === 'true' : !isProduction,

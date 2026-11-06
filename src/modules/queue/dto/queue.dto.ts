@@ -17,6 +17,11 @@ export class IssueTokenDto {
   @IsMongoId()
   appointmentId?: string;
 
+  @ApiPropertyOptional({ description: "The doctor whose line to join; when omitted, the appointment's own doctor, else the default doctor" })
+  @IsOptional()
+  @IsMongoId()
+  doctorId?: string;
+
   @ApiPropertyOptional({ description: 'Serve ahead of the others (elderly, pregnant, unwell)' })
   @IsOptional()
   @IsBoolean()

@@ -72,9 +72,15 @@ import { DischargePlan, DischargePlanDocument, DischargePlanSchema } from '../mo
 import { DischargeOrder, DischargeOrderDocument, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
 import { DischargeSummary, DischargeSummaryDocument, DischargeSummarySchema } from '../modules/discharge/schemas/discharge-summary.schema';
 import { DischargeSnapshot, DischargeSnapshotDocument, DischargeSnapshotSchema } from '../modules/discharge/schemas/discharge-snapshot.schema';
+import { QueueDisplay, QueueDisplayDocument, QueueDisplaySchema } from '../modules/queue/schemas/queue-display.schema';
+import { BillInvoice, BillInvoiceDocument, BillInvoiceSchema } from '../modules/billing/schemas/bill.schema';
+import { ReceptionSession, ReceptionSessionDocument, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
+import { OtpChallenge, OtpChallengeDocument, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
+import { OpVisit, OpVisitDocument, OpVisitSchema } from '../modules/reception/schemas/op-visit.schema';
+import { OpSequence, OpSequenceDocument, OpSequenceSchema } from '../modules/reception/schemas/op-sequence.schema';
 
 // Database specs share one throwaway database. The name check stops a stray
-// MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev).
+// MONGODB_TEST_URI from wiping a real one (medios_hospital, medios_beds_dev, medios_reception_dev).
 
 const DEFAULT_URI = 'mongodb://localhost:27017/medios_test';
 
@@ -169,12 +175,18 @@ export function models() {
     DischargeOrder: model(DischargeOrder, DischargeOrderSchema) as Model<DischargeOrderDocument>,
     DischargeSummary: model(DischargeSummary, DischargeSummarySchema) as Model<DischargeSummaryDocument>,
     DischargeSnapshot: model(DischargeSnapshot, DischargeSnapshotSchema) as Model<DischargeSnapshotDocument>,
+    QueueDisplay: model(QueueDisplay, QueueDisplaySchema) as Model<QueueDisplayDocument>,
+    BillInvoice: model(BillInvoice, BillInvoiceSchema) as Model<BillInvoiceDocument>,
+    ReceptionSession: model(ReceptionSession, ReceptionSessionSchema) as Model<ReceptionSessionDocument>,
+    OtpChallenge: model(OtpChallenge, OtpChallengeSchema) as Model<OtpChallengeDocument>,
+    OpVisit: model(OpVisit, OpVisitSchema) as Model<OpVisitDocument>,
+    OpSequence: model(OpSequence, OpSequenceSchema) as Model<OpSequenceDocument>,
   };
 }
 
 /**
  * Connects to the test database and builds every model's indexes, which the specs
- * rely on (one active admission per patient). syncIndexes builds them once, in place
+ * rely on (unique keys, one active admission per patient). syncIndexes builds them once, in place
  * of the background auto-build, and drops any an older schema left behind.
  */
 export async function connectTestDb(): Promise<typeof mongoose> {

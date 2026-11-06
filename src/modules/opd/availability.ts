@@ -22,13 +22,18 @@ export function shortTime(hhmm: string): string {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${suffix}`;
 }
 
-/** Whether a doctor can be seen now, later today, or not today, from today's OP sessions and the queue length. */
+/**
+ * Whether a doctor can be seen now, later today, or not today, from today's OP sessions and the queue length.
+ * A doctor on leave today (Scheduling's leave, whole days) is off for the day whatever their sessions say.
+ */
 export function doctorAvailability(
   sessions: OpSession[],
   now: Date,
   waiting: number,
   avgConsultMinutes: number,
+  onLeave = false,
 ): Availability {
+  if (onLeave) return { state: 'off', label: 'On leave today', bookable: false };
   const today = sessions
     .filter((s) => s.days.includes(now.getDay()))
     .sort((a, b) => minutes(a.start) - minutes(b.start));

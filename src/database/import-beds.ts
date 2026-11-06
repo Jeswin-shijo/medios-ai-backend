@@ -22,6 +22,12 @@ import { clinicNow } from '../common/utils/clinic-time';
 const model = (cls: { name: string }, schema: Schema): Model<any> => mongoose.model(cls.name, schema);
 
 async function importBeds() {
+  // Never guess a database: on a shared machine localhost:27017 may be another project's.
+  if (!process.env.MONGODB_URI) {
+    console.error('Refusing to import beds: MONGODB_URI is not set (pass it explicitly: MONGODB_URI=... npm run import-beds -- <file.csv>).');
+    process.exitCode = 1;
+    return;
+  }
   const args = process.argv.slice(2);
   const force = args.includes('--force');
   const file = args.find((a) => !a.startsWith('--'));
@@ -34,7 +40,7 @@ async function importBeds() {
     return;
   }
 
-  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/medios_hospital';
+  const uri = process.env.MONGODB_URI;
   console.log(`Database: ${new URL(uri).host}`);
   await mongoose.connect(uri);
 

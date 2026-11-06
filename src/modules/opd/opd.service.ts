@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { isValidObjectId, Model } from 'mongoose';
 import { Department, DepartmentDocument } from './schemas/department.schema';
 import { OpDoctor, OpDoctorDocument } from './schemas/op-doctor.schema';
 import { DepartmentInput, DoctorInput } from './dto/opd.dto';
@@ -29,6 +29,9 @@ function assertSessions(sessions: SessionInput[]) {
     }
   }
 }
+
+/** "Dr. Shajin" for a doctor named "Dr. Shajin" or "Shajin": a leading title is dropped first, as normaliseName does. */
+const withTitle = (name: string) => `Dr. ${name.replace(/^\s*dr\b\.?\s*/i, '')}`;
 
 /** The fields actually sent: a DTO instance carries explicit `undefined` for every field left out. */
 function defined<T extends object>(dto: T): Partial<T> {
@@ -81,8 +84,9 @@ export class OpdService {
     return this.doctors.find(filter).sort({ name: 1 }).exec();
   }
 
+  /** The doctor; a malformed or unknown id is a 404, while a database error still surfaces. */
   async getDoctor(id: string): Promise<OpDoctorDocument> {
-    const doctor = await this.doctors.findById(id).exec().catch(() => null); // a malformed id is just "not found"
+    const doctor = isValidObjectId(id) ? await this.doctors.findById(id).exec() : null;
     if (!doctor) throw new NotFoundException('Doctor not found');
     return doctor;
   }
@@ -106,8 +110,9 @@ export class OpdService {
   /** The doctor the kiosk uses by default: the one named in settings if active, else the first active one. */
   async defaultDoctor(): Promise<OpDoctorDocument | null> {
     const settings = resolveReceptionSettings((await this.settings.getSettings()).reception);
-    if (settings.defaultDoctorId) {
-      const chosen = await this.doctors.findById(settings.defaultDoctorId).exec().catch(() => null);
+    // A stored id that is not an id at all is skipped; a database error is not hidden.
+    if (settings.defaultDoctorId && isValidObjectId(settings.defaultDoctorId)) {
+      const chosen = await this.doctors.findById(settings.defaultDoctorId).exec();
       if (chosen?.active) return chosen;
     }
     const departments = await this.listDepartments();
@@ -134,7 +139,7 @@ export class OpdService {
   private async rethrowPrefixClash(error: any, tokenPrefix: string): Promise<never> {
     if (error?.code === 11000) {
       const clash = await this.doctors.findOne({ active: true, tokenPrefix }).exec();
-      throw new ConflictException(`Token letters "${tokenPrefix}" are already used by Dr. ${clash?.name ?? 'another doctor'}`);
+      throw new ConflictException(`Token letters "${tokenPrefix}" are already used by ${clash ? withTitle(clash.name) : 'another doctor'}`);
     }
     throw error;
   }
@@ -154,7 +159,7 @@ export class OpdService {
       const clash = await this.doctors
         .findOne({ active: true, tokenPrefix: doctor.tokenPrefix, ...(selfId ? { _id: { $ne: selfId } } : {}) })
         .exec();
-      if (clash) throw new ConflictException(`Token letters "${doctor.tokenPrefix}" are already used by Dr. ${clash.name}`);
+      if (clash) throw new ConflictException(`Token letters "${doctor.tokenPrefix}" are already used by ${withTitle(clash.name)}`);
     }
   }
 }

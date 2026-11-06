@@ -13,6 +13,12 @@ const SEEN_EVERY_MS = 60_000;
 
 const hashKey = (key: string) => createHash('sha256').update(key).digest('hex');
 
+/**
+ * A refused key. A kiosk's refusal carries `code: 'KIOSK_REVOKED'` for the tablet; the words stay exactly as they are,
+ * because tablets in the field still find a revoked key by matching /kiosk (key|link)/ in them. Displays are unchanged.
+ */
+const refused = (kind: DeviceKind, message: string) => new UnauthorizedException(kind === 'kiosk' ? { message, code: 'KIOSK_REVOKED' } : message);
+
 @Injectable()
 export class QueueDisplaysService {
   constructor(@InjectModel(QueueDisplay.name) private readonly displays: Model<QueueDisplayDocument>) {}
@@ -53,10 +59,10 @@ export class QueueDisplaysService {
   async authenticate(authorization: string | undefined, kind: DeviceKind = 'display'): Promise<QueueDisplayDocument> {
     const { header, label } = DEVICE_AUTH[kind];
     const match = header.exec(authorization ?? '');
-    if (!match) throw new UnauthorizedException(`A ${label} key is required`);
+    if (!match) throw refused(kind, `A ${label} key is required`);
     // Displays added before devices had a kind have none stored.
     const display = await this.displays.findOne({ keyHash: hashKey(match[1]), kind: kind === 'display' ? { $in: ['display', null] } : kind }).exec();
-    if (!display) throw new UnauthorizedException(`This ${label} link is no longer valid. Ask an administrator for a new one.`);
+    if (!display) throw refused(kind, `This ${label} link is no longer valid. Ask an administrator for a new one.`);
     if (!display.lastSeenAt || Date.now() - display.lastSeenAt.getTime() > SEEN_EVERY_MS) {
       await this.displays.updateOne({ _id: display._id }, { $set: { lastSeenAt: new Date() } }).exec();
     }

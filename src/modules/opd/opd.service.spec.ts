@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { describe, test, before, beforeEach, after } from 'node:test';
 import { BadRequestException, ConflictException } from '@nestjs/common';
+import { Types } from 'mongoose';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { OpdService } from './opd.service';
 import { UpdateDepartmentDto, UpdateDoctorDto } from './dto/opd.dto';
@@ -55,6 +56,18 @@ describe('OpdService', () => {
     await opd.updateDoctor(String(first._id), { active: false });
     const second = await opd.createDoctor(doctor({ name: 'Other', room: 'Room 102' }));
     assert.equal(second.tokenPrefix, 'G');
+  });
+
+  test('a doctor whose name already says "Dr." is named once in the token-letters refusal (R33)', async () => {
+    await opd.createDoctor(doctor({ name: 'Dr. Shajin' }));
+    const said = (e: any) => {
+      assert.ok(e instanceof ConflictException);
+      assert.equal(e.message, 'Token letters "G" are already used by Dr. Shajin');
+      return true;
+    };
+    await assert.rejects(opd.createDoctor(doctor({ name: 'Other', room: 'Room 102' })), said);
+    // The same words when another desk won the race for the letters.
+    await assert.rejects((opd as any).rethrowPrefixClash({ code: 11000 }, 'G'), said);
   });
 
   test('updateDoctor lets a doctor keep their own token letters', async () => {
@@ -152,5 +165,19 @@ describe('OpdService', () => {
 
   test('getDoctor answers 404 for a missing or malformed id', async () => {
     await assert.rejects(opd.getDoctor('nope'), /Doctor not found/);
+    await assert.rejects(opd.getDoctor(String(new Types.ObjectId())), /Doctor not found/);
+  });
+
+  test('a real database error is not turned into "not found"', async () => {
+    const shajin = await opd.createDoctor(doctor());
+    await settingsService.updateSettings({ reception: { defaultDoctorId: String(shajin._id) } } as never);
+    // The doctors collection fails on look-up by id; everything else still works.
+    const failing = new Proxy(m().OpDoctor, { get: (model, key, self) => (key === 'findById' ? () => ({ exec: () => Promise.reject(new Error('database down')) }) : Reflect.get(model, key, self)) });
+    const broken = new OpdService(m().Department, failing, settingsService);
+    await assert.rejects(broken.getDoctor(String(shajin._id)), /database down/);
+    await assert.rejects(broken.defaultDoctor(), /database down/);
+    // A stored default that is not an id at all is skipped, as before.
+    await settingsService.updateSettings({ reception: { defaultDoctorId: 'not-an-id' } } as never);
+    assert.equal(String((await broken.defaultDoctor())!._id), String(shajin._id));
   });
 });

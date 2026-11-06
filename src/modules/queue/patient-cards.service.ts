@@ -19,6 +19,39 @@ export function normalizeCardId(raw: string): string {
 
 const CARD_NOT_REGISTERED = 'This card is not registered. Please go to the front desk.';
 
+/** The hex UID with its bytes in the other order. */
+const reverseBytes = (hex: string) => hex.match(/../g)!.reverse().join('');
+
+/**
+ * Every form another reader may have typed for the same card. A desk USB reader
+ * types the UID as a decimal number (often zero-padded to 10 digits, in either
+ * byte order); an NFC tablet reads it as hex (4 or 7 bytes). A read is taken as hex
+ * where it can be, and digits also as a decimal number, so every form of one card
+ * finds every other (R33). Original first (an exact match wins), no duplicates.
+ */
+export function cardIdCandidates(raw: string): string[] {
+  const id = normalizeCardId(raw);
+  const out = [id];
+  /** The UID in hex, its other byte order, and the decimal forms of both. */
+  const withForms = (hex: string) => {
+    const reversed = reverseBytes(hex);
+    out.push(hex, reversed);
+    for (const h of [hex, reversed]) {
+      const dec = BigInt(`0x${h}`).toString();
+      out.push(dec, dec.padStart(10, '0'));
+    }
+  };
+  if (/^[0-9A-F]+$/.test(id) && id.length % 2 === 0 && id.length >= 8 && id.length <= 14) withForms(id);
+  // Digits may be a USB reader's decimal UID: its 4- and 7-byte hex forms where the number fits.
+  if (/^[0-9]+$/.test(id) && id.length <= 17) {
+    const n = BigInt(id);
+    for (const bytes of [4, 7]) {
+      if (n > 0n && n < 1n << BigInt(bytes * 8)) withForms(n.toString(16).toUpperCase().padStart(bytes * 2, '0'));
+    }
+  }
+  return [...new Set(out)];
+}
+
 /** "…B2C3": enough to tell cards apart on screen. */
 export const cardHint = (cardId: string) => `…${cardId.slice(-4)}`;
 
@@ -43,8 +76,12 @@ export class PatientCardsService {
     const patient = await this.patients.findOne({ uhid: uhid.trim() }).exec();
     if (!patient) throw new NotFoundException(`${uhid} is not a registered patient`);
 
-    const existing = await this.cards.findOne({ cardId }).exec();
-    if (existing?.uhid === patient.uhid) return existing;
+    // The same card may have been linked in another reader's format.
+    const candidates = cardIdCandidates(cardId);
+    const found = await this.cards.find({ cardId: { $in: candidates } }).exec();
+    const sameOwner = found.find((c) => c.uhid === patient.uhid);
+    if (sameOwner) return sameOwner;
+    const existing = candidates.map((id) => found.find((c) => c.cardId === id)).find(Boolean);
     if (existing && !reassign) {
       const owner = await this.patients.findOne({ uhid: existing.uhid }).exec();
       throw new ConflictException(`Card ${cardHint(cardId)} is already linked to ${owner?.name ?? existing.uhid} (${existing.uhid}).`);
@@ -69,11 +106,29 @@ export class PatientCardsService {
     return { id, removed: true };
   }
 
-  /** The UHID a card is linked to. Reads only: no token, and `lastUsedAt` is left alone. */
+  /** The card for a read in any reader's format: an exact match first, then the other forms. Null when unknown. Reads only. */
+  private async lookup(raw: string): Promise<PatientCardDocument | null> {
+    const candidates = cardIdCandidates(raw);
+    const found = await this.cards.find({ cardId: { $in: candidates } }).exec();
+    return candidates.map((id) => found.find((c) => c.cardId === id)).find(Boolean) ?? null;
+  }
+
+  /**
+   * The UHID a card is linked to, whichever reader format linked it (as `findByCard`).
+   * Reads only: no token, and `lastUsedAt` is left alone.
+   */
   async findUhid(rawCardId: string): Promise<string> {
-    const card = await this.cards.findOne({ cardId: normalizeCardId(rawCardId) }).exec();
+    const card = await this.lookup(rawCardId);
     if (!card) throw new NotFoundException(CARD_NOT_REGISTERED);
     return card.uhid;
+  }
+
+  /** The card for a read in any reader's format: an exact match first, then the other forms. Null when unknown. */
+  async findByCard(raw: string): Promise<PatientCardDocument | null> {
+    const card = await this.lookup(raw);
+    if (!card) return null;
+    card.lastUsedAt = new Date();
+    return card.save();
   }
 
   /**
@@ -82,7 +137,7 @@ export class PatientCardsService {
    */
   async tap(rawCardId: string, actor: string, source: 'front-desk' | 'kiosk') {
     const cardId = normalizeCardId(rawCardId);
-    const card = await this.cards.findOneAndUpdate({ cardId }, { $set: { lastUsedAt: new Date() } }, { new: true }).exec();
+    const card = await this.findByCard(cardId);
     if (!card) throw new NotFoundException(CARD_NOT_REGISTERED);
     const issued = await this.queue.issue({ uhid: card.uhid }, actor, source);
     return { ...issued, cardId };

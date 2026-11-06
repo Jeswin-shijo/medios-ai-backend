@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model, mongo, UpdateQuery } from 'mongoose';
+import { FilterQuery, isValidObjectId, Model, mongo, UpdateQuery } from 'mongoose';
 import { QueueToken, QueueTokenDocument, TokenStatus } from './schemas/queue-token.schema';
 import { QueueSequence, QueueSequenceDocument } from './schemas/queue-sequence.schema';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
@@ -10,11 +10,22 @@ import { QueueEvents } from './queue-events';
 import { AppointmentEvents, AppointmentStatusChange } from '../appointments/appointment-events';
 import { Subscription } from 'rxjs';
 import { displayName, QueueSettings, resolveQueueSettings } from './queue-settings';
-import { clinicNow, clockMinutes, displayTime, isoDate } from '../../common/utils/clinic-time';
+import { OpdService } from '../opd/opd.service';
+import { OpDoctorDocument } from '../opd/schemas/op-doctor.schema';
+import { isDuplicateKey, releaseStaleSlot, slotKeyOf } from '../appointments/slot-key';
+import { formatTokenLabel, newSecret } from '../reception/format';
+import { clinicNow, clockLabel, clockMinutes, displayTime, isoDate } from '../../common/utils/clinic-time';
 
 /** Appointment statuses a token can still check in. */
 const CHECKABLE = ['Scheduled', 'Checked In', 'Waiting'];
 const SEEING = [...CHECKABLE, 'In Consultation'];
+
+/** R32: the appointment's doctor no longer sees patients, so it waits for a doctor to be chosen (`doctorId`). */
+const doctorInactive = (name: string) =>
+  new ConflictException({
+    message: `${name ? `This appointment is with ${name}, who is` : "This appointment's doctor is"} not seeing patients now. Check it in with another doctor on the Token Queue.`,
+    code: 'DOCTOR_INACTIVE',
+  });
 
 const activeKey = (date: string, uhid: string) => `${date}:${uhid}`;
 const isDuplicate = (err: unknown, field: string) =>
@@ -31,12 +42,43 @@ export interface QueueBoard {
   stats: Record<'issued' | 'waiting' | 'called' | 'skipped' | 'completed' | 'cancelled', number> & { averageWaitMinutes: number | null };
 }
 
+/** The patient-facing view of one token. Never holds identity. */
+export interface TrackView {
+  hospitalName: string;
+  label: string;
+  status: 'waiting' | 'called' | 'done' | 'cancelled';
+  ahead: number;
+  doctorName: string;
+  department: string;
+  room: string;
+  calledAt?: string;
+  /** The label called in this token's room right now. */
+  nowServing?: string;
+  /** The token is from an earlier day. */
+  ended: boolean;
+}
+
 export interface IssueRequest {
   uhid?: string;
   appointmentId?: string;
   priority?: boolean;
   note?: string;
+  /**
+   * The doctor's line to join; when omitted, the appointment's own doctor, else the default doctor. An appointment whose
+   * own doctor no longer sees patients needs one, and moves to it when that doctor is active (R32).
+   */
+  doctorId?: string;
+  /** Join the line without checking in the patient's appointment. */
+  skipAppointment?: boolean;
+  /** Join `doctorId`'s line even if the doctor is no longer active: the visit was paid before they were made inactive. */
+  allowInactiveDoctor?: boolean;
 }
+
+/** Match a series; old tokens and sequences have none, which counts as the hospital-wide '' line. */
+const seriesFilter = (series: string) => (series ? { series } : { series: { $in: ['', null] } });
+
+/** Ignore "no such index" and "no such collection" when dropping an old index. */
+const IGNORED_DROP_CODES = [26, 27];
 
 /** Appointment statuses that end the visit, and what they do to its token. */
 const ENDS_TOKEN: Record<string, { status: TokenStatus; from: TokenStatus[] }> = {
@@ -58,12 +100,27 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     private readonly settings: SettingsService,
     private readonly events: QueueEvents,
     private readonly appointmentEvents: AppointmentEvents,
+    private readonly opd: OpdService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     this.appointmentChanges = this.appointmentEvents.statusChanges$.subscribe((change) =>
       this.followAppointment(change).catch((err) => this.logger.warn(`Appointment ${change.id} → ${change.status}: ${(err as Error).message}`)),
     );
+    // Numbers now restart per doctor, so the hospital-wide unique keys must go.
+    await this.dropIndex(this.tokens, 'date_1_number_1');
+    await this.dropIndex(this.sequences, 'date_1');
+    // Old records have no series; give them '' so upserts can match on plain equality.
+    await this.sequences.updateMany({ series: { $exists: false } }, { $set: { series: '' } }).exec();
+    await this.tokens.updateMany({ series: { $exists: false } }, { $set: { series: '' } }).exec();
+  }
+
+  private async dropIndex(model: Model<any>, name: string) {
+    try {
+      await model.collection.dropIndex(name);
+    } catch (err) {
+      if (!IGNORED_DROP_CODES.includes((err as { code?: number }).code ?? 0)) throw err;
+    }
   }
 
   onModuleDestroy() {
@@ -85,7 +142,9 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         { new: true },
       )
       .exec();
-    if (token) this.events.changed();
+    if (!token) return;
+    if (token.status === 'completed') this.events.tokenCompleted(String(token._id));
+    this.events.changed();
   }
 
   /** The clinic's current day; tokens are numbered per day. */
@@ -104,7 +163,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async board(date = this.today()): Promise<QueueBoard> {
     const [tokens, settings] = await Promise.all([this.tokens.find({ date }).sort({ number: 1 }).exec(), this.queueSettings()]);
     const waiting = tokens.filter((t) => t.status === 'waiting').sort(byServingOrder);
-    const position = new Map(waiting.map((t, i) => [String(t._id), i + 1]));
+    const place = new Map<string, number>(); // next place in line, per series
+    const position = new Map(
+      waiting.map((t) => {
+        const n = (place.get(t.series ?? '') ?? 0) + 1;
+        place.set(t.series ?? '', n);
+        return [String(t._id), n];
+      }),
+    );
 
     const waits = tokens.filter((t) => t.firstCalledAt).map((t) => t.firstCalledAt!.getTime() - (t as any).createdAt.getTime());
     const count = (status: TokenStatus) => tokens.filter((t) => t.status === status).length;
@@ -148,7 +214,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         .filter((t) => t.status === 'called')
         .sort((a, b) => b.calledAt!.getTime() - a.calledAt!.getTime())
         .map((t) => ({ label: t.label, counter: t.counter, calledAt: t.calledAt, recalls: t.recalls, name: name(t) })),
-      upcoming: waiting.slice(0, settings.upcomingOnDisplay).map((t) => ({ label: t.label, priority: t.priority, name: name(t) })),
+      upcoming: waiting.slice(0, settings.upcomingOnDisplay).map((t) => ({ label: t.label, priority: t.priority, room: t.room, name: name(t) })),
       waitingCount: waiting.length,
       serverTime: new Date().toISOString(),
     };
@@ -159,17 +225,76 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
    * people are ahead. No UHID and no full name, as anyone at the kiosk can see it.
    */
   async kioskView(token: QueueTokenDocument, existing: boolean) {
-    const waiting = token.status === 'waiting' ? await this.tokens.find({ date: token.date, status: 'waiting' }).select('number priority').exec() : [];
     return {
       label: token.label,
       name: displayName(token.patientName),
       status: token.status,
       existing,
-      ahead: waiting.filter((t) => byServingOrder(t, token) < 0).length,
+      ahead: await this.aheadOf(token),
       counter: token.status === 'called' ? token.counter : undefined,
+      room: token.room,
+      doctorName: token.doctorName,
+      department: token.department,
+      trackCode: token.trackCode,
       appointmentTime: token.appointmentTime,
       issuedAt: (token as unknown as { createdAt: Date }).createdAt,
     };
+  }
+
+  /** Waiting tokens in the same doctor's line that will be called before this one; 0 unless it is waiting. */
+  private async aheadOf(token: QueueTokenDocument): Promise<number> {
+    if (token.status !== 'waiting') return 0;
+    const waiting = await this.tokens.find({ date: token.date, status: 'waiting', ...seriesFilter(token.series ?? '') }).select('number priority').exec();
+    return waiting.filter((t) => byServingOrder(t, token) < 0).length;
+  }
+
+  /**
+   * What the patient's phone shows from the link on their slip. Looked up by the
+   * unguessable tracking code alone, so it carries no UHID, name or phone.
+   */
+  async track(code: string): Promise<TrackView> {
+    const token = await this.tokens.findOne({ trackCode: code }).exec();
+    if (!token) throw new NotFoundException('This token link is not valid');
+    const s = (await this.settings.getSettings()) as unknown as Record<string, any>;
+    const status = ({ skipped: 'called', completed: 'done' } as Record<string, TrackView['status']>)[token.status] ?? (token.status as TrackView['status']);
+    const serving =
+      token.room && token.date === this.today()
+        ? await this.tokens.findOne({ date: token.date, status: 'called', counter: token.room, _id: { $ne: token._id } }).select('label').exec()
+        : null;
+    return {
+      hospitalName: String(s.hospital?.name ?? ''),
+      label: token.label,
+      status,
+      ahead: await this.aheadOf(token),
+      doctorName: token.doctorName,
+      department: token.department,
+      room: token.room,
+      calledAt: token.calledAt && status === 'called' ? token.calledAt.toISOString() : undefined,
+      nowServing: serving?.label,
+      ended: token.date !== this.today(),
+    };
+  }
+
+  /** The token; a malformed or unknown id is just "not found", while a database error still surfaces. */
+  async tokenById(id: string): Promise<QueueTokenDocument | null> {
+    if (!isValidObjectId(id)) return null;
+    return this.tokens.findById(id).exec();
+  }
+
+  /** The token the patient holds today (waiting, called or skipped), if any. */
+  activeTokenFor(uhid: string): Promise<QueueTokenDocument | null> {
+    return this.tokens.findOne({ activeKey: activeKey(this.today(), uhid) }).exec();
+  }
+
+  /** Waiting tokens per series (doctor id; '' for the hospital-wide line) on a day. */
+  async waitingCountsBySeries(date = this.today()): Promise<Map<string, number>> {
+    const rows = await this.tokens
+      .aggregate<{ _id: string; count: number }>([
+        { $match: { date, status: 'waiting' } },
+        { $group: { _id: { $ifNull: ['$series', ''] }, count: { $sum: 1 } } },
+      ])
+      .exec();
+    return new Map(rows.map((r) => [r._id, r.count]));
   }
 
   // ---------------------------------------------------------------- issuing
@@ -182,25 +307,55 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   async issue(req: IssueRequest, actor: string, source: 'front-desk' | 'kiosk' = 'front-desk') {
     if (!req.uhid && !req.appointmentId) throw new BadRequestException('Give the patient UHID or the appointment to check in');
     const date = this.today();
-    const appointment = await this.appointmentFor(req, date);
-    const uhid = req.uhid?.trim() || appointment!.uhid;
+    const asked = req.doctorId ? await this.doctorFor(req.doctorId, req.allowInactiveDoctor === true) : null;
+    const defaultDoctor = await this.opd.defaultDoctor();
+    // An appointment belongs to its own doctor (Scheduling books one per doctor); one without a doctor to the default doctor.
+    const ownerOf = (a: AppointmentDocument) => a.doctorId || (defaultDoctor ? String(defaultDoctor._id) : '');
+    const found = await this.appointmentFor(req, date, asked ? (a) => ownerOf(a) === String(asked._id) : undefined);
+    const uhid = req.uhid?.trim() || found!.uhid;
+    const checking = req.skipAppointment !== true ? found : null;
+    // The appointment's own doctor: null when it names none; `seeing` only while that doctor sees patients.
+    const own = found?.doctorId ? await this.knownDoctor(found.doctorId) : null;
+    const seeing = own?.active ? own : null;
+    // R32: an appointment whose doctor no longer sees patients (inactive, or gone) is never checked in silently on
+    // another line: without a doctor chosen it is refused (below); with an active one chosen it moves to that doctor.
+    const ownAway = !!found?.doctorId && !seeing;
+    const moveTo = checking && ownAway && asked?.active ? asked : null;
+    // The line: the doctor asked for, else the appointment's own doctor while they see patients, else the default doctor.
+    const doctor = asked ?? seeing ?? defaultDoctor;
+    // Only the appointment's own doctor's line checks it in (any line does when the hospital has no doctors), or the line of
+    // the doctor it moves to.
+    const appointment = checking && (moveTo || !doctor || ownerOf(checking) === String(doctor._id)) ? checking : null;
 
     const patient = await this.patients.findOne({ uhid }).exec();
-    if (!patient && !appointment) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
+    if (!patient && !found) throw new NotFoundException(`${uhid} is not a registered patient. Register them first.`);
 
     const held = await this.tokens.findOne({ activeKey: activeKey(date, uhid) }).exec();
     if (held) return { token: await this.reclaim(held), existing: true };
 
+    if (checking && ownAway && !asked) throw doctorInactive(own?.name || checking.doctorName);
+    // Before the token, so a failed move leaves nothing half done; the check-in below then prices the new doctor's fee.
+    if (moveTo) await this.moveAppointment(checking!, moveTo);
+
     const settings = await this.queueSettings();
-    const number = await this.nextNumber(date);
+    const series = doctor ? String(doctor._id) : '';
+    const number = await this.nextNumber(date, series);
     let token: QueueTokenDocument;
     try {
       token = await this.tokens.create({
         date,
         number,
-        label: `${settings.tokenPrefix}${number}`,
+        series,
+        label: doctor ? formatTokenLabel(doctor.tokenPrefix, number) : `${settings.tokenPrefix}${number}`,
+        ...(doctor && {
+          doctorId: series,
+          doctorName: doctor.name,
+          department: await this.departmentName(doctor.departmentCode),
+          room: doctor.room,
+        }),
+        trackCode: newSecret(16),
         uhid,
-        patientName: patient?.name ?? appointment!.patientName,
+        patientName: patient?.name ?? found!.patientName,
         appointmentId: appointment ? String(appointment._id) : undefined,
         appointmentTime: appointment?.time ?? '',
         priority: req.priority === true,
@@ -224,8 +379,8 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return { token, existing: false };
   }
 
-  /** The appointment being checked in: the one named, or the patient's next one today. */
-  private async appointmentFor(req: IssueRequest, date: string): Promise<AppointmentDocument | null> {
+  /** The appointment being checked in: the one named, or the patient's next one today (the first that `prefer` accepts, if any). */
+  private async appointmentFor(req: IssueRequest, date: string, prefer?: (a: AppointmentDocument) => boolean): Promise<AppointmentDocument | null> {
     if (req.appointmentId) {
       const appointment = await this.appointments.findById(req.appointmentId).exec();
       if (!appointment) throw new NotFoundException('Appointment not found');
@@ -234,12 +389,63 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       if (!SEEING.includes(appointment.status)) throw new ConflictException(`That appointment is ${appointment.status}`);
       return appointment;
     }
-    const today = await this.appointments.find({ uhid: req.uhid!.trim(), date, status: { $in: CHECKABLE } }).exec();
-    return today.sort((a, b) => clockMinutes(a.time) - clockMinutes(b.time))[0] ?? null;
+    const today = (await this.appointments.find({ uhid: req.uhid!.trim(), date, status: { $in: CHECKABLE } }).exec()).sort(
+      (a, b) => clockMinutes(a.time) - clockMinutes(b.time),
+    );
+    return (prefer && today.find(prefer)) || today[0] || null;
   }
 
-  private async nextNumber(date: string): Promise<number> {
-    const seq = await this.sequences.findOneAndUpdate({ date }, { $inc: { last: 1 } }, { upsert: true, new: true }).exec();
+  /** The asked-for doctor, who must be active unless `allowInactive`. */
+  private async doctorFor(doctorId: string, allowInactive = false) {
+    const doctor = await this.opd.getDoctor(doctorId);
+    if (!doctor.active && !allowInactive) throw new ConflictException(`${doctor.name} is not seeing patients`);
+    return doctor;
+  }
+
+  /** An appointment's doctor, active or not; null for one that is gone. A failing look-up is not hidden. */
+  private knownDoctor(doctorId: string): Promise<OpDoctorDocument | null> {
+    return this.opd.getDoctor(doctorId).catch((err: unknown) => {
+      if (err instanceof NotFoundException) return null;
+      throw err;
+    });
+  }
+
+  /**
+   * R32: the appointment of a doctor who no longer sees patients moves to the doctor chosen at check-in, as Scheduling moves
+   * one: it takes that doctor's slot at the same time, and the old slot is announced as freed for the waitlist. A time the
+   * chosen doctor already holds leaves it without a slot, as Scheduling's backfill leaves a clash: the patient is here, so the
+   * check-in goes ahead.
+   */
+  private async moveAppointment(appointment: AppointmentDocument, doctor: OpDoctorDocument) {
+    const from = { doctorId: appointment.doctorId!, date: appointment.date, time: appointment.time };
+    const fields = { doctorId: String(doctor._id), doctorName: doctor.name, departmentCode: doctor.departmentCode };
+    const minutes = clockMinutes(appointment.time);
+    const key = minutes === Number.MAX_SAFE_INTEGER ? null : slotKeyOf(fields.doctorId, appointment.date, clockLabel(minutes));
+    // Guarded on the doctor it had, so a change made meanwhile is not overwritten.
+    const where = { _id: appointment._id, doctorId: from.doctorId };
+    let moved: AppointmentDocument | null = null;
+    let withoutSlot = !key;
+    if (key) {
+      await releaseStaleSlot(this.appointments, key);
+      try {
+        moved = await this.appointments.findOneAndUpdate(where, { $set: { ...fields, slotKey: key } }, { new: true }).exec();
+      } catch (err) {
+        if (!isDuplicateKey(err)) throw err;
+        withoutSlot = true;
+      }
+    }
+    if (withoutSlot) moved = await this.appointments.findOneAndUpdate(where, { $set: fields, $unset: { slotKey: 1 } }, { new: true }).exec();
+    if (moved) this.appointmentEvents.slotFreed({ id: String(appointment._id), ...from });
+  }
+
+  private async departmentName(code: string) {
+    return (await this.opd.listDepartments()).find((d) => d.code === code)?.name ?? code;
+  }
+
+  private async nextNumber(date: string, series: string): Promise<number> {
+    const seq = await this.sequences
+      .findOneAndUpdate({ date, series }, { $inc: { last: 1 } }, { upsert: true, new: true })
+      .exec();
     return seq!.last;
   }
 
@@ -279,14 +485,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
     const filter: FilterQuery<QueueTokenDocument> = tokenId
       ? { _id: tokenId, date, status: { $in: ['waiting', 'skipped'] } }
-      : { date, status: 'waiting' };
+      : { date, status: 'waiting', $or: [{ room: counter }, { room: { $exists: false } }, { room: '' }] };
     let called: QueueTokenDocument | null;
     try {
       called = await this.tokens
         .findOneAndUpdate(
           filter,
           { $set: { status: 'called', counter, calledAt: now, calledBy: actor, recalls: 0 }, $min: { firstCalledAt: now } },
-          { sort: { priority: -1, number: 1 }, new: true },
+          { sort: { priority: -1, createdAt: 1 }, new: true },
         )
         .exec();
     } catch (err) {
@@ -347,7 +553,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     const done = await this.tokens
       .findOneAndUpdate({ _id: token._id, status: 'called' }, { $set: { status: 'completed', completedAt: at }, $unset: { activeKey: 1 } }, { new: true })
       .exec();
-    if (done) await this.syncAppointment(done, 'Completed', SEEING);
+    if (done) {
+      await this.syncAppointment(done, 'Completed', SEEING);
+      // R30: a kiosk visit's bill settles once its token is done.
+      this.events.tokenCompleted(String(done._id));
+    }
     return done;
   }
 

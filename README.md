@@ -97,7 +97,8 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `BCRYPT_ROUNDS` | `12` | Password hashing cost |
 | `TRUST_PROXY` | `false` | Set behind a reverse proxy so rate limits see client IPs |
 | `SWAGGER_ENABLED` | off in production | Serve `/api/docs` |
-| `PORT`, `MONGODB_URI`, `TZ` | `4000`, local Mongo, — | `TZ` decides what "today" means for record dates and the dashboard |
+| `MONGODB_URI` | required | The database's `mongodb://` or `mongodb+srv://` address; the API refuses to start without it (it never falls back to a local database) |
+| `PORT`, `TZ` | `4000`, — | `TZ` decides what "today" means for record dates and the dashboard |
 | `CLINIC_DATE` | unset | Development only: pins "today" to the seeded demo day (`2026-09-26`), like the web app's `VITE_CLINIC_DATE` |
 | `CALL_PROVIDER` | `simulated` (dev), `none` (production) | AI call agent voice provider: `snapserve`, `simulated` (dev only, no phone rings) or `none` |
 | `SNAPSERVE_API_KEY`, `SNAPSERVE_CONFIRMATION_AGENT_ID`, `SNAPSERVE_BOOKING_AGENT_ID` | — | Required with `CALL_PROVIDER=snapserve` |
@@ -107,6 +108,9 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `CALL_TOOLS_SECRET` | — | 24+ characters; turns on the inbound agent's mid-call tools (only while `CALL_PROVIDER` is `snapserve`, or `simulated` in development), which must send it as `X-Webhook-Secret` |
 | `SNAPSERVE_SIGNING_SECRET` | — | Optional: when set, post-call webhooks must also carry a valid `X-SnapServe-Signature` |
 | `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
+| `PAYMENT_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk payments: `sample` (simulated, marked SAMPLE) or `none` |
+| `SMS_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk OTP and tracking messages: `sample` or `none` |
+| `PUBLIC_WEB_URL` | unset | Base address of the web app, used for the public `/track` links (http or https) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 
@@ -115,6 +119,8 @@ The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
 ```bash
 npm run seed
 ```
+
+The seed reads `MONGODB_URI` from `.env` (or the environment), prints the database it is wiping, and refuses to run when no URI is set.
 
 This replaces the demo collections with the fixtures in `src/database/seed-data/` — the records the web app was designed around, a clinic day on **26 Sep 2026**:
 - Logins, all with password **`Admin@123`**: **`doctor@medios.ai`** (doctor), **`admin@medios.ai`** (admin, can create accounts), **`nurse@`**, **`frontdesk@`** (staff), **`pharmacy@`** (pharmacist) and **`lab@medios.ai`** (lab). Change these before any real use.
@@ -280,7 +286,7 @@ MONGODB_URI=... npm run import-beds -- path/to/beds.csv
 - Every imported bed starts free. The script prints every problem it finds (`Row N: ...`, N counting data rows without the header) and changes nothing if there are any.
 - It refuses to run while any bed is occupied or held (`Beds are in use (N occupied or held)...`), and also while any admission, bed suggestion or Bed Agent request exists (`Admission history exists. Importing replaces all beds and would delete 4 admissions, 2 bed suggestions, 10 bed requests and 168 hourly snapshots...`); it changes nothing in either case. `--force` replaces the wards and beds anyway.
 - Every import that goes ahead also deletes all admissions, bed suggestions, Bed Agent requests and hourly bed snapshots, because they point at or describe the old beds, and marks the requests' open alerts in Tasks & Alerts as Completed. Hourly snapshots alone never stop an import: the API takes one at every start.
-- It prints the database host (never the full address). Like `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line.
+- It prints the database host (never the full address). Unlike `npm run seed`, it does not read `.env`: set `MONGODB_URI` on the command line (it refuses to run without one).
 
 ---
 
@@ -384,7 +390,7 @@ The Revenue agent keeps each patient's running bill and money trail: charges col
 - **Final bill:** Prepare builds it (with warnings for anything still open), Settle needs a zero balance and sends `revenue.bill-settled`, which passes the Coordinator close check **Bill settled**. A write-off or refund that leaves the balance at 0 settles it too.
 - **Corrections with a trace:** change, reversal, discount and write-off are never deletes. A desk request waits for an admin (an Approval); an admin's own request applies at once. Nothing is silently changed.
 - **With the Coordinator:** Revenue registers as an agent. Messages are `revenue.estimate-ready|deposit-due|topup-due|topup-met|payment|final-requested|bill-final|bill-settled|refund-due|refund-paid|refund-void` (never a name or free text). Clocks: `revenue-final` (60 minutes), `revenue-topup` (240) and `revenue-refund` (2880), on the `revenue` ladder up to Billing in charge. Two rules: **Never hold care for money** (locked on) and **Remind the billing desk to collect deposits**.
-- **Reconcile and scheduler:** a pass every minute adds bed days, redrafts estimates, re-sends missed messages and tasks, and catches up missed charges. It never looks before the agent's first start time. An hourly snapshot feeds the trend cards. The AI only writes a day summary and a bill explanation from counts and line names, de-identified.
+- **Reconcile and scheduler:** a pass every minute adds bed days, redrafts estimates, re-sends missed messages and tasks, catches up missed charges, and settles reception kiosk bills whose visits are over (or that are from an earlier clinic day). It never looks before the agent's first start time. An hourly snapshot feeds the trend cards. The AI only writes a day summary and a bill explanation from counts and line names, de-identified.
 - **Roles:** admin and front desk (the billing desk) read everything, take payments, add charges, ask for corrections and refunds, prepare and settle. Admin alone edits the price list and settings, approves and cancels payments. Doctor and nurse read only a patient's running total (`GET patients/:id/total`). Pharmacist and lab have no access (403).
 - **Routes** (all under `/api/revenue`): `overview`, `snapshots`, `summary`, `explain/:billId`; `bills` (list, `:id`, `:id/charges`, `:id/payments`, `:id/final/request|prepare`, `:id/settle`, `:id/corrections`, `:id/refund`); `approvals`; `estimates` (every estimate of a bill not yet settled), `estimates/:billId`, `PUT estimates/:id`; `payments` (`:id/cancel`, `:id/receipt`); `refunds/:id/pay`; `price-list`; `settings`; `patients/:id/total`. Exact roles are in `revenue.controller.ts`.
 - **Settings** (Settings → Revenue, admin): deposits by ward group, the estimate days and daily allowance by ward, the top-up threshold (50 to 100 percent), the three clock targets and the receipt header.
@@ -424,6 +430,34 @@ Check-in gives the patient a numbered token for the day. Staff call tokens to a 
 - `printSlips` per kiosk: the kiosk prints an 80 mm slip after each new token. The tap response carries the current value, so switching it applies from the next tap.
 - Taps at the front desk use `POST /api/queue/cards/tap` with a staff session. An unknown card answers 404, and the web app then offers to link it.
 - The seed links three demo cards: `04A1B2C3` (Rekha S), `0004567890` (David Raj) and `04C8D9E0F1A2B3` (Selvi A). Cards linked by hand survive a reseed.
+
+---
+
+## 🧾 Reception Kiosk
+
+A patient registers or books an OP visit on a tablet kiosk, pays, and gets a token. The modules are `src/modules/reception` (kiosk and staff routes, providers) and `src/modules/opd` (departments, OP doctors, availability).
+
+- **Departments and OP doctors** are managed in the web app under Settings > Departments. They are the same records the Scheduling Agent books appointments with.
+- **Availability** at the kiosk comes from the doctor's OP sessions, their queue and Scheduling's leave: a doctor on leave today is listed as "On leave today" and cannot be booked (`DOCTOR_NOT_BOOKABLE`). The kiosk's doctor list and visit booking use the same rule.
+- **Doctor-wise tokens.** Each OP doctor has their own line and numbers (`G-024`). A token joins the doctor asked for; without one, the doctor of the appointment being checked in, else the reception default doctor. An appointment is checked in only on its own doctor's line. When that doctor is inactive, checking the appointment in is refused (409 `DOCTOR_INACTIVE`, naming the doctor) unless a doctor is chosen; with an active doctor chosen, the appointment moves to that doctor (and their slot) and is checked in on their line.
+- **Kiosk devices** are added in Token Queue > Displays & Settings. Creating one shows a setup QR for the tablet app (it carries the address and the key once).
+- **Cash payments** are confirmed by staff on the Token Queue. The token is issued on confirmation.
+- **Billing is the Revenue Agent's.** A paid visit gets its OP number and token first, then goes on a Revenue bill once: when its token checked in the patient's appointment with that doctor, the consultation is that appointment's own check-in charge; otherwise the visit's own consultation line goes on the patient's OPD bill for the day, else a walk-in bill. The payment is a `kiosk` payment with an RC- receipt; it is received by the staff member who confirmed the cash at the counter (the drawer is reconciled per person), or by the kiosk device for UPI and card. The method and its reference are in its reference text (`Cash at counter`, `UPI · <ref> · SAMPLE`). A Revenue failure never holds back the token: the visit is listed as needing attention and is retried every minute and on each staff list call, the least recently tried first. After 7 days it is no longer retried, and its row says to add the payment by hand on the Revenue page. Visits paid before this hold an old `OPB-` invoice, which stays as history. The visit's bill settles by itself, as an appointment's OPD bill does, once the visit's token is marked done and nothing is due, needs a price or waits for an approval; Revenue's minute pass also settles such a bill from an earlier clinic day (the backstop).
+- **Tracking page.** A patient can follow a visit on the public `/track` page of the web app. Links use `PUBLIC_WEB_URL`.
+- **Sample providers.** With `PAYMENT_PROVIDER=sample` and `SMS_PROVIDER=sample`, payments are simulated and OTP codes are shown on the kiosk. In production this is allowed but logs a loud warning. Never use it with real patients.
+- **Collections:** `opvisits`, `opsequences`, `receptionsessions`, `otpchallenges`, plus the shared `departments` and `opdoctors`.
+
+**End-to-end check.** With a local API running (sample providers), run:
+
+```bash
+API=http://localhost:4500/api npm run e2e:reception
+```
+
+It exercises every kiosk path. Card with UPI, and Find my record with cash, each check in an appointment the script books with its doctor (the Revenue appointment path); a new patient pays by card (the walk-in path); every paid visit is checked on its Revenue bill (one consultation line, the kiosk payment and who received it, nothing due). It also puts the doctor on leave for a moment and checks the kiosk refuses them, and at the end calls the walk-in's token and marks it done, after which its walk-in bill must be settled.
+
+- **What it changes:** it creates an all-day "Dr. E2E Test" doctor, or reactivates the one an earlier run left, and deactivates it at the end; the kiosk and display it adds are removed at the end too. The patients it registers and the appointments it books stay.
+- **Local only:** it refuses an API that is not on localhost unless `E2E_ALLOW_REMOTE=true` is set.
+- **Reseed** (`npm run seed`) before running it again: the card patient keeps the token from the earlier run.
 
 ---
 
