@@ -1107,7 +1107,7 @@ describe('DischargeSummaryService', () => {
   test('the day summary is built from counts alone, with the rules sentence when the AI is off', async () => {
     const counts = { dueToday: 6, noOrder: 2, clearing: 3, ready: 1, leftToday: 2, avgMinutes: 95, targetMinutes: 120, longestWait: { line: 'bill' as const, minutes: 140 } };
     const rules =
-      '6 due today (2 with no order yet); 3 clearing; 1 ready to leave; 2 left today, 95 min on average from order to leaving (target 120 min); the longest wait is 140 min, on Nothing due on the bill.';
+      '6 due today (2 with no order yet); 3 clearing; 1 ready to leave; 2 left today, 95 min on average from order to leaving (target 120 min); the longest wait is 140 min, waiting on the bill.';
     assert.equal(templateDaySummary(counts), rules);
     assert.equal(templateDaySummary({ ...counts, noOrder: 0, leftToday: 0, avgMinutes: null, longestWait: null }), '6 due today; 3 clearing; 1 ready to leave; 0 left today.');
     const { p, calls } = stubProvider('claude', { text: 'A steady day: most discharges wait on the bill.' });

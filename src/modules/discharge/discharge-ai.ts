@@ -95,6 +95,20 @@ export function templateCourse(f: CourseFacts): string {
   return parts.join(' ');
 }
 
+/** What the day sentence says the longest wait is on: "the longest wait is 140 min, waiting on the bill". */
+const WAITING_ON: Record<LineKey, string> = {
+  order: 'the discharge order',
+  summary: 'the signed summary',
+  lab: 'lab results',
+  'take-home': 'take-home medicines',
+  'follow-up': 'the follow-up booking',
+  'ama-form': 'the against-advice form',
+  teaching: 'teaching and documents',
+  'death-certificate': 'the cause-of-death certificate',
+  'body-handover': 'the body handover',
+  bill: 'the bill',
+};
+
 /** The rules' sentence for the day, used when the AI is off, slow or refused, and as the canned sample. */
 export function templateDaySummary(c: DischargeDayCounts): string {
   const average = c.leftToday && c.avgMinutes !== null ? `, ${c.avgMinutes} min on average from order to leaving (target ${c.targetMinutes} min)` : '';
@@ -104,7 +118,7 @@ export function templateDaySummary(c: DischargeDayCounts): string {
     `${c.ready} ready to leave`,
     `${c.leftToday} left today${average}`,
   ];
-  if (c.longestWait) parts.push(`the longest wait is ${c.longestWait.minutes} min, on ${LINE_LABEL(c.longestWait.line, 'home')}`);
+  if (c.longestWait) parts.push(`the longest wait is ${c.longestWait.minutes} min, waiting on ${WAITING_ON[c.longestWait.line]}`);
   return `${parts.join('; ')}.`;
 }
 

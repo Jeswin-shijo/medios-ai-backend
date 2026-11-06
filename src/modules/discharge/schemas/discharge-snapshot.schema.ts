@@ -12,6 +12,8 @@ export class DischargeCounts {
   @Prop({ default: 0 }) leftToday: number;
   /** Today's average order-to-leaving minutes; null while nobody has left. */
   @Prop({ type: Number, default: null }) avgMinutes: number | null;
+  /** Beds freeing today: open orders leaving today (or late), plus the stays that ended today. */
+  @Prop({ default: 0 }) bedsFreeing: number;
 }
 export const DischargeCountsSchema = SchemaFactory.createForClass(DischargeCounts);
 
