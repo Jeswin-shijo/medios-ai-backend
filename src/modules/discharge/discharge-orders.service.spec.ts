@@ -158,9 +158,9 @@ describe('DischargeOrdersService', () => {
     (lines as any).logger = logger;
     lines.clock = () => NOW;
     // The summary has its own spec; these tests write the summary records they need themselves.
-    const noDraft = { draft: async () => null } as unknown as DischargeSummaryService;
+    const noSummary = { draft: async () => null, archiveForCancel: async () => false } as unknown as DischargeSummaryService;
     orders = new DischargeOrdersService(
-      reg, plans, settings, w.cases, beds, w.takeHome, followUps, lines, noDraft, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
+      reg, plans, settings, w.cases, beds, w.takeHome, followUps, lines, noSummary, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
     );
     (orders as any).logger = logger;
     orders.clock = () => NOW;

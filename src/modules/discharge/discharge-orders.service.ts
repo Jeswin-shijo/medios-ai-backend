@@ -175,6 +175,9 @@ export class DischargeOrdersService {
   /** The clinic clock (R7); a spec replaces it. */
   clock: () => Date = () => clinicNow();
 
+  /** Summary drafts still running in the background (R36). */
+  private readonly drafting = new Set<Promise<void>>();
+
   constructor(
     private readonly registration: DischargeRegistration,
     private readonly plansService: DischargePlansService,
@@ -199,8 +202,8 @@ export class DischargeOrdersService {
    * order is 409, before anything is placed. Then the take-home order is placed, the follow-up booked, and the order
    * saved. A failure after the take-home order was placed cancels it ("Discharge order not saved"); a follow-up already
    * booked stays. Then the plan is ordered and its reminder closed, `discharge.ordered` goes, the bed board re-reads,
-   * the window opens at once when it is due, the checklist is read, and the summary is drafted (a failed draft is
-   * logged and never undoes the order).
+   * the window opens at once when it is due, and the checklist is read. The summary is drafted in the background
+   * (R36): the order never waits for the AI, and a failed draft is logged and never undoes the order.
    */
   async order(actor: Actor, planId: string, input: OrderInput): Promise<DischargeOrderDocument> {
     this.mayOrder(actor);
@@ -256,7 +259,8 @@ export class DischargeOrdersService {
     this.touchBeds();
     if (saved.windowAt.getTime() <= now.getTime()) await this.openWindow(saved._id, now);
     const refreshed = await this.refreshLines(saved._id);
-    await this.draftSummary(saved._id);
+    // R36: the draft waits for the AI, so the order never waits for the draft.
+    this.draftSummary(saved._id);
     return refreshed;
   }
 
@@ -348,8 +352,9 @@ export class DischargeOrdersService {
 
   /**
    * A doctor or an admin cancels the order with a reason (1 to 300 characters): the plan is planned again and the bed
-   * no longer leaving soon. `discharge.cancelled` stops the clocks, and Pharmacy cancels the take-home lines not yet
-   * issued (A12). A booked follow-up stays. The reason stays on the order, never in a message.
+   * no longer leaving soon. A signed summary is archived with its document (R35). `discharge.cancelled` stops the
+   * clocks, and Pharmacy cancels the take-home lines not yet issued (A12). A booked follow-up stays. The reason stays
+   * on the order, never in a message.
    */
   async cancel(actor: Actor, orderId: string, reason: string): Promise<DischargeOrderDocument> {
     this.mayOrder(actor);
@@ -366,6 +371,8 @@ export class DischargeOrdersService {
     if (!cancelled) throw new ConflictException(stateRefusal((await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state));
     // Only while it still points at this order: a new order given meanwhile keeps the plan.
     await this.plans.updateOne({ _id: order.plan, order: order._id }, { $set: { state: 'planned' }, $unset: { order: 1 } }).exec();
+    // R35: a summary signed for this discharge is no longer the patient's discharge summary.
+    await this.archiveSummary(order._id);
     const bedLabel = await this.bedLabelOf(order.plan);
     if (bedLabel) {
       await this.announce(cancelled, 'discharge.cancelled', bedLabel, 'Discharge cancelled', { orderId: String(order._id), admissionId: String(order.admission), bedLabel });
@@ -429,6 +436,11 @@ export class DischargeOrdersService {
     const plan = await this.planOf(input.planId);
     const caseId = await this.caseOf(plan);
     return this.takeHome.check({ patientId: String(plan.patient), caseId: caseId ?? '', lines: input.lines });
+  }
+
+  /** Resolves once every summary draft started in the background has finished (R36). Specs and the seed wait on it. */
+  async idle(): Promise<void> {
+    while (this.drafting.size) await Promise.all([...this.drafting]);
   }
 
   // ---------- the window ----------
@@ -664,14 +676,27 @@ export class DischargeOrdersService {
   }
 
   /**
-   * The summary drafted from the record (design 4.4) once the order is saved. A failure is logged and never undoes
-   * the order: drafting is safe to repeat, and the summary view drafts one when there is none.
+   * R36: the summary is drafted from the record (design 4.4) in the background once the order is saved, because the
+   * draft waits for the AI (up to its timeout). A failure is logged and never undoes the order: drafting is safe to
+   * repeat, and the summary view drafts one when there is none. `idle()` waits for it.
    */
-  private async draftSummary(orderId: Types.ObjectId): Promise<void> {
+  private draftSummary(orderId: Types.ObjectId): void {
+    const run: Promise<void> = Promise.resolve()
+      .then(() => this.summary.draft(String(orderId)))
+      .then(
+        () => undefined,
+        (e: unknown) => this.logger.warn(`Discharge order ${String(orderId)}: summary not drafted (${e instanceof Error ? e.message : String(e)})`),
+      )
+      .finally(() => this.drafting.delete(run));
+    this.drafting.add(run);
+  }
+
+  /** R35: a cancelled order's signed summary is archived with its document. A failure is logged and never undoes the cancel. */
+  private async archiveSummary(orderId: Types.ObjectId): Promise<void> {
     try {
-      await this.summary.draft(String(orderId));
+      await this.summary.archiveForCancel(String(orderId));
     } catch (e) {
-      this.logger.warn(`Discharge order ${String(orderId)}: summary not drafted (${(e as Error).message})`);
+      this.logger.warn(`Discharge order ${String(orderId)}: summary not archived after the cancel (${(e as Error).message})`);
     }
   }
 

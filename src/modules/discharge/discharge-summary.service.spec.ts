@@ -131,6 +131,12 @@ describe('DischargeSummaryService', () => {
     (s as any).logger = logger;
     return s;
   };
+  /** Orders a discharge as Dr. Shajin, then waits for its summary, which is drafted in the background (R36). */
+  const place = async (onPlan: string, input: OrderInput) => {
+    const o = await orders.order(DOC, onPlan, input);
+    await orders.idle();
+    return o;
+  };
   const stored = (id: unknown) => m.DischargeOrder.findById(id).lean<any>();
   const summaryOf = (orderId: unknown) => m.DischargeSummary.findOne({ order: orderId }).lean<any>();
   const lineOf = async (id: unknown, key: string) => (await stored(id)).lines.find((l: any) => l.key === key);
@@ -295,7 +301,7 @@ describe('DischargeSummaryService', () => {
 
   test('the draft fills every section for Home from the record', async () => {
     await theStay();
-    const o = await orders.order(DOC, planId, home());
+    const o = await place(planId, home());
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its summary');
     const followUp = await m.FollowUpItem.findById((await stored(o._id)).followUp.followUpId).lean<any>();
@@ -319,7 +325,7 @@ describe('DischargeSummaryService', () => {
 
     // A follow-up that found no slot is on the waitlist.
     const mary = await another('MHK202600902', 'Mary Jeni');
-    const waiting = await orders.order(DOC, mary.planId, homeNone({ followUp: { inDays: 7, doctorId: String(meena._id) } }));
+    const waiting = await place(mary.planId, homeNone({ followUp: { inDays: 7, doctorId: String(meena._id) } }));
     assert.equal((await stored(waiting._id)).followUp.status, 'waitlisted');
     assert.equal((await summaryOf(waiting._id)).sections.followUp, 'On the waitlist: the desk will call with a time');
 
@@ -335,7 +341,7 @@ describe('DischargeSummaryService', () => {
 
   test('the transfer letter has receiving hospital and no follow-up', async () => {
     const { pending } = await theStay();
-    const o = await orders.order(DOC, planId, transfer());
+    const o = await place(planId, transfer());
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its letter');
     assert.equal(s.kind, 'transfer');
@@ -355,7 +361,7 @@ describe('DischargeSummaryService', () => {
 
   test('the death summary has no medicines', async () => {
     await theStay();
-    const o = await orders.order(DOC, planId, died());
+    const o = await place(planId, died());
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its death summary');
     assert.equal(s.kind, 'died');
@@ -369,7 +375,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('the against-advice note says the risks were explained, and an optional follow-up not chosen is none booked', async () => {
-    const o = await orders.order(DOC, planId, { kind: 'against-advice', plannedLeaveAt: new Date(NOW.getTime() + 30 * MIN), diagnosis: DIAGNOSIS, condition: 'unchanged' });
+    const o = await place(planId, { kind: 'against-advice', plannedLeaveAt: new Date(NOW.getTime() + 30 * MIN), diagnosis: DIAGNOSIS, condition: 'unchanged' });
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its note');
     assert.equal(s.kind, 'against-advice');
@@ -384,7 +390,7 @@ describe('DischargeSummaryService', () => {
   test('the AI input has no name, UHID, id, diagnosis or note', async () => {
     await theStay();
     const calls = useAi('claude');
-    const o = await orders.order(DOC, planId, home());
+    const o = await place(planId, home());
     assert.equal(calls.length, 1, 'one AI call, for the course paragraph');
     assert.deepEqual(calls[0].input, STAY_FACTS);
     const blob = JSON.stringify(calls[0]);
@@ -404,7 +410,7 @@ describe('DischargeSummaryService', () => {
 
   test('in sample mode the course is SAMPLE with source ai-sample', async () => {
     const calls = useAi('sample');
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const s = await summaryOf(o._id);
     assert.ok(s, 'the order drafts its summary');
     assert.deepEqual(s.course, { text: `${BARE_COURSE}\n\n${NOTE}`, source: 'ai-sample' }, 'canned: the rules paragraph, marked as a sample');
@@ -420,7 +426,7 @@ describe('DischargeSummaryService', () => {
   test('a leak in the AI answer falls back to the template', async () => {
     await theStay();
     useAi('claude', { text: `${NAME} (${UHID}) recovered well.` });
-    const o = await orders.order(DOC, planId, home());
+    const o = await place(planId, home());
     const id = String(o._id);
     assert.deepEqual((await summaryOf(id))?.course, { text: `${STAY_COURSE}\n\n${NOTE}`, source: 'rules' });
     // A gate-pass number is a leak too (GP- joins Revenue's list).
@@ -452,7 +458,7 @@ describe('DischargeSummaryService', () => {
 
   test('R34: the follow-up section lists the results to review at follow-up', async () => {
     const { pending } = await theStay();
-    const o = await orders.order(DOC, planId, home());
+    const o = await place(planId, home());
     const id = String(o._id);
     const followUp = await m.FollowUpItem.findById((await stored(id)).followUp.followUpId).lean<any>();
     const booked = `${followUp.followUpDate} at ${followUp.followUpTime} with Dr. Shajin`;
@@ -471,7 +477,7 @@ describe('DischargeSummaryService', () => {
 
   test('drafting again follows the record, but never overwrites staff edits or a signed summary, and calls the AI once', async () => {
     const calls = useAi('claude');
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     // The doctor writes the results by hand; then a result is released and the diagnosis on the order changes.
     await summary.save(DOC, id, { results: 'Chest X-ray clear.' });
@@ -497,7 +503,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('the order drafts its summary, and a failing draft never undoes the order', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     assert.ok(await summaryOf(o._id), 'drafted once the order is saved');
 
     const mary = await another('MHK202600902', 'Mary Jeni');
@@ -505,7 +511,7 @@ describe('DischargeSummaryService', () => {
     summary.draft = async () => {
       throw new Error('database away');
     };
-    const second = await orders.order(DOC, mary.planId, homeNone());
+    const second = await place(mary.planId, homeNone());
     const row2 = await stored(second._id);
     assert.ok(row2, 'the order is saved');
     assert.equal(row2.state, 'ordered');
@@ -520,7 +526,7 @@ describe('DischargeSummaryService', () => {
   // ---------- staff edits, signing and re-signing ----------
 
   test('save after sign is 409', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     await assert.rejects(summary.save(DOC, id, { nonsense: 'x' }), BadRequestException);
     await assert.rejects(summary.save(DOC, id, { course: 'x' }), BadRequestException, 'the course is its own field');
@@ -545,7 +551,7 @@ describe('DischargeSummaryService', () => {
 
   test('sign makes one Signed document dated on the clinic day and a Timeline line, and sends summary-signed (stopping the summary clock)', async () => {
     process.env.CLINIC_DATE = '2026-09-26';
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     assert.deepEqual((await clocksOf(id)).map((c) => [c.def, c.state]), [['discharge-leave', 'running'], ['discharge-summary', 'running']]);
 
@@ -594,7 +600,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('a summary changed or signed while it is being signed is not signed again, and the extra document is archived', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     // Something lands after the document is made and before the lock.
     const documents = (summary as any).documents as DocumentsService;
@@ -629,7 +635,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('edit and re-sign archives the first document and keeps the version', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     await assert.rejects(summary.unlock(DOC, id), ConflictException, 'nothing signed to unlock');
     await summary.sign(DOC, id);
@@ -672,7 +678,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('a nurse cannot sign', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     for (const who of [NURSE, DESK, PHARM, LAB]) {
       await assert.rejects(summary.sign(who, id), ForbiddenException, who.name);
@@ -690,7 +696,7 @@ describe('DischargeSummaryService', () => {
   });
 
   test('a cancelled order has no summary work: no sign, no draft', async () => {
-    const o = await orders.order(DOC, planId, homeNone());
+    const o = await place(planId, homeNone());
     const id = String(o._id);
     await orders.cancel(DOC, id, 'Spiked a fever');
     await assert.rejects(summary.sign(DOC, id), ConflictException);
@@ -704,20 +710,162 @@ describe('DischargeSummaryService', () => {
     assert.equal(await m.ClinicalDocument.countDocuments(), 0);
   });
 
+  // ---------- R35: a cancelled order's signed summary is archived ----------
+
+  test('R35: cancel after sign archives the Document; the summary is kept for history, never current again', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    await summary.sign(DOC, id);
+    const signed = await summaryOf(id);
+    assert.equal((await m.ClinicalDocument.findById(signed.documentId).lean<any>()).status, 'Signed');
+
+    summary.clock = () => at(26, 11, 45);
+    await orders.cancel(DOC, id, 'Spiked a fever');
+    assert.equal((await m.ClinicalDocument.findById(signed.documentId).lean<any>()).status, 'Archived', 'archived, not deleted');
+    assert.equal(await m.ClinicalDocument.countDocuments(), 1);
+    const s = await summaryOf(id);
+    assert.deepEqual(
+      [s.signedAt?.getTime(), s.signedBy, s.documentId, s.sections, s.archivedAt?.getTime()],
+      [signed.signedAt.getTime(), signed.signedBy, signed.documentId, signed.sections, at(26, 11, 45).getTime()],
+      'kept for history, marked archived',
+    );
+    // Never current again: nothing to sign, a draft leaves it alone, and nobody can change it.
+    assert.deepEqual(await summary.toSign(), []);
+    await summary.draft(id);
+    assert.deepEqual(await summaryOf(id), s);
+    await assert.rejects(summary.unlock(DOC, id), ConflictException);
+    await assert.rejects(summary.sign(DOC, id), ConflictException);
+    assert.equal(await summary.archiveForCancel(id), false, 'once is enough');
+    assert.deepEqual(logged, []);
+  });
+
+  test('R35: cancel with an unsigned summary changes no Document, and toSign no longer lists it', async () => {
+    // An earlier stay's signed discharge summary is not this order's.
+    const earlier = await m.ClinicalDocument.create({
+      uhid: UHID, title: 'Discharge summary', category: 'Discharge Summary', status: 'Signed', date: '10 Jan 2026', signedBy: 'Dr. Ravi', signedOn: '10 Jan 2026, 10:00 AM',
+    });
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    // Signed once and unlocked: its first document is archived already, and it waits to be signed again.
+    await summary.sign(DOC, id);
+    await summary.unlock(DOC, id);
+    assert.deepEqual((await summary.toSign()).map((r) => r.orderId), [id]);
+    const before = await summaryOf(id);
+    const documents = await m.ClinicalDocument.find().sort({ _id: 1 }).lean<any[]>();
+    assert.deepEqual(documents.map((d) => d.status), ['Signed', 'Archived']);
+
+    await orders.cancel(DOC, id, 'Spiked a fever');
+    assert.deepEqual(await m.ClinicalDocument.find().sort({ _id: 1 }).lean<any[]>(), documents, 'no document changed');
+    assert.equal((await m.ClinicalDocument.findById(earlier._id).lean<any>()).status, 'Signed');
+    assert.deepEqual(await summaryOf(id), before, 'the summary stays as it is');
+    assert.deepEqual(await summary.toSign(), [], 'a cancelled order has nothing to sign');
+    assert.deepEqual(logged, []);
+  });
+
+  test('R35: an order cancelled while its summary is being signed archives the new Document, and the sign is 409', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    // The cancel lands after the sign made its document and before it took the lock.
+    const documents = (summary as any).documents as DocumentsService;
+    const create = documents.create.bind(documents);
+    documents.create = async (data) => {
+      const made = await create(data);
+      documents.create = create;
+      await orders.cancel(ADMIN, id, 'The plan changed');
+      return made;
+    };
+    await assert.rejects(summary.sign(DOC, id), (e: unknown) => e instanceof ConflictException && /cancelled/.test((e as Error).message));
+    const s = await summaryOf(id);
+    assert.ok(s.signedAt && s.archivedAt, 'signed as the cancel landed, then archived');
+    assert.deepEqual((await m.ClinicalDocument.find().lean<any[]>()).map((d) => d.status), ['Archived']);
+    assert.equal((await w.sent('discharge.summary-signed')).length, 0, 'nothing to announce for a cancelled order');
+    assert.equal(await m.TimelineEvent.countDocuments({ uhid: UHID, title: 'Discharge summary signed' }), 0);
+  });
+
+  test('R35: a failure archiving never undoes the cancel, and a later run finishes it', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    await summary.sign(DOC, id);
+    const documents = (summary as any).documents as DocumentsService;
+    const archive = documents.archive.bind(documents);
+    documents.archive = async () => {
+      throw new Error('documents away');
+    };
+    assert.equal((await orders.cancel(DOC, id, 'Spiked a fever')).state, 'cancelled');
+    assert.ok(logged.some((x) => /not archived after the cancel/.test(x) && /documents away/.test(x)), logged.join(' | '));
+    let s = await summaryOf(id);
+    assert.equal(s.archivedAt, undefined, 'left unmarked for a later run');
+    documents.archive = archive;
+    assert.equal(await summary.archiveForCancel(id), true);
+    s = await summaryOf(id);
+    assert.ok(s.archivedAt);
+    assert.equal((await m.ClinicalDocument.findById(s.documentId).lean<any>()).status, 'Archived');
+
+    // Even a summary service that throws never undoes a cancel.
+    const mary = await another('MHK202600902', 'Mary Jeni');
+    const second = await place(mary.planId, homeNone());
+    summary.archiveForCancel = async () => {
+      throw new Error('summary away');
+    };
+    assert.equal((await orders.cancel(DOC, String(second._id), 'Spiked a fever')).state, 'cancelled');
+    assert.ok(logged.some((x) => /summary not archived after the cancel/.test(x) && /summary away/.test(x)), logged.join(' | '));
+  });
+
+  // ---------- R36: the order never waits for the AI ----------
+
+  test('R36: ordering never waits for the AI: a slow answer fills the summary later, and a hanging one never holds the order', { timeout: 20_000 }, async () => {
+    // Slow: the order returns at once, and the summary appears once the AI answers.
+    let answer!: (v: { text: string; sample: boolean; source: 'ai' | 'rules' }) => void;
+    let askedSlow!: () => void;
+    const slowAsked = new Promise<void>((resolve) => (askedSlow = resolve));
+    (summary as any).ai = {
+      course: () => {
+        askedSlow();
+        return new Promise((resolve) => (answer = resolve));
+      },
+    };
+    const o = await orders.order(DOC, planId, homeNone());
+    const row = await stored(o._id);
+    assert.deepEqual([row.state, !!row.windowOpenedAt, row.lines.length > 0], ['ordered', true, true], 'saved, window opened and lines read');
+    await slowAsked;
+    assert.equal(await summaryOf(o._id), null, 'the draft is waiting for the AI');
+    answer({ text: AI_TEXT, sample: false, source: 'ai' });
+    await orders.idle();
+    assert.deepEqual((await summaryOf(o._id))?.course, { text: `${AI_TEXT}\n\n${NOTE}`, source: 'ai' });
+
+    // Hanging: the order still returns, and reading the summary drafts it (the summary view heals a lost draft).
+    const mary = await another('MHK202600902', 'Mary Jeni');
+    let askedHung!: () => void;
+    const hungAsked = new Promise<void>((resolve) => (askedHung = resolve));
+    (summary as any).ai = {
+      course: () => {
+        askedHung();
+        return new Promise(() => undefined);
+      },
+    };
+    const second = await orders.order(DOC, mary.planId, homeNone());
+    assert.equal((await stored(second._id)).state, 'ordered');
+    await hungAsked;
+    assert.equal(await summaryOf(second._id), null);
+    const healed = await buildSummary().draft(String(second._id));
+    assert.deepEqual([healed.course.source, healed.sections.details.split('\n')[0]], ['rules', 'Name: Mary Jeni']);
+    assert.deepEqual(logged, []);
+  });
+
   // ---------- the lists ----------
 
   test('toSign lists the unsigned summaries of open orders, oldest first', async () => {
     summary.clock = () => at(26, 9);
-    const a = await orders.order(DOC, planId, homeNone());
+    const a = await place(planId, homeNone());
     const mary = await another('MHK202600902', 'Mary Jeni');
     summary.clock = () => at(26, 8);
-    const b = await orders.order(DOC, mary.planId, transfer());
+    const b = await place(mary.planId, transfer());
     const john = await another('MHK202600903', 'John Paul');
     summary.clock = () => at(26, 10);
-    const c = await orders.order(DOC, john.planId, homeNone());
+    const c = await place(john.planId, homeNone());
     await summary.sign(DOC, String(c._id));
     const anu = await another('MHK202600904', 'Anu Mathew');
-    const d = await orders.order(DOC, anu.planId, homeNone());
+    const d = await place(anu.planId, homeNone());
     await orders.cancel(DOC, String(d._id), 'Not going home yet');
 
     let rows = await summary.toSign();

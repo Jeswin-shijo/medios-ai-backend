@@ -321,7 +321,8 @@ export class DischargeSummaryService {
    * ("Discharge Summary", the kind's title, dated on the clinic clock as "DD Mon YYYY"), then the lock, which is taken
    * only over the summary as it was read, so an edit that lands meanwhile makes it 409 instead of signing unseen text.
    * Then a Timeline line ("<Title> signed", Admission), `discharge.summary-signed` (stopping the summary clock) and the
-   * checklist read again. 409 when already signed; 404 before it is drafted; 403 for other roles.
+   * checklist read again. 409 when already signed; 404 before it is drafted; 403 for other roles. An order cancelled
+   * while it was signing archives what was just signed and answers 409 (R35).
    */
   async sign(actor: Actor, orderId: string): Promise<DischargeSummaryDocument> {
     this.mayEdit(actor);
@@ -361,6 +362,12 @@ export class DischargeSummaryService {
       await this.archive(documentId);
       const current = await this.summaries.findById(s._id).select('signedAt').lean<{ signedAt?: Date }>().exec();
       throw new ConflictException(current?.signedAt ? SIGNED_ONCE : CHANGED);
+    }
+    // R35: the order was cancelled while this was signing, after its cancel found nothing signed to archive.
+    const state = (await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
+    if (state === 'cancelled') {
+      await this.archiveForCancel(String(order._id));
+      throw new ConflictException(stateRefusal(state));
     }
 
     const signing = (locked.versions?.length ?? 0) + 1;
@@ -428,6 +435,28 @@ export class DischargeSummaryService {
     return this.reread(s._id);
   }
 
+  /**
+   * R35: after a cancel, a signed summary is no longer the patient's discharge summary. Its Documents record is
+   * archived (never deleted) and the summary is marked `archivedAt`, kept for history and never current again. An
+   * unsigned summary stays as it is (nobody signs a cancelled order's summary). Only for a cancelled order; safe to
+   * run again, and a document that could not be archived leaves the summary unmarked, for a later run. Never throws:
+   * a failure is logged and never undoes the cancel. True when it archived one.
+   */
+  async archiveForCancel(orderId: string): Promise<boolean> {
+    try {
+      const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).select('state').lean<{ _id: Id; state: OrderState }>().exec() : null;
+      if (order?.state !== 'cancelled') return false;
+      const s = await this.summaries.findOne({ order: order._id }).select('signedAt documentId archivedAt').lean<LeanSummary>().exec();
+      if (!s?.signedAt || s.archivedAt) return false;
+      if (s.documentId) await this.documents.archive(s.documentId);
+      const res = await this.summaries.updateOne({ _id: s._id, archivedAt: null }, { $set: { archivedAt: this.clock() } }).exec();
+      return res.modifiedCount > 0;
+    } catch (e) {
+      this.logger.warn(`Discharge order ${orderId}: the signed summary was not archived after the cancel (${(e as Error).message})`);
+      return false;
+    }
+  }
+
   /** "Summaries to sign": the unsigned summaries of orders still in progress, oldest draft first. */
   async toSign(): Promise<SummaryRow[]> {
     const open = await this.orders
@@ -439,7 +468,7 @@ export class DischargeSummaryService {
     const orderOf = new Map(open.map((o) => [String(o._id), o]));
     const [summaries, plans] = await Promise.all([
       this.summaries
-        .find({ order: { $in: open.map((o) => o._id) }, signedAt: null })
+        .find({ order: { $in: open.map((o) => o._id) }, signedAt: null, archivedAt: null })
         .sort({ draftedAt: 1, _id: 1 })
         .select('order kind course versions draftedAt createdAt')
         .lean<LeanSummary[]>()
@@ -479,7 +508,7 @@ export class DischargeSummaryService {
 
   /** The sections nobody edited follow the record, while the order is open and the summary has never been signed. */
   private async refreshDraft(s: LeanSummary, order: LeanOrder): Promise<void> {
-    if (s.signedAt || s.versions?.length || !OPEN_ORDER_STATES.includes(order.state)) return;
+    if (s.signedAt || s.archivedAt || s.versions?.length || !OPEN_ORDER_STATES.includes(order.state)) return;
     const fresh = this.sections(await this.record(order));
     const edited = new Set(s.edited ?? []);
     const set: Record<string, string> = {};

@@ -81,6 +81,13 @@ export class DischargeSummary {
   /** The Documents record of the current signed version. */
   @Prop()
   documentId?: string;
+
+  /**
+   * Clinic clock (R35): the order was cancelled after this summary was signed, so its document is archived and the
+   * summary is kept for history only, never current again. Its signature and document id stay as they were.
+   */
+  @Prop({ type: Date })
+  archivedAt?: Date;
 }
 
 export const DischargeSummarySchema = SchemaFactory.createForClass(DischargeSummary);
