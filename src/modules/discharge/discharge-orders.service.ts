@@ -15,6 +15,7 @@ import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService } from './discharge-lines.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
+import { DischargeSummaryService } from './discharge-summary.service';
 import { toRealTime, windowStart } from './discharge-time';
 import {
   DischargeFollowUp,
@@ -184,6 +185,8 @@ export class DischargeOrdersService {
     private readonly followUps: SchedulingFollowupsService,
     /** The checklist, read from the agents' records (it never depends on this service). */
     private readonly lines: DischargeLinesService,
+    /** The summary, drafted once the order is saved (it never depends on this service). */
+    private readonly summary: DischargeSummaryService,
     @InjectModel(DischargePlan.name) private readonly plans: Model<DischargePlanDocument>,
     @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>,
     @InjectModel(DischargeSummary.name) private readonly summaries: Model<DischargeSummaryDocument>,
@@ -196,7 +199,8 @@ export class DischargeOrdersService {
    * order is 409, before anything is placed. Then the take-home order is placed, the follow-up booked, and the order
    * saved. A failure after the take-home order was placed cancels it ("Discharge order not saved"); a follow-up already
    * booked stays. Then the plan is ordered and its reminder closed, `discharge.ordered` goes, the bed board re-reads,
-   * and the window opens at once when it is due.
+   * the window opens at once when it is due, the checklist is read, and the summary is drafted (a failed draft is
+   * logged and never undoes the order).
    */
   async order(actor: Actor, planId: string, input: OrderInput): Promise<DischargeOrderDocument> {
     this.mayOrder(actor);
@@ -251,7 +255,9 @@ export class DischargeOrdersService {
     });
     this.touchBeds();
     if (saved.windowAt.getTime() <= now.getTime()) await this.openWindow(saved._id, now);
-    return this.refreshLines(saved._id);
+    const refreshed = await this.refreshLines(saved._id);
+    await this.draftSummary(saved._id);
+    return refreshed;
   }
 
   /**
@@ -655,6 +661,18 @@ export class DischargeOrdersService {
     const order = await this.orders.findById(orderId).exec();
     if (!order) throw new NotFoundException('Discharge order not found');
     return order;
+  }
+
+  /**
+   * The summary drafted from the record (design 4.4) once the order is saved. A failure is logged and never undoes
+   * the order: drafting is safe to repeat, and the summary view drafts one when there is none.
+   */
+  private async draftSummary(orderId: Types.ObjectId): Promise<void> {
+    try {
+      await this.summary.draft(String(orderId));
+    } catch (e) {
+      this.logger.warn(`Discharge order ${String(orderId)}: summary not drafted (${(e as Error).message})`);
+    }
   }
 
   /**

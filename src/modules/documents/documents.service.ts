@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, isValidObjectId } from 'mongoose';
 import { ClinicalDocument, ClinicalDocumentDocument } from './schemas/document.schema';
 import { displayDateTime } from '../../common/utils/clinic-time';
 
@@ -41,5 +41,12 @@ export class DocumentsService {
     doc.signedBy = doctorName;
     doc.signedOn = displayDateTime();
     return doc.save();
+  }
+
+  /** Marks a superseded document Archived: it stays on the patient's record, never deleted. True when it changed. */
+  async archive(id: string): Promise<boolean> {
+    if (!isValidObjectId(id)) return false;
+    const res = await this.docModel.updateOne({ _id: id, status: { $ne: 'Archived' } }, { $set: { status: 'Archived' } }).exec();
+    return res.modifiedCount > 0;
   }
 }

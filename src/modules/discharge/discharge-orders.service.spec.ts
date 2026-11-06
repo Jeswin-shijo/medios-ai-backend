@@ -23,6 +23,7 @@ import { DischargeLinesService } from './discharge-lines.service';
 import { DischargeOrdersService, OrderInput } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSettingsService } from './discharge-settings.service';
+import { DischargeSummaryService } from './discharge-summary.service';
 import { toRealTime } from './discharge-time';
 
 const ADMIN = { id: 'a1', name: 'Admin', role: UserRole.ADMIN };
@@ -156,8 +157,10 @@ describe('DischargeOrdersService', () => {
     );
     (lines as any).logger = logger;
     lines.clock = () => NOW;
+    // The summary has its own spec; these tests write the summary records they need themselves.
+    const noDraft = { draft: async () => null } as unknown as DischargeSummaryService;
     orders = new DischargeOrdersService(
-      reg, plans, settings, w.cases, beds, w.takeHome, followUps, lines, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
+      reg, plans, settings, w.cases, beds, w.takeHome, followUps, lines, noDraft, m.DischargePlan, m.DischargeOrder, m.DischargeSummary, m.PharmacyLine,
     );
     (orders as any).logger = logger;
     orders.clock = () => NOW;
