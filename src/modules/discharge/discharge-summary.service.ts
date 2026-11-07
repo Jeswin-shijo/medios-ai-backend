@@ -510,6 +510,41 @@ export class DischargeSummaryService {
     }
   }
 
+  /**
+   * The one-minute pass (R31): `discharge.summary-signed` again for an order still in progress whose signed summary
+   * (current, not archived) was never announced, under its own key (`discharge.summary-signed:<orderId>:<n>:resend`,
+   * n the signing). True when it went.
+   */
+  async resendSigned(orderId: string): Promise<boolean> {
+    const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).lean<LeanOrder>().exec() : null;
+    if (!order || !OPEN_ORDER_STATES.includes(order.state) || order.announced?.includes(SIGNED)) return false;
+    const s = await this.summaries.findOne({ order: order._id }).select('signedAt archivedAt versions').lean<LeanSummary>().exec();
+    if (!s?.signedAt || s.archivedAt) return false;
+    const signing = (s.versions?.length ?? 0) + 1;
+    const plan = await this.planOf(order);
+    return this.announceSigned(order, String(s._id), plan?.bedLabel ?? null, signing, `${SIGNED}:${String(order._id)}:${signing}:resend`);
+  }
+
+  /**
+   * Task 10 M6: Edit and re-sign archives the signed version's document, and a failed archive is never retried there.
+   * The one-minute pass archives every kept version's document still not archived (Documents' own archive is guarded on
+   * the status, so one already archived is untouched). Returns how many it archived; a failure is logged.
+   */
+  async archiveVersions(orderId: string): Promise<number> {
+    if (!isValidObjectId(orderId)) return 0;
+    const s = await this.summaries.findOne({ order: new Types.ObjectId(orderId) }).select('versions').lean<LeanSummary>().exec();
+    let archived = 0;
+    for (const v of s?.versions ?? []) {
+      if (!v.documentId) continue;
+      try {
+        if (await this.documents.archive(v.documentId)) archived += 1;
+      } catch (e) {
+        this.logger.warn(`Document ${v.documentId}: an unlocked version's document was not archived (${(e as Error).message})`);
+      }
+    }
+    return archived;
+  }
+
   /** "Summaries to sign": the unsigned summaries of orders still in progress, oldest draft first. */
   async toSign(): Promise<SummaryRow[]> {
     const open = await this.orders
@@ -871,26 +906,28 @@ export class DischargeSummaryService {
   /**
    * `discharge.summary-signed` on the order's own case (the summary clock's start and stop carry the same case), under
    * a key of its own for each signing, so a re-sign within the Coordinator's minute is not dropped. Recorded in the
-   * order's `announced` once it went; a failed send is left for the one-minute pass.
+   * order's `announced` once it went; a failed send is left for the one-minute pass, whose re-send passes its own
+   * `dedupeKey` (R31). True when it went.
    */
-  private async announceSigned(order: LeanOrder, summaryId: string, bedLabel: string | null, signing: number): Promise<void> {
+  private async announceSigned(order: LeanOrder, summaryId: string, bedLabel: string | null, signing: number, dedupeKey?: string): Promise<boolean> {
     const orderId = String(order._id);
     if (!bedLabel) {
       this.logger.warn(`Discharge order ${orderId}: summary signed, but its plan has no bed label: ${SIGNED} not sent`);
-      return;
+      return false;
     }
     const sent = await this.registration.send(
       SIGNED,
       order.case ? String(order.case) : null,
       { orderId, summaryId, bedLabel, kind: order.kind },
       `${bedLabel}: Summary signed (${KIND_LABEL[order.kind]})`,
-      { dedupeKey: `${SIGNED}:${orderId}:${signing}` },
+      { dedupeKey: dedupeKey ?? `${SIGNED}:${orderId}:${signing}` },
     );
-    if (!sent) return;
+    if (!sent) return false;
     await this.orders
       .updateOne({ _id: order._id }, { $addToSet: { announced: SIGNED } })
       .exec()
       .catch((e: Error) => this.logger.warn(`Discharge order ${orderId}: ${SIGNED} not recorded as sent (${e.message})`));
+    return true;
   }
 
   /** Archives a document that is no longer the summary's. A failure is logged: the summary's own state matters more. */

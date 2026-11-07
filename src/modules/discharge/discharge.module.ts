@@ -29,9 +29,11 @@ import { DischargeLinesService } from './discharge-lines.service';
 import { DischargeOrdersService } from './discharge-orders.service';
 import { DischargeOverviewService } from './discharge-overview.service';
 import { DischargePlansService } from './discharge-plans.service';
+import { DischargeRepairService } from './discharge-repair.service';
 import { DischargeSettingsService } from './discharge-settings.service';
 import { DischargeSummaryService } from './discharge-summary.service';
 import { DischargeController } from './discharge.controller';
+import { DischargeScheduler } from './discharge.scheduler';
 // The same schema objects the Bed Agent and Revenue register (one model name, one schema).
 import { DischargeOrder, DischargeOrderSchema } from './schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanSchema } from './schemas/discharge-plan.schema';
@@ -88,6 +90,8 @@ import { DischargeSummary, DischargeSummarySchema } from './schemas/discharge-su
     DischargeLeavingService,
     DischargeAiService,
     DischargeOverviewService,
+    DischargeRepairService,
+    DischargeScheduler,
   ],
   exports: [DischargeSettingsService, DischargePlansService, DischargeOrdersService, DischargeLinesService, DischargeSummaryService, DischargeLeavingService, DischargeOverviewService],
 })

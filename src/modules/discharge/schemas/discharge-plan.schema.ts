@@ -100,6 +100,14 @@ export class DischargePlan {
 
   @Prop({ type: LeftWithoutDischargeRecordSchema })
   leftWithoutDischarge?: LeftWithoutDischargeRecord;
+
+  /**
+   * Real time the one-minute pass found this completed stay whole, or made it whole (Task 13b): the admission
+   * discharged, the patient's status set, `bed.discharged` and `discharge.completed` sent. A plan once checked is not
+   * checked again.
+   */
+  @Prop({ type: Date })
+  endingCheckedAt?: Date;
 }
 
 export const DischargePlanSchema = SchemaFactory.createForClass(DischargePlan);

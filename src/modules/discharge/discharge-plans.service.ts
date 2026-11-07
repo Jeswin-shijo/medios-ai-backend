@@ -26,6 +26,8 @@ const PLAN_COMPLETE = 'This discharge is complete: its target date can no longer
 /** A target day a doctor sets is due at this clinic time. */
 const TARGET_TIME = '11:00';
 const REMINDER_RULE = 'discharge-morning-reminder';
+/** A plan younger than this is never dropped as an orphan: the Bed Agent may still be placing its stay. */
+const ORPHAN_GRACE_MS = 10 * 60_000;
 
 type Msg = { case: string | null; payload: Record<string, unknown> };
 
@@ -387,11 +389,12 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Sends `discharge.planned` for the plan's current target and, once it went, stamps `announcedAt` (real time). A
-   * send that fails leaves the stamp unset, for the one-minute pass to send again. Never throws.
+   * send that fails leaves the stamp unset, for the one-minute pass to send again. `dedupeKey` is the re-send's own
+   * key (R31). True when it went. Never throws.
    */
-  private async announce(plan: DischargePlanDocument, summary: string): Promise<void> {
+  private async announce(plan: DischargePlanDocument, summary: string, dedupeKey?: string): Promise<boolean> {
     const payload = { planId: String(plan._id), admissionId: String(plan.admission), bedLabel: plan.bedLabel, targetDay: plan.targetDay };
-    if (!(await this.registration.send('discharge.planned', plan.case ? String(plan.case) : null, payload, summary))) return;
+    if (!(await this.registration.send('discharge.planned', plan.case ? String(plan.case) : null, payload, summary, dedupeKey ? { dedupeKey } : {}))) return false;
     const at = new Date();
     try {
       // Only for the day it named: a change that landed meanwhile is announced by its own call.
@@ -400,6 +403,48 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
     } catch (e) {
       this.logger.warn(`Discharge plan ${String(plan._id)}: announcedAt not stamped (${(e as Error).message})`);
     }
+    return true;
+  }
+
+  /**
+   * The one-minute pass (R31): `discharge.planned` again for a plan whose current target day was never announced, under
+   * a key of its own for that day (`discharge.planned:<planId>:<targetDay>:resend`), so the Coordinator's minute filter
+   * never takes it for an earlier send. A completed plan, or one already announced, is left alone. True when it went.
+   */
+  async resendPlanned(planId: string): Promise<boolean> {
+    const plan = isValidObjectId(planId) ? await this.plans.findById(planId).exec() : null;
+    if (!plan || plan.state === 'completed' || plan.announcedAt) return false;
+    const what = plan.targetLog?.length ? 'Discharge target moved to' : 'Discharge planned for';
+    return this.announce(plan, `${plan.bedLabel}: ${what} ${dayText(plan.targetDay)}`, `discharge.planned:${String(plan._id)}:${plan.targetDay}:resend`);
+  }
+
+  /**
+   * Task 4 R1-B2: a plan opened in the twin-room gap stays planned after the Bed Agent deleted its admission (the bed was
+   * lost), with nothing to discharge. The one-minute pass drops such a plan once it is past the grace (never one with an
+   * order), and closes its reminder. Returns how many it dropped; one bad plan never stops the rest.
+   */
+  async dropOrphans(): Promise<number> {
+    const old = new Date(Date.now() - ORPHAN_GRACE_MS);
+    const planned = await this.plans.find({ state: 'planned', order: null, createdAt: { $lte: old } }).select('admission').lean().exec();
+    if (!planned.length) return 0;
+    const present = await this.admissions.find({ _id: { $in: planned.map((p) => p.admission) } }).select('_id').lean().exec();
+    const has = new Set(present.map((a) => String(a._id)));
+    let dropped = 0;
+    for (const p of planned) {
+      if (has.has(String(p.admission))) continue;
+      try {
+        // Read again, just before: the admission is gone for good, not still being written.
+        if (await this.admissions.exists({ _id: p.admission }).exec()) continue;
+        const res = await this.plans.deleteOne({ _id: p._id, state: 'planned', order: null }).exec();
+        if (!res.deletedCount) continue;
+        dropped += 1;
+        this.logger.warn(`Discharge plan ${String(p._id)} dropped: its admission ${String(p.admission)} no longer exists`);
+        await this.closeReminder(String(p._id));
+      } catch (e) {
+        this.logger.warn(`Discharge plan ${String(p._id)}: not dropped (${(e as Error).message})`);
+      }
+    }
+    return dropped;
   }
 
   /** R15: the patient's plans take the record's current name and UHID. Never throws. */

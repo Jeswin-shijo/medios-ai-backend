@@ -690,17 +690,60 @@ export class BedsService {
       await this.announce('discharged', bedId, { byStaff: true });
       return;
     }
-    // Matching the bed: if a transfer moved the patient meanwhile, their admission stays.
-    const admission = await this.admissions
+    const admission = await this.endAdmission(before.admission, before._id, actor, at);
+    // The status first: the Discharge Agent's handler of the announcement reads it.
+    if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: opts.patientStatus ?? 'Discharged' });
+    await this.announce('discharged', bedId, { admission: admission && !admission.sample ? admission : null, byStaff: true });
+  }
+
+  /**
+   * Finishes a stay the Discharge Agent ended whose `discharge` a crash cut short, for its one-minute pass (Task 13b):
+   * the bed is already freed, so the admission still `active` is discharged at `at`, by the same guarded write
+   * `discharge` uses; the patient's status is set when it still says Admitted and no other stay of theirs is active (a
+   * status changed since, by a later visit, is never overwritten); and `bed.discharged` goes out when the stay was just
+   * ended here, or when `announce` asks (the Discharge Agent found none was sent). False, writing nothing, when there is
+   * nothing to finish: no such real admission, its bed still holds it (that stay ends through `discharge`), or a
+   * transfer moved it meanwhile. True when it changed or announced anything.
+   */
+  async finishDischarge(
+    admissionId: string,
+    actor: Actor,
+    opts: { at: Date; patientStatus: NonNullable<DischargeBedOptions['patientStatus']>; announce?: boolean },
+  ): Promise<boolean> {
+    if (!Types.ObjectId.isValid(admissionId)) return false;
+    let admission: AdmissionDocument | null = await this.admissions.findById(admissionId).exec();
+    if (!admission || admission.sample) return false;
+    let ended = false;
+    if (admission.status === 'active') {
+      if (await this.beds.exists({ _id: admission.bed, admission: admission._id }).exec()) return false;
+      admission = await this.endAdmission(admission._id as Types.ObjectId, admission.bed, actor, opts.at);
+      if (!admission) return false;
+      ended = true;
+    }
+    if (admission.status !== 'discharged') return false;
+    let changed = ended;
+    const patient = await this.patients.findOne(String(admission.patient)).catch(() => null);
+    const readmitted = await this.admissions.exists({ patient: admission.patient, status: 'active', _id: { $ne: admission._id } }).exec();
+    if (patient?.status === 'Admitted' && !readmitted) {
+      await this.patients.update(String(admission.patient), { status: opts.patientStatus });
+      changed = true;
+    }
+    if (ended || opts.announce) {
+      await this.announce('discharged', String(admission.bed), { admission, byStaff: true });
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Discharges the admission at `at`. Matching the bed: if a transfer moved the patient meanwhile, their admission stays (null). */
+  private endAdmission(admissionId: Types.ObjectId, bedId: unknown, actor: Actor, at: Date): Promise<AdmissionDocument | null> {
+    return this.admissions
       .findOneAndUpdate(
-        { _id: before.admission, status: 'active', bed: before._id },
+        { _id: admissionId, status: 'active', bed: bedId },
         { $set: { status: 'discharged', dischargedAt: at, dischargedBy: actor.name } },
         { new: true },
       )
       .exec();
-    // The status first: the Discharge Agent's handler of the announcement reads it.
-    if (admission && !admission.sample) await this.patients.update(String(admission.patient), { status: opts.patientStatus ?? 'Discharged' });
-    await this.announce('discharged', bedId, { admission: admission && !admission.sample ? admission : null, byStaff: true });
   }
 
   async markCleaned(bedId: string, _actor: Actor): Promise<void> {

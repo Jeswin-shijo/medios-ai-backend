@@ -39,8 +39,11 @@ const NOT_SAVED = 'Discharge order not saved';
 const DEATH_LEAVES_NOW = 'After a death the leaving time is the time of the order.';
 const ALREADY_ORDERED = 'This stay already has a discharge order.';
 const WINDOW_OPEN_LATER = 'The discharge window is already open. Cancel and re-order to leave later.';
+const ORDERED = 'discharge.ordered';
+const WINDOW_OPENED = 'discharge.window-opened';
+const CANCELLED = 'discharge.cancelled';
 /** The message that stops the clocks when an order ends in this state. */
-const STOP_MESSAGE: Partial<Record<OrderState, string>> = { cancelled: 'discharge.cancelled', left: 'discharge.completed' };
+const STOP_MESSAGE: Partial<Record<OrderState, string>> = { cancelled: CANCELLED, left: 'discharge.completed' };
 const PLAN_COMPLETE = 'This discharge is complete.';
 /** G2: Left without discharge completed the plan while this order was being given. */
 const STAY_ENDED = 'The stay already ended';
@@ -163,6 +166,16 @@ const stored = (o: FollowUpOutcome): DischargeFollowUp => ({
 const stateRefusal = (state: OrderState | undefined): string =>
   state === 'cancelled' ? 'This discharge order was cancelled.' : state === 'left' ? 'The patient has already left.' : 'Discharge order not found';
 
+type MessageOrder = Pick<DischargeOrder, 'plan' | 'admission' | 'kind' | 'plannedLeaveAt'> & { _id: unknown };
+
+/** The `discharge.ordered` payload, the same for the first send and a re-send. */
+const orderedPayload = (o: MessageOrder, bedLabel: string) => ({
+  orderId: String(o._id), planId: String(o.plan), admissionId: String(o.admission), bedLabel, kind: o.kind, plannedLeaveAt: o.plannedLeaveAt,
+});
+
+/** The `discharge.cancelled` payload; the reason stays on the order. */
+const cancelledPayload = (o: Pick<MessageOrder, '_id' | 'admission'>, bedLabel: string) => ({ orderId: String(o._id), admissionId: String(o.admission), bedLabel });
+
 /**
  * The doctor's discharge order: the only door through which a real admission ends. It places the take-home order and
  * books the follow-up when it is sent (A3, A13), marks the bed Leaving soon, and opens the discharge window (A1) when
@@ -256,9 +269,7 @@ export class DischargeOrdersService {
     const moved = await this.plans.updateOne({ _id: plan._id, state: { $ne: 'completed' } }, { $set: { state: 'ordered', order: saved._id } }).exec();
     if (!moved.matchedCount) await this.stayEnded(actor, saved._id, placed, now);
     await this.plansService.closeReminder(String(plan._id));
-    await this.announce(saved, 'discharge.ordered', plan.bedLabel, 'Discharge ordered', {
-      orderId: String(saved._id), planId: String(plan._id), admissionId: String(plan.admission), bedLabel: plan.bedLabel, kind: saved.kind, plannedLeaveAt: saved.plannedLeaveAt,
-    });
+    await this.announce(saved, ORDERED, plan.bedLabel, 'Discharge ordered', orderedPayload(saved, plan.bedLabel));
     this.touchBeds();
     if (saved.windowAt.getTime() <= now.getTime()) await this.openWindow(saved._id, now);
     const refreshed = await this.refreshLines(saved._id);
@@ -384,7 +395,7 @@ export class DischargeOrdersService {
     await this.archiveSummary(order._id);
     const bedLabel = await this.bedLabelOf(order.plan);
     if (bedLabel) {
-      await this.announce(cancelled, 'discharge.cancelled', bedLabel, 'Discharge cancelled', { orderId: String(order._id), admissionId: String(order.admission), bedLabel });
+      await this.announce(cancelled, CANCELLED, bedLabel, 'Discharge cancelled', cancelledPayload(cancelled, bedLabel));
       // A window claimed but not yet announced was opening as this cancel landed: its window-opened may be stored after
       // this stop, starting clocks nothing stops. Whichever of the two finishes last leaves the stop due again (I1).
       if (cancelled.windowOpenedAt && !cancelled.announced.includes('discharge.window-opened')) await this.stopDueAgain(order._id, 'cancelled');
@@ -452,6 +463,49 @@ export class DischargeOrdersService {
     while (this.drafting.size) await Promise.all([...this.drafting]);
   }
 
+  // ---------- re-sends (the one-minute pass) ----------
+
+  /**
+   * R31: `discharge.ordered` again for an order still in progress whose first send never went, under its own key
+   * (`discharge.ordered:<orderId>:resend`). True when it went.
+   */
+  async resendOrdered(orderId: string): Promise<boolean> {
+    const order = await this.found(orderId);
+    if (!order || !OPEN_ORDER_STATES.includes(order.state) || order.announced.includes(ORDERED)) return false;
+    const bedLabel = await this.bedLabelOf(order.plan);
+    if (!bedLabel) return false;
+    return this.announce(order, ORDERED, bedLabel, 'Discharge ordered', orderedPayload(order, bedLabel), `${ORDERED}:${String(order._id)}:resend`);
+  }
+
+  /**
+   * R31: `discharge.window-opened` again for an order still in progress whose window was claimed (`windowOpenedAt`) but
+   * never announced (a crash between the claim and the send), under its own key. The payload is rebuilt as the first
+   * send builds it, so the clocks start with the same due times. A window that opens on an order no longer in progress
+   * is never sent: its clocks would never be stopped. True when it went.
+   */
+  async resendWindowOpened(orderId: string): Promise<boolean> {
+    const order = await this.found(orderId);
+    if (!order || !OPEN_ORDER_STATES.includes(order.state) || !order.windowOpenedAt || order.announced.includes(WINDOW_OPENED)) return false;
+    if (!(await this.sendWindowOpened(order, `${WINDOW_OPENED}:${String(order._id)}:resend`))) return false;
+    await this.afterWindowOpened(order._id);
+    return true;
+  }
+
+  /**
+   * R31: `discharge.cancelled` again for a cancelled order whose stop never went (or was left due again, I1), under its
+   * own key. Only while no other live order is on the same plan, or on the same case: Pharmacy cancels every waiting
+   * take-home line of the case on this message, so a late one could cancel a newer order's medicines. True when it went.
+   */
+  async resendCancelled(orderId: string): Promise<boolean> {
+    const order = await this.found(orderId);
+    if (!order || order.state !== 'cancelled' || order.announced.includes(CANCELLED)) return false;
+    const others = [{ plan: order.plan }, ...(order.case ? [{ case: order.case }] : [])];
+    if (await this.orders.exists({ _id: { $ne: order._id }, state: { $in: LIVE_ORDER_STATES }, $or: others }).exec()) return false;
+    const bedLabel = await this.bedLabelOf(order.plan);
+    if (!bedLabel) return false;
+    return this.announce(order, CANCELLED, bedLabel, 'Discharge cancelled', cancelledPayload(order, bedLabel), `${CANCELLED}:${String(order._id)}:resend`);
+  }
+
   // ---------- the window ----------
 
   /**
@@ -472,31 +526,12 @@ export class DischargeOrdersService {
     if (!order) return false;
     let sent = false;
     try {
-      const [bedLabel, config, summary] = await Promise.all([
-        this.bedLabelOf(order.plan),
-        this.settings.get(),
-        this.summaries.findOne({ order: order._id }).select('signedAt').lean<{ signedAt?: Date }>().exec(),
-      ]);
-      if (bedLabel) {
-        const window = toRealTime(order.windowAt).getTime();
-        sent = await this.announce(order, 'discharge.window-opened', bedLabel, 'Discharge window opened', {
-          orderId: String(order._id),
-          admissionId: String(order.admission),
-          bedLabel,
-          kind: order.kind,
-          plannedLeaveAt: order.plannedLeaveAt,
-          leaveDueAt: new Date(window + config.leaveMinutes * MIN_MS),
-          summaryDueAt: new Date(window + config.summaryMinutes * MIN_MS),
-          summarySigned: !!summary?.signedAt,
-        });
-      }
+      sent = await this.sendWindowOpened(order);
     } catch (e) {
       this.logger.warn(`Discharge order ${String(order._id)}: window-opened not sent (${(e as Error).message})`);
     }
     if (sent) {
-      // A cancel (or a leaving) that landed after the claim may have sent its stop before this start (I1).
-      const state = (await this.orders.findById(order._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
-      if (state && !OPEN_ORDER_STATES.includes(state)) await this.stopDueAgain(order._id, state);
+      await this.afterWindowOpened(order._id);
       return true;
     }
     await this.orders
@@ -504,6 +539,44 @@ export class DischargeOrdersService {
       .exec()
       .catch((e: Error) => this.logger.warn(`Discharge order ${String(order._id)}: window claim not released (${e.message})`));
     return false;
+  }
+
+  /**
+   * `discharge.window-opened` for a claimed window: the due times (real time, from `windowAt` and Settings → Discharge),
+   * and whether the summary is already signed (R20). Recorded in `announced` once it went. True when it went; false,
+   * with a warning, when the plan has no bed label.
+   */
+  private async sendWindowOpened(order: DischargeOrderDocument, dedupeKey?: string): Promise<boolean> {
+    const [bedLabel, config, summary] = await Promise.all([
+      this.bedLabelOf(order.plan),
+      this.settings.get(),
+      this.summaries.findOne({ order: order._id }).select('signedAt').lean<{ signedAt?: Date }>().exec(),
+    ]);
+    if (!bedLabel) return false;
+    const window = toRealTime(order.windowAt).getTime();
+    return this.announce(
+      order,
+      WINDOW_OPENED,
+      bedLabel,
+      'Discharge window opened',
+      {
+        orderId: String(order._id),
+        admissionId: String(order.admission),
+        bedLabel,
+        kind: order.kind,
+        plannedLeaveAt: order.plannedLeaveAt,
+        leaveDueAt: new Date(window + config.leaveMinutes * MIN_MS),
+        summaryDueAt: new Date(window + config.summaryMinutes * MIN_MS),
+        summarySigned: !!summary?.signedAt,
+      },
+      dedupeKey,
+    );
+  }
+
+  /** I1: a cancel (or a leaving) that landed after the window's claim may have sent its stop before this start. */
+  private async afterWindowOpened(orderId: Types.ObjectId): Promise<void> {
+    const state = (await this.orders.findById(orderId).select('state').lean<{ state?: OrderState }>().exec())?.state;
+    if (state && !OPEN_ORDER_STATES.includes(state)) await this.stopDueAgain(orderId, state);
   }
 
   /**
@@ -622,10 +695,18 @@ export class DischargeOrdersService {
   /**
    * Sends a Discharge message on the order's case and, once it went, records it in `announced` (the one-minute pass
    * re-sends one a record says is due but is missing there). The summary names the bed and the kind, never the
-   * patient. True when it went.
+   * patient. `dedupeKey` is a re-send's own key (R31). True when it went.
    */
-  private async announce(order: DischargeOrderDocument, type: string, bedLabel: string, what: string, payload: Record<string, unknown>): Promise<boolean> {
-    const sent = await this.registration.send(type, order.case ? String(order.case) : null, payload, `${bedLabel}: ${what} (${KIND_LABEL[order.kind]})`);
+  private async announce(
+    order: DischargeOrderDocument,
+    type: string,
+    bedLabel: string,
+    what: string,
+    payload: Record<string, unknown>,
+    dedupeKey?: string,
+  ): Promise<boolean> {
+    const summary = `${bedLabel}: ${what} (${KIND_LABEL[order.kind]})`;
+    const sent = await this.registration.send(type, order.case ? String(order.case) : null, payload, summary, dedupeKey ? { dedupeKey } : {});
     if (!sent) return false;
     await this.orders
       .updateOne({ _id: order._id }, { $addToSet: { announced: type } })
@@ -692,6 +773,11 @@ export class DischargeOrdersService {
     const plan = await this.plans.findById(planId).select('bedLabel').lean<{ bedLabel?: string }>().exec();
     if (!plan?.bedLabel) this.logger.warn(`Discharge plan ${String(planId)} not found: no message sent`);
     return plan?.bedLabel ?? null;
+  }
+
+  /** The order in any state, or null. */
+  private async found(orderId: string): Promise<DischargeOrderDocument | null> {
+    return isValidObjectId(orderId) ? this.orders.findById(orderId).exec() : null;
   }
 
   private async reread(orderId: Types.ObjectId): Promise<DischargeOrderDocument> {

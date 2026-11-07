@@ -206,6 +206,22 @@ export class DischargeLinesService {
     return this.refreshEach(await this.orders.find({ state: { $in: OPEN_ORDER_STATES }, $or: or }).select('_id').lean().exec());
   }
 
+  /** The one-minute pass: every order in progress reads its lines again (each caught on its own). Returns how many. */
+  async refreshOpen(): Promise<number> {
+    return this.refreshEach(await this.orders.find({ state: { $in: OPEN_ORDER_STATES } }).sort({ _id: 1 }).select('_id').lean().exec());
+  }
+
+  /**
+   * The one-minute pass (R31): `discharge.ready` again for an order that is Ready but whose announcement for this time
+   * never went, under this time's own key (`discharge.ready:<orderId>:<readyCount>`, as the first send). True when it went.
+   */
+  async resendReady(orderId: string): Promise<boolean> {
+    const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).lean<LeanOrder>().exec() : null;
+    if (order?.state !== 'ready' || order.announced?.includes(READY)) return false;
+    const plan = await this.plans.findById(order.plan).select('case bedLabel').lean<{ case?: Types.ObjectId; bedLabel?: string }>().exec();
+    return this.announceReady(order, await this.caseOf(order, plan), plan?.bedLabel ?? null);
+  }
+
   /** Refreshes the stay's open orders. Returns how many. */
   async refreshAdmission(admissionId: string): Promise<number> {
     if (!isValidObjectId(admissionId)) return 0;
@@ -561,12 +577,15 @@ export class DischargeLinesService {
     }
   }
 
-  /** `discharge.ready` for the n-th time the order became ready; recorded in `announced` once it went, if still that time. */
-  private async announceReady(order: LeanOrder, caseId: string | null, bedLabel: string | null): Promise<void> {
+  /**
+   * `discharge.ready` for the n-th time the order became ready; recorded in `announced` once it went, if still that
+   * time. True when it went.
+   */
+  private async announceReady(order: LeanOrder, caseId: string | null, bedLabel: string | null): Promise<boolean> {
     const orderId = String(order._id);
     if (!bedLabel) {
       this.logger.warn(`Discharge order ${orderId} is ready, but its plan has no bed label: discharge.ready not sent`);
-      return;
+      return false;
     }
     const n = order.readyCount;
     // A death ends in Body released, not a leaving.
@@ -574,11 +593,12 @@ export class DischargeLinesService {
     const sent = await this.registration.send(READY, caseId, { orderId, bedLabel, kind: order.kind }, `${bedLabel}: ${what} (${KIND_LABEL[order.kind]})`, {
       dedupeKey: `${READY}:${orderId}:${n}`,
     });
-    if (!sent) return;
+    if (!sent) return false;
     await this.orders
       .updateOne({ _id: order._id, state: 'ready', readyCount: n }, { $addToSet: { announced: READY } })
       .exec()
       .catch((e: Error) => this.logger.warn(`Discharge order ${orderId}: ${READY} not recorded as sent (${e.message})`));
+    return true;
   }
 
   /** The plan shows the order's state (Ordered or Ready to leave) while it points at this order. */

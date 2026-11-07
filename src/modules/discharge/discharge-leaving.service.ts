@@ -7,8 +7,10 @@ import { BedsService, DischargeBedOptions } from '../beds/beds.service';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { Bed, BedDocument } from '../beds/schemas/bed.schema';
 import { EscalationsService } from '../coordinator/escalations.service';
+import { MessagesService } from '../coordinator/messages.service';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { Bill, BillDocument, BillState } from '../revenue/schemas/bill.schema';
+import { UserRole } from '../users/schemas/user.schema';
 import { CompletionKind, KIND_LABEL, LINE_LABEL } from './discharge-catalogue';
 import { DischargeRegistration } from './discharge-coordinator.registration';
 import { DischargeLinesService, missing, readyLinesFilter } from './discharge-lines.service';
@@ -23,6 +25,7 @@ const GATE_PASS_COUNTER = 'discharge-gatepass';
 const GATE_PASS_PREFIX = 'GP';
 const COMPLETED = 'discharge.completed';
 const WINDOW_OPENED = 'discharge.window-opened';
+const READY = 'discharge.ready';
 const LEFT_WITHOUT: CompletionKind = 'left-without-discharge';
 /** A16: absconding is a safety event, so it reaches the Duty administrator, then the Medical superintendent. */
 const LEFT_WITHOUT_LADDER = 'default';
@@ -39,6 +42,24 @@ const ALREADY_LEFT = 'The patient has already left.';
 const NO_PASS = 'No gate pass was printed for this discharge.';
 /** R44: a deceased patient is never marked Left without discharge. */
 const DEATH_IS_RELEASED = 'Use Body released for a death.';
+
+/** How each ending leaves the patient's status (A7). */
+const PATIENT_STATUS: Record<CompletionKind, NonNullable<DischargeBedOptions['patientStatus']>> = {
+  home: 'Discharged',
+  transfer: 'Discharged',
+  'against-advice': 'Discharged',
+  died: 'Deceased',
+  'left-without-discharge': 'Left without discharge',
+};
+/**
+ * R52: a Left-without-discharge claim this old, on a plan that never completed, was cut short by a crash: recording it
+ * takes seconds. Measured from the claim's own `at` (clinic clock). Ten minutes is far past any request still in flight.
+ */
+export const STALE_CLAIM_MS = 10 * 60_000;
+/** Who the one-minute pass acts as when an ending's record names no one. */
+const REPAIR_ACTOR = { id: 'discharge-agent', name: 'Discharge Agent' };
+/** The ending, as `discharge.completed` summaries name it. */
+const endingWhat = (kind: CompletionKind) => (kind === 'died' ? 'Body released' : 'Patient left');
 
 const BALANCE_DUE = 'Balance due: billing informed';
 const REFUND_DUE = 'Refund due: billing informed';
@@ -138,6 +159,11 @@ export class DischargeLeavingService {
     /** Read only: the stay's admission bills, for the gate pass. */
     @InjectModel(Bill.name) private readonly bills: Model<BillDocument>,
     @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>,
+    /**
+     * Read only: whether `bed.discharged` went for a stay, for the one-minute pass. Absent only where the service is
+     * built by hand (specs); without it a stay's announcement is taken as sent.
+     */
+    private readonly messages?: MessagesService,
   ) {}
 
   // ---------- the gate pass ----------
@@ -446,22 +472,217 @@ export class DischargeLeavingService {
    */
   private async announce(plan: DischargePlanDocument, order: DischargeOrderDocument | null, kind: CompletionKind, leftAt: Date, what: string): Promise<void> {
     await this.quietly(`Discharge plan ${String(plan._id)}: ${COMPLETED} not sent`, async () => {
-      const payload = {
-        planId: String(plan._id),
-        orderId: order ? String(order._id) : '',
-        admissionId: String(plan.admission),
-        bedLabel: plan.bedLabel,
-        kind,
-        leftAt,
-      };
-      const sent = await this.registration.send(COMPLETED, await this.caseFor(plan, order), payload, `${plan.bedLabel}: ${what} (${KIND_LABEL[kind]})`);
-      if (!order) {
-        if (sent) await this.plans.updateOne({ _id: plan._id }, { $set: { 'leftWithoutDischarge.announcedAt': new Date() } }).exec();
-        return;
-      }
-      if (sent) await this.orders.updateOne({ _id: order._id }, { $addToSet: { announced: COMPLETED } }).exec();
-      if (order.windowOpenedAt && !order.announced.includes(WINDOW_OPENED)) await this.ordersService.stopDueAgain(order._id as Types.ObjectId, 'left');
+      await this.sendCompleted(plan, order, kind, leftAt, what);
+      if (order?.windowOpenedAt && !order.announced.includes(WINDOW_OPENED)) await this.ordersService.stopDueAgain(order._id as Types.ObjectId, 'left');
     });
+  }
+
+  /**
+   * `discharge.completed`, the same for the first send and a re-send (whose own `dedupeKey` keeps the Coordinator's
+   * minute filter from taking it for the first, R31). Recorded once it went: in the order's `announced`, or on the
+   * plan's Left-without-discharge record when no order ended the stay. True when it went.
+   */
+  private async sendCompleted(
+    plan: DischargePlanDocument,
+    order: DischargeOrderDocument | null,
+    kind: CompletionKind,
+    leftAt: Date,
+    what: string,
+    dedupeKey?: string,
+  ): Promise<boolean> {
+    const payload = {
+      planId: String(plan._id),
+      orderId: order ? String(order._id) : '',
+      admissionId: String(plan.admission),
+      bedLabel: plan.bedLabel,
+      kind,
+      leftAt,
+    };
+    const summary = `${plan.bedLabel}: ${what} (${KIND_LABEL[kind]})`;
+    if (!(await this.registration.send(COMPLETED, await this.caseFor(plan, order), payload, summary, dedupeKey ? { dedupeKey } : {}))) return false;
+    if (order) await this.orders.updateOne({ _id: order._id }, { $addToSet: { announced: COMPLETED } }).exec();
+    else await this.plans.updateOne({ _id: plan._id }, { $set: { 'leftWithoutDischarge.announcedAt': new Date() } }).exec();
+    return true;
+  }
+
+  // ---------- the one-minute pass ----------
+
+  /**
+   * R31: `discharge.completed` again for a completed stay whose message never went, under its own key: for the order
+   * that ended it (from its `announced`), or for a Left without discharge with no order (from the plan's record). Only
+   * once the plan is completed: an order that left on a plan that never completed is a half-ended stay, for
+   * `repairLeft` to finish or put back. True when it went.
+   */
+  async resendCompleted(planId: string): Promise<boolean> {
+    const plan = isValidObjectId(planId) ? await this.plans.findById(planId).exec() : null;
+    if (plan?.state !== 'completed' || !plan.completedKind) return false;
+    const order = await this.orders.findOne({ plan: plan._id, state: 'left' }).exec();
+    if (!this.completedDue(plan, order)) return false;
+    const kind = order ? (order.endedAs ?? order.kind) : plan.completedKind;
+    return this.sendCompleted(plan, order, kind, this.endedAt(plan, order), endingWhat(kind), this.completedKey(plan, order));
+  }
+
+  /**
+   * Task 11 M2, case "left with the bed still occupied" and its neighbours: an order that left (Patient left or Body
+   * released) on a plan that never completed. A crash came between the guarded `ready → left` and the end of the
+   * ending. The stored stay decides, as `leave` does after a Bed Agent failure (review I1): untouched (the admission
+   * active, its bed holding it) and its end never announced, the order goes back to Ready, for the nurse to press
+   * again; ended or half-ended (the bed freed, the admission discharged), or already announced, the ending is finished
+   * (`finishEnding`). An order Left without discharge ended is its plan's claim's to decide (`repairClaim`). Returns
+   * what it did, or null.
+   */
+  async repairLeft(orderId: string): Promise<'reopened' | 'finished' | null> {
+    const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).exec() : null;
+    if (order?.state !== 'left' || !order.leftAt) return null;
+    const kind = order.endedAs ?? order.kind;
+    if (kind === LEFT_WITHOUT) return null;
+    const plan = await this.plans.findById(order.plan).exec();
+    if (!plan || plan.state === 'completed') return null;
+    const stay = await this.stayOf(order.admission);
+    if (stay.status === 'active' && stay.holds && !order.announced.includes(COMPLETED)) {
+      const back = await this.orders
+        .updateOne({ _id: order._id, state: 'left', leftAt: order.leftAt }, { $set: { state: 'ready' }, $unset: { leftAt: 1, leftBy: 1, endedAs: 1 } })
+        .exec();
+      if (!back.modifiedCount) return null;
+      this.logger.warn(`Discharge order ${String(order._id)}: left, but the stay never ended (a crash before the bed was freed); put back to Ready`);
+      await this.refreshQuietly(order._id);
+      return 'reopened';
+    }
+    await this.finishEnding(plan, order, kind, order.leftAt, order.leftBy);
+    return 'finished';
+  }
+
+  /**
+   * Task 11 M2, a stale Left-without-discharge claim: a plan that never completed whose claim is at least
+   * `STALE_CLAIM_MS` old (R52), so a crash came after the claim. The stored stay decides (review I1): untouched and never
+   * announced, the claim is undone, and an order it ended goes back to Ordered (its lines then decide Ready again); the
+   * stay already ended or half-ended, the Left without discharge is finished: an open order ends the same way, the stay
+   * ends at the last-seen time, the plan completes, the escalation is raised and `discharge.completed` goes. `now` is
+   * the clinic clock. Returns what it did, or null (nothing to do, or not stale yet).
+   */
+  async repairClaim(planId: string, now: Date): Promise<'undone' | 'finished' | null> {
+    const plan = isValidObjectId(planId) ? await this.plans.findById(planId).exec() : null;
+    const claim = plan?.leftWithoutDischarge;
+    if (!plan || plan.state === 'completed' || !claim?.at) return null;
+    if (now.getTime() - new Date(claim.at).getTime() < STALE_CLAIM_MS) return null;
+    const ended = await this.orders.findOne({ plan: plan._id, state: 'left', endedAs: LEFT_WITHOUT, leftAt: claim.lastSeenAt }).exec();
+    const stay = await this.stayOf(plan.admission);
+    if (stay.status === 'active' && stay.holds && !claim.announcedAt && !ended?.announced.includes(COMPLETED)) {
+      // The order first, then the claim, as Left without discharge's own undo does.
+      if (ended) {
+        await this.orders
+          .updateOne(
+            { _id: ended._id, state: 'left', endedAs: LEFT_WITHOUT },
+            { $set: { state: 'ordered' }, $unset: { leftAt: 1, leftBy: 1, endedAs: 1 }, $pull: { announced: READY } },
+          )
+          .exec();
+      }
+      const undone = await this.plans
+        .updateOne({ _id: plan._id, state: { $ne: 'completed' }, 'leftWithoutDischarge.at': claim.at }, { $unset: { leftWithoutDischarge: 1 } })
+        .exec();
+      if (ended) await this.refreshQuietly(ended._id as Types.ObjectId);
+      if (!undone.modifiedCount) return null;
+      this.logger.warn(`Discharge plan ${String(plan._id)}: a Left without discharge claim was never finished (a crash after the claim); undone`);
+      return 'undone';
+    }
+    const actor = { id: claim.by?.id ?? REPAIR_ACTOR.id, name: claim.by?.name ?? REPAIR_ACTOR.name, role: UserRole.ADMIN };
+    // An order the claim never reached (given meanwhile) ends the same way.
+    const open = await this.endWithout(plan._id as Types.ObjectId, claim.lastSeenAt, actor);
+    const order = open ? await this.orders.findById(open._id).exec() : ended;
+    await this.finishEnding(plan, order, LEFT_WITHOUT, claim.lastSeenAt, claim.by);
+    await this.raiseLeft(plan, order);
+    this.logger.warn(`Discharge plan ${String(plan._id)}: a Left without discharge cut short after the stay ended; finished`);
+    return 'finished';
+  }
+
+  /**
+   * Task 11 M2, a completed stay checked once (`endingCheckedAt`): the stay must have ended the way the plan says. An
+   * admission still active is ended, in its bed through the Bed Agent's discharge, or, its bed already freed, by
+   * `BedsService.finishDischarge`; a patient whose status was never set gets it; a missing `bed.discharged` or
+   * `discharge.completed` goes. A plan completed outside the agent (no kind) is not the agent's ending. True when it
+   * changed anything.
+   */
+  async checkEnding(planId: string): Promise<boolean> {
+    const plan = isValidObjectId(planId) ? await this.plans.findById(planId).exec() : null;
+    if (plan?.state !== 'completed' || !plan.completedKind || plan.endingCheckedAt) return false;
+    const order = await this.orders.findOne({ plan: plan._id, state: 'left' }).exec();
+    return this.finishEnding(plan, order, plan.completedKind, this.endedAt(plan, order), order?.leftBy ?? plan.leftWithoutDischarge?.by);
+  }
+
+  /**
+   * Makes an ending whole from the stored stay, as the ending itself would have: an admission still in its bed ends
+   * through `BedsService.discharge`; any other real admission goes to `BedsService.finishDischarge`, which ends one
+   * whose bed was already freed, sets a status never set, and announces `bed.discharged` when none went for the stay.
+   * Then the plan completes with the kind, `discharge.completed` goes if it never did, and the plan is marked checked.
+   * A Bed Agent failure throws, before the mark, so the next pass tries again. True when it changed anything.
+   */
+  private async finishEnding(
+    plan: DischargePlanDocument,
+    order: DischargeOrderDocument | null,
+    kind: CompletionKind,
+    at: Date,
+    who?: { id?: string; name: string },
+  ): Promise<boolean> {
+    const actor = { id: who?.id || REPAIR_ACTOR.id, name: who?.name || REPAIR_ACTOR.name, role: UserRole.ADMIN };
+    const patientStatus = PATIENT_STATUS[kind];
+    const stay = await this.stayOf(plan.admission);
+    let changed = false;
+    if (stay.status === 'active' && stay.holds) {
+      await this.beds.discharge(String(stay.bed), actor, String(plan.admission), { viaDischarge: true, at, patientStatus });
+      changed = true;
+    } else if (stay.status && !stay.sample) {
+      const announce = !(await this.bedAnnounced(plan.admission));
+      changed = await this.beds.finishDischarge(String(plan.admission), actor, { at, patientStatus, announce });
+    }
+    if (plan.state !== 'completed') {
+      await this.complete(plan, kind, at);
+      changed = true;
+    }
+    const [current, ending] = await Promise.all([this.plans.findById(plan._id).exec(), order ? this.orders.findById(order._id).exec() : null]);
+    if (current && this.completedDue(current, ending) && (await this.sendCompleted(current, ending, kind, at, endingWhat(kind), this.completedKey(current, ending)))) {
+      changed = true;
+    }
+    await this.plans.updateOne({ _id: plan._id }, { $set: { endingCheckedAt: new Date() } }).exec();
+    return changed;
+  }
+
+  /** Whether the stay's `discharge.completed` is still to go: the ending order's `announced` lacks it, or, with no order, the plan's record. */
+  private completedDue(plan: DischargePlanDocument, order: DischargeOrderDocument | null): boolean {
+    if (order) return !order.announced.includes(COMPLETED);
+    return !!plan.leftWithoutDischarge?.at && !plan.leftWithoutDischarge.announcedAt;
+  }
+
+  /** A re-sent `discharge.completed`'s own key (R31). */
+  private completedKey(plan: DischargePlanDocument, order: DischargeOrderDocument | null): string {
+    return order ? `${COMPLETED}:${String(order._id)}:resend` : `${COMPLETED}:plan:${String(plan._id)}:resend`;
+  }
+
+  /** When the stay ended (clinic clock): the order's leaving, else the last-seen time, else the plan's completion. */
+  private endedAt(plan: DischargePlanDocument, order: DischargeOrderDocument | null): Date {
+    return order?.leftAt ?? plan.leftWithoutDischarge?.lastSeenAt ?? plan.completedAt ?? this.clock();
+  }
+
+  /** The stay as stored: the admission's status (null when it is gone), whether it is a sample, its bed, and whether that bed still holds it. */
+  private async stayOf(admissionId: Types.ObjectId): Promise<{ status: string | null; sample: boolean; bed?: Types.ObjectId; holds: boolean }> {
+    const a = await this.admissions.findById(admissionId).select('status bed sample').lean<{ status: string; bed?: Types.ObjectId; sample?: boolean }>().exec();
+    if (!a) return { status: null, sample: false, holds: false };
+    const holds = a.bed ? !!(await this.bedDocs.exists({ _id: a.bed, admission: admissionId }).exec()) : false;
+    return { status: a.status, sample: !!a.sample, bed: a.bed, holds };
+  }
+
+  /** Whether the Bed Agent's `bed.discharged` for this stay is in the Coordinator's message log. */
+  private async bedAnnounced(admissionId: Types.ObjectId): Promise<boolean> {
+    if (!this.messages) return true;
+    return !!(await this.messages.findOne('bed.discharged', { admissionId: String(admissionId) }));
+  }
+
+  /** The checklist read again after an order was put back; a failure is logged, and the pass refreshes it next minute. */
+  private async refreshQuietly(orderId: Types.ObjectId): Promise<void> {
+    try {
+      await this.lines.refresh(String(orderId));
+    } catch (e) {
+      this.logger.warn(`Discharge order ${String(orderId)}: checklist not refreshed after it was put back (${(e as Error).message})`);
+    }
   }
 
   /**
