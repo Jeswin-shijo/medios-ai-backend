@@ -493,14 +493,16 @@ export class DischargeOrdersService {
 
   /**
    * R31: `discharge.cancelled` again for a cancelled order whose stop never went (or was left due again, I1), under its
-   * own key. Only while no other live order is on the same plan, or on the same case: Pharmacy cancels every waiting
-   * take-home line of the case on this message, so a late one could cancel a newer order's medicines. True when it went.
+   * own key. Only while no other order is in progress on the same plan, or on the same case: Pharmacy cancels every
+   * waiting take-home line of the case on this message, so a late one could cancel a newer order's medicines. An order
+   * that has left never holds it back (13b review I1): Pharmacy's `discharge.completed` already cancelled its waiting
+   * lines, and this order's clocks stop only on this message. True when it went.
    */
   async resendCancelled(orderId: string): Promise<boolean> {
     const order = await this.found(orderId);
     if (!order || order.state !== 'cancelled' || order.announced.includes(CANCELLED)) return false;
     const others = [{ plan: order.plan }, ...(order.case ? [{ case: order.case }] : [])];
-    if (await this.orders.exists({ _id: { $ne: order._id }, state: { $in: LIVE_ORDER_STATES }, $or: others }).exec()) return false;
+    if (await this.orders.exists({ _id: { $ne: order._id }, state: { $in: OPEN_ORDER_STATES }, $or: others }).exec()) return false;
     const bedLabel = await this.bedLabelOf(order.plan);
     if (!bedLabel) return false;
     return this.announce(order, CANCELLED, bedLabel, 'Discharge cancelled', cancelledPayload(order, bedLabel), `${CANCELLED}:${String(order._id)}:resend`);

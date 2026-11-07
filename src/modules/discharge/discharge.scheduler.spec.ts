@@ -22,6 +22,8 @@ function wired(opts: { fail?: string[]; start?: Date | null } = {}) {
   const calls: string[] = [];
   const args: Record<string, unknown[]> = {};
   const counterReads = { n: 0 };
+  /** The stored stamp; a spec changes it as a reseed would (null: the read fails). */
+  const stamp = { value: opts.start === undefined ? START : opts.start };
   const step =
     (name: string) =>
     async (...a: unknown[]) => {
@@ -46,14 +48,14 @@ function wired(opts: { fail?: string[]; start?: Date | null } = {}) {
         counterReads.n += 1;
         assert.equal(filter.key, DISCHARGE_START);
         assert.ok(update.$setOnInsert, 'the stamp is only ever inserted, never overwritten');
-        if (opts.start === null) throw new Error('database down');
-        return { last: (opts.start ?? START).getTime() };
+        if (stamp.value === null) throw new Error('database down');
+        return { last: stamp.value.getTime() };
       },
     }),
   };
   const s = new DischargeScheduler(plans as never, orders as never, lines as never, repair as never, overview as never, counters as never);
   s.clock = () => at(26, 11, 5);
-  return { s, calls, args, counterReads };
+  return { s, calls, args, counterReads, stamp };
 }
 
 const ORDER = [
@@ -103,16 +105,27 @@ describe('DischargeScheduler', () => {
     assert.deepEqual(calls, ['catchUp', 'dropOrphans', 'openDueWindows', 'remindDue', 'refreshOpen', 'snapshot']);
   });
 
-  test('the start stamp is taken once and reused', async () => {
-    const { s, args, counterReads } = wired();
+  test('a reset stamp is picked up by the next pass: the stamp is read at boot and on every pass (R32)', async () => {
+    const { s, args, counterReads, stamp } = wired();
     s.onApplicationBootstrap();
     try {
       await s.tick();
-      await s.tick();
-      assert.equal(counterReads.n, 1, 'read once, at boot');
       assert.deepEqual(args.resendMissing, [START]);
-      assert.deepEqual(await s.startedAt(), START);
-      assert.equal(counterReads.n, 1);
+      // A reseed deletes the counter and sets it after its records, while this API keeps running.
+      const LATER = new Date(START.getTime() + 3_600_000);
+      stamp.value = LATER;
+      await s.tick();
+      for (const step of ['resendMissing', 'repairSummaries', 'repairOrdersAndPlans']) assert.deepEqual(args[step], [LATER], step);
+      assert.deepEqual(args.repairEndings, [at(26, 11, 5), LATER]);
+      assert.equal(counterReads.n, 3, 'once at boot, then once per pass');
+      // A read that fails makes only that pass's repairs wait.
+      stamp.value = null;
+      args.resendMissing = [];
+      await s.tick();
+      assert.deepEqual(args.resendMissing, []);
+      stamp.value = LATER;
+      await s.tick();
+      assert.deepEqual(args.resendMissing, [LATER]);
     } finally {
       s.onModuleDestroy();
     }

@@ -722,12 +722,9 @@ export class BedsService {
     }
     if (admission.status !== 'discharged') return false;
     let changed = ended;
-    const patient = await this.patients.findOne(String(admission.patient)).catch(() => null);
+    // A failed read or write throws, so the caller tries again rather than taking the stay as finished (13b review M2).
     const readmitted = await this.admissions.exists({ patient: admission.patient, status: 'active', _id: { $ne: admission._id } }).exec();
-    if (patient?.status === 'Admitted' && !readmitted) {
-      await this.patients.update(String(admission.patient), { status: opts.patientStatus });
-      changed = true;
-    }
+    if (!readmitted && (await this.patients.setStatusIf(String(admission.patient), 'Admitted', opts.patientStatus))) changed = true;
     if (ended || opts.announce) {
       await this.announce('discharged', String(admission.bed), { admission, byStaff: true });
       changed = true;

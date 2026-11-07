@@ -115,6 +115,17 @@ export class PatientsService {
     return saved;
   }
 
+  /**
+   * Sets the status only while it is still `from`, in one guarded write, so a status a later visit set meanwhile is
+   * never overwritten (the Discharge Agent's repair of a stay a crash cut short). True when it changed; false for a
+   * patient not found or whose status is no longer `from`. A failed write throws.
+   */
+  async setStatusIf(id: string, from: string, to: string): Promise<boolean> {
+    if (!isValidObjectId(id)) return false;
+    const res = await this.patientModel.updateOne({ _id: id, status: from }, { $set: { status: to } }).exec();
+    return res.modifiedCount > 0;
+  }
+
   async remove(idOrUhid: string): Promise<{ success: boolean; message: string }> {
     const patient = await this.findOne(idOrUhid);
     await this.patientModel.deleteOne({ _id: patient._id }).exec();

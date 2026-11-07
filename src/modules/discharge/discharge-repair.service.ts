@@ -10,7 +10,7 @@ import { DischargeLinesService } from './discharge-lines.service';
 import { DischargeOrdersService } from './discharge-orders.service';
 import { DischargePlansService } from './discharge-plans.service';
 import { DischargeSummaryService } from './discharge-summary.service';
-import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES } from './schemas/discharge-order.schema';
+import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES, OrderState } from './schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanDocument } from './schemas/discharge-plan.schema';
 import { DischargeSummary, DischargeSummaryDocument } from './schemas/discharge-summary.schema';
 
@@ -177,6 +177,16 @@ export class DischargeRepairService {
         n += await this.one('plan state', o._id, async () => {
           const moved = await this.plans.updateOne({ _id: o.plan, state: 'planned' }, { $set: { state: o.state, order: o._id } }).exec();
           if (!moved.modifiedCount) return false;
+          // 13b review M4: a cancel that landed after the walk read the order found the plan not pointing at it, so its own
+          // plan step changed nothing. The order is read again, and a plan now pointing at an order no longer in progress
+          // is put back (the cancel's own step, guarded on this order).
+          const now = (await this.orders.findById(o._id).select('state').lean<{ state?: OrderState }>().exec())?.state;
+          if (!now || !OPEN_ORDER_STATES.includes(now)) {
+            await this.plans
+              .updateOne({ _id: o.plan, order: o._id, state: { $ne: 'completed' } }, { $set: { state: 'planned' }, $unset: { order: 1 } })
+              .exec();
+            return false;
+          }
           this.logger.warn(`Discharge plan ${String(o.plan)} was still planned under order ${String(o._id)}; it follows the order now`);
           await this.plansService.closeReminder(String(o.plan));
           return true;

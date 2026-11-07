@@ -613,8 +613,9 @@ export class DischargeLeavingService {
    * Makes an ending whole from the stored stay, as the ending itself would have: an admission still in its bed ends
    * through `BedsService.discharge`; any other real admission goes to `BedsService.finishDischarge`, which ends one
    * whose bed was already freed, sets a status never set, and announces `bed.discharged` when none went for the stay.
-   * Then the plan completes with the kind, `discharge.completed` goes if it never did, and the plan is marked checked.
-   * A Bed Agent failure throws, before the mark, so the next pass tries again. True when it changed anything.
+   * Then the plan completes with the kind and, once it really is completed, `discharge.completed` goes if it never did
+   * and the plan is marked checked. A Bed Agent or patient-record failure throws, before the mark, so the next pass
+   * tries again. True when it changed anything.
    */
   private async finishEnding(
     plan: DischargePlanDocument,
@@ -639,7 +640,10 @@ export class DischargeLeavingService {
       changed = true;
     }
     const [current, ending] = await Promise.all([this.plans.findById(plan._id).exec(), order ? this.orders.findById(order._id).exec() : null]);
-    if (current && this.completedDue(current, ending) && (await this.sendCompleted(current, ending, kind, at, endingWhat(kind), this.completedKey(current, ending)))) {
+    // 13b review M5: `complete` logs a failure and carries on, so the end is announced, and the stay marked checked, only
+    // once the plan really is completed (as `resendCompleted` requires). Otherwise the next pass finishes it.
+    if (current?.state !== 'completed') return changed;
+    if (this.completedDue(current, ending) && (await this.sendCompleted(current, ending, kind, at, endingWhat(kind), this.completedKey(current, ending)))) {
       changed = true;
     }
     await this.plans.updateOne({ _id: plan._id }, { $set: { endingCheckedAt: new Date() } }).exec();

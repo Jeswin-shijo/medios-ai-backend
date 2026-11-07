@@ -49,6 +49,7 @@ describe('DischargeRepairService', () => {
   let leaving: DischargeLeavingService;
   let summary: DischargeSummaryService;
   let documents: DocumentsService;
+  let patientsSvc: PatientsService;
   let repair: DischargeRepairService;
   let caseId: string;
   let planId: string;
@@ -206,7 +207,7 @@ describe('DischargeRepairService', () => {
     plans = new DischargePlansService(reg, w.messages, rules, settings, m.DischargePlan, m.Admission, m.Bed, m.Ward, m.Case, m.TaskAlertItem, m.Patient);
     (plans as any).logger = logger;
     plans.clock = () => NOW;
-    const patients = new PatientsService(m.Patient);
+    patientsSvc = new PatientsService(m.Patient);
     const bedEvents = new BedEvents();
     bedAnnounced = [];
     bridged = [];
@@ -220,7 +221,7 @@ describe('DischargeRepairService', () => {
         }),
       );
     });
-    beds = new BedsService(m.Ward, m.Bed, m.Admission, patients, bedEvents, m.DischargeOrder);
+    beds = new BedsService(m.Ward, m.Bed, m.Admission, patientsSvc, bedEvents, m.DischargeOrder);
     lines = new DischargeLinesService(
       reg, w.messages, w.cases, m.DischargeOrder, m.DischargePlan, m.DischargeSummary, m.LabRequest, m.LabLine, m.PharmacyLine, m.FollowUpItem, m.Bill, m.ChargeLine,
     );
@@ -453,6 +454,50 @@ describe('DischargeRepairService', () => {
     await quietSecondPass();
   });
 
+  test('I1 (review): a newer order that leaves releases the old stop', async () => {
+    failing.add('discharge.cancelled');
+    const first = String((await orders.order(DOC, planId, homeNone()))._id);
+    await orders.cancel(DOC, first, 'Spiked a fever again');
+    failing.clear();
+    // The doctor re-orders, and that patient leaves: Pharmacy's discharge.completed already cancelled its waiting lines.
+    const second = await readyWithPass();
+    await leaving.left(NURSE, second);
+    await flush();
+    assert.deepEqual((await clocksOf(first)).map((c) => c.state), ['running', 'running']);
+    sends = [];
+
+    assert.equal(await repair.resendMissing(start), 1);
+    assert.deepEqual(sendsOf('discharge.cancelled').map((s) => [s.payload.orderId, s.key]), [[first, `discharge.cancelled:${first}:resend`]]);
+    assert.deepEqual((await clocksOf(first)).map((c) => c.state), ['met', 'met'], 'its clocks stop instead of escalating for ever');
+    assert.equal(await repair.resendMissing(start), 0);
+  });
+
+  test("I1 (review): a previous stay's left order on the same case doesn't block the stop", async () => {
+    // An earlier stay of the patient, on the same open case, ended long ago.
+    const oldBed = await m.Bed.create({ ward: wardId, label: 'GWA-30', number: 30, state: 'free' });
+    const oldStay = await m.Admission.create({
+      patient: w.patientId, patientUhid: w.patientUhid, patientName: 'Ravi Kumar', bed: oldBed._id, doctor: 'Dr. Shajin', department: 'General Medicine',
+      roomClass: 'general', expectedStayDays: 2, admittedAt: at(10, 10), admittedBy: NURSE.name, status: 'discharged', dischargedAt: at(12, 11),
+    });
+    const oldPlan = await m.DischargePlan.create({
+      admission: oldStay._id, case: caseId, patient: w.patientId, patientUhid: w.patientUhid, patientName: 'Ravi Kumar', bedLabel: 'GWA-30', wardName: WARD,
+      doctor: 'Dr. Shajin', targetDay: '2026-09-12', targetAt: at(12, 11), state: 'completed', completedKind: 'home', completedAt: at(12, 11), announcedAt: new Date(),
+    });
+    await m.DischargeOrder.create({
+      plan: oldPlan._id, admission: oldStay._id, case: caseId, patient: w.patientId, kind: 'home', state: 'left', plannedLeaveAt: at(12, 11), windowAt: at(12, 9),
+      diagnosis: DIAGNOSIS, orderedBy: { id: DOC.id, name: DOC.name }, orderedAt: at(12, 9), leftAt: at(12, 11), endedAs: 'home',
+      announced: ['discharge.ordered', 'discharge.window-opened', 'discharge.ready', 'discharge.summary-signed', 'discharge.completed'],
+    });
+    failing.add('discharge.cancelled');
+    const id = String((await orders.order(DOC, planId, homeNone()))._id);
+    await orders.cancel(DOC, id, 'Spiked a fever again');
+    failing.clear();
+
+    assert.equal(await repair.resendMissing(start), 1);
+    assert.deepEqual(sendsOf('discharge.cancelled').map((s) => s.payload.orderId), [id]);
+    assert.deepEqual((await clocksOf(id)).map((c) => c.state), ['met', 'met']);
+  });
+
   test('discharge.completed goes again from the order, or from the Left-without-discharge record with no order; never for a plan that never completed', async () => {
     const id = await readyWithPass();
     failing.add('discharge.completed');
@@ -581,6 +626,28 @@ describe('DischargeRepairService', () => {
     assert.equal(await repair.repairOrdersAndPlans(start), 0);
   });
 
+  test('M4 (review): a cancel that lands while the plan is put right never leaves the plan pointing at the cancelled order', async () => {
+    const id = String((await orders.order(DOC, planId, homeNone()))._id);
+    await m.DischargePlan.updateOne({ _id: planId }, { $set: { state: 'planned' }, $unset: { order: 1 } });
+    // The doctor cancels between the pass's read of the order and its plan write.
+    const plansModel = m.DischargePlan as any;
+    const real = plansModel.updateOne;
+    plansModel.updateOne = function (...args: unknown[]) {
+      delete plansModel.updateOne;
+      const write = real.apply(plansModel, args);
+      return { exec: async () => (await orders.cancel(DOC, id, 'Changed my mind'), write.exec()) };
+    };
+    try {
+      assert.equal(await repair.repairOrdersAndPlans(start), 0);
+    } finally {
+      delete plansModel.updateOne;
+    }
+    assert.equal((await stored(id)).state, 'cancelled');
+    const plan = await planOf();
+    assert.deepEqual([plan.state, plan.order], ['planned', undefined]);
+    assert.equal(await repair.repairOrdersAndPlans(start), 0);
+  });
+
   test('Task 8 M2: an orphan take-home order is cancelled ("Discharge order not saved"); one an order owns, or under 10 minutes old, is not', async () => {
     // A crash between placing the take-home order and saving the discharge order.
     const orphan = await w.takeHome.place(DOC, { patientId: w.patientId, caseId, plannedLeaveAt: new Date(NOW.getTime() + HOUR), lines: [pantoprazole40] });
@@ -700,6 +767,62 @@ describe('DischargeRepairService', () => {
     // And the nurse can end the first stay now.
     await leaving.left(NURSE, id);
     assert.equal((await stored(id)).state, 'left');
+  });
+
+  test('M2 (review): a failed patient read or write leaves the stay unchecked, and the next pass finishes it', async () => {
+    const id = await readyWithPass();
+    await crashLeft(id, 'admission-ended');
+    await flush();
+    // The patient record can't be read or written for a moment.
+    const blip = async () => {
+      throw new Error('database blip');
+    };
+    Object.assign(patientsSvc as any, { findOne: blip, setStatusIf: blip });
+    try {
+      await repair.repairEndings(NOW, start);
+    } finally {
+      delete (patientsSvc as any).findOne;
+      delete (patientsSvc as any).setStatusIf;
+    }
+    assert.equal((await patientOf()).status, 'Admitted');
+    assert.equal((await planOf()).endingCheckedAt, undefined, 'not marked checked, so it is tried again');
+    assert.ok(logged.some((l) => /database blip/.test(l)), logged.join(' | '));
+
+    assert.equal(await repair.repairEndings(NOW, start), 1);
+    await flush();
+    assert.equal((await patientOf()).status, 'Discharged');
+    const plan = await planOf();
+    assert.deepEqual([plan.state, !!plan.endingCheckedAt], ['completed', true]);
+    await quietSecondPass();
+  });
+
+  test("M5 (review): the stay's end is announced only once its plan is really completed", async () => {
+    const id = await readyWithPass();
+    await crashLeft(id, 'bed-freed');
+    await flush();
+    sends = [];
+    // The plan's completion fails once (the leaving service logs it and carries on).
+    const plansModel = m.DischargePlan as any;
+    const real = plansModel.updateOne;
+    plansModel.updateOne = function (filter: unknown, update: { $set?: { state?: string } }, ...rest: unknown[]) {
+      if (update?.$set?.state !== 'completed') return real.call(plansModel, filter, update, ...rest);
+      delete plansModel.updateOne;
+      return { exec: async () => Promise.reject(new Error('write conflict')) };
+    };
+    try {
+      await repair.repairEndings(NOW, start);
+    } finally {
+      delete plansModel.updateOne;
+    }
+    await flush();
+    assert.equal((await planOf()).state, 'ready');
+    assert.deepEqual(sendsOf('discharge.completed'), [], 'never for a plan that did not complete');
+    assert.equal((await admissionOf()).status, 'discharged', 'the stay itself was finished');
+
+    assert.equal(await repair.repairEndings(NOW, start), 1);
+    assert.equal((await planOf()).state, 'completed');
+    assert.deepEqual(sendsOf('discharge.completed').map((s) => s.payload.orderId), [id]);
+    await quietSecondPass();
   });
 
   test('a stale Left-without-discharge claim: left alone for 10 minutes, then undone while the stay is untouched, or finished when it already ended', async () => {

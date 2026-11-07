@@ -28,8 +28,9 @@ const hourKey = (d: Date) => `${isoDate(d)}T${String(d.getHours()).padStart(2, '
  * morning reminders, every open order's lines, then the repairs (re-sends, summaries, orders and plans, half-ended
  * stays), and the hourly snapshot when the clinic hour has turned. Every real hour (and at start-up) the snapshot too.
  * Each step logs its own failure and never stops the next; a pass is skipped while the previous one still runs. The
- * start stamp is taken once, at boot, and bounds the repairs: nothing from before the agent first ran is re-sent,
- * back-filled or repaired.
+ * start stamp is stored at boot and read again by every pass (R32, as Revenue's reconcile does), so a reseed that resets
+ * it while the API runs is honoured at once; it bounds the repairs: nothing from before it is re-sent, back-filled or
+ * repaired.
  */
 @Injectable()
 export class DischargeScheduler implements OnApplicationBootstrap, OnModuleDestroy {
@@ -41,8 +42,6 @@ export class DischargeScheduler implements OnApplicationBootstrap, OnModuleDestr
   private hourly = false;
   /** The clinic hour of the last snapshot this process took (or found already taken). */
   private snapped: string | null = null;
-  /** The start stamp, read once (a failed read is tried again by the next pass). */
-  private start: Promise<Date> | null = null;
 
   /** The clinic clock (R7); a spec replaces it. */
   clock: () => Date = () => clinicNow();
@@ -76,19 +75,14 @@ export class DischargeScheduler implements OnApplicationBootstrap, OnModuleDestr
   }
 
   /**
-   * When the Discharge Agent first ran against this database, stored once (`$setOnInsert`) and kept for the process:
-   * later boots read the same stamp. Callers at once share one read; a failed read is forgotten, to be tried again.
+   * When the Discharge Agent first ran against this database: stored by the first read (`$setOnInsert`, one indexed
+   * upsert), and read fresh every time, never kept for the process (13b review I2). A reseed deletes the counter and sets
+   * it after its own records, while an API keeps running; the next pass must see the new stamp, or it would re-send and
+   * repair the seeded records.
    */
-  startedAt(): Promise<Date> {
-    this.start ??= this.counters
-      .findOneAndUpdate({ key: DISCHARGE_START }, { $setOnInsert: { last: Date.now() } }, { upsert: true, new: true })
-      .exec()
-      .then((c) => new Date(c.last))
-      .catch((e: unknown) => {
-        this.start = null;
-        throw e;
-      });
-    return this.start;
+  async startedAt(): Promise<Date> {
+    const c = await this.counters.findOneAndUpdate({ key: DISCHARGE_START }, { $setOnInsert: { last: Date.now() } }, { upsert: true, new: true }).exec();
+    return new Date(c.last);
   }
 
   /** The minute pass; skipped while the previous one is still running. */

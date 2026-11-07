@@ -8,7 +8,7 @@ import { Patient as PatientRecord } from '../patients/schemas/patient.schema';
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
 import { Actor } from './actor';
-import { BedEvents } from './bed-events';
+import { BedChange, BedEvents } from './bed-events';
 import { AdmissionRequestInput } from './bed-types';
 import { BedsController } from './beds.controller';
 import { AdmitInput, BedsService } from './beds.service';
@@ -274,6 +274,87 @@ describe('BedsService', () => {
     assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
     assert.equal((await bed(b3)).state, 'occupied');
     assert.equal(events.calls, calls);
+  });
+
+  describe('finishDischarge (the Discharge Agent repairs a stay a crash cut short)', () => {
+    const AT = new Date(2026, 8, 26, 11);
+    /** Records every bed change the Coordinator bridge would hear. */
+    const listen = () => {
+      const heard: BedChange[] = [];
+      const sub = events.bedChanges$.subscribe((c) => heard.push(c));
+      return { heard, stop: () => sub.unsubscribe() };
+    };
+    /** Admitted to bed 1, then a crash right after `discharge` freed the bed: the admission is still active. */
+    const freedBed = async () => {
+      await service.hold(b1, A, suggestionId, 'Male');
+      const admission = await service.admit(b1, A, input());
+      await Bed.updateOne({ _id: b1 }, { $set: { state: 'cleaning', admission: null } }).exec();
+      return String(admission._id);
+    };
+
+    test('ends the stay at the given time, sets the status and announces it, once', async () => {
+      const id = await freedBed();
+      const { heard, stop } = listen();
+      assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), true);
+      const stored = await Admission.findById(id).lean().exec();
+      assert.deepEqual([stored.status, (stored.dischargedAt as Date).getTime(), stored.dischargedBy], ['discharged', AT.getTime(), B.name]);
+      assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Discharged');
+      assert.deepEqual(heard.map((c) => [c.kind, c.admissionId]), [['discharged', id]]);
+      assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), false, 'nothing left to do');
+      assert.equal(heard.length, 1);
+      stop();
+    });
+
+    test('never overwrites a status changed since, by a later visit', async () => {
+      const id = await freedBed();
+      await Patient.updateOne({ _id: patientId }, { $set: { status: 'Today' } }).exec();
+      assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), true);
+      assert.equal((await Admission.findById(id).lean().exec()).status, 'discharged');
+      assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Today');
+    });
+
+    test("never overwrites a re-admitted patient's status", async () => {
+      const id = await freedBed();
+      await Admission.updateOne({ _id: id }, { $set: { status: 'discharged', dischargedAt: AT } }).exec();
+      // Admitted again, to bed 2: the status says Admitted, and rightly.
+      await service.hold(b2, A, suggestionId, 'Male');
+      await service.admit(b2, A, input());
+      const { heard, stop } = listen();
+      assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), false);
+      assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
+      assert.deepEqual(heard, []);
+      stop();
+    });
+
+    test('a stay a transfer moved meanwhile is left alone: nothing ends, nothing is announced', async () => {
+      const id = await freedBed();
+      // The transfer moves the admission to bed 2 between the repair's read and its write.
+      const beds = Bed as any;
+      const exists = beds.exists;
+      beds.exists = function (...args: unknown[]) {
+        delete beds.exists;
+        const check = exists.apply(beds, args);
+        return { exec: async () => (await Admission.updateOne({ _id: id }, { $set: { bed: b2 } }).exec(), check.exec()) };
+      };
+      const { heard, stop } = listen();
+      try {
+        assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), false);
+      } finally {
+        delete beds.exists;
+        stop();
+      }
+      const stored = await Admission.findById(id).lean().exec();
+      assert.deepEqual([stored.status, String(stored.bed)], ['active', b2]);
+      assert.equal((await Patient.findById(patientId).lean().exec()).status, 'Admitted');
+      assert.deepEqual(heard, []);
+    });
+
+    test('a stay whose bed still holds it is not this repair\'s to end', async () => {
+      await service.hold(b1, A, suggestionId, 'Male');
+      const id = String((await service.admit(b1, A, input()))._id);
+      assert.equal(await service.finishDischarge(id, B, { at: AT, patientStatus: 'Discharged' }), false);
+      assert.equal((await Admission.findById(id).lean().exec()).status, 'active');
+    });
   });
 
   test('discharge a sample bed without admission', async () => {
