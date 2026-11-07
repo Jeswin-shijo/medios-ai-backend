@@ -31,7 +31,11 @@ const NOT_FINISHED = "The checklist isn't finished";
 const CHANGED = 'Something changed on the checklist';
 const PLAN_COMPLETE = 'This discharge is complete.';
 const ALREADY_LEFT = 'The patient has already left.';
-/** R45: a stay that ended with no gate pass (Left without discharge, a death) has none to reprint. */
+/**
+ * R45/R51: a stay with no valid gate pass to reprint: it ended with none (a death, Left without discharge with no pass),
+ * or it ended as Left without discharge even though a pass was printed while it was Ready (the patient walked out
+ * without a discharge, so that pass is not valid).
+ */
 const NO_PASS = 'No gate pass was printed for this discharge.';
 /** R44: a deceased patient is never marked Left without discharge. */
 const DEATH_IS_RELEASED = 'Use Body released for a death.';
@@ -142,8 +146,8 @@ export class DischargeLeavingService {
    * Prints the gate pass (Home, Transfer, Against advice) once the order is Ready, after reading the checklist again:
    * a change no agent announces (a charge on a final bill, say) must never print one. The first print takes the next
    * GP number; every print is recorded, and a later one is a REPRINT of the same pass. R45: once the patient has left,
-   * the stored pass reprints ("Left today"), with no Ready check and no new number; a stay that ended without one is
-   * 409. 403 for other roles than a nurse, the front desk or an admin; 400 for a death; 409 "The checklist isn't
+   * the stored pass reprints ("Left today"), with no Ready check and no new number; a stay that ended without one, or
+   * as Left without discharge (R51), is 409. 403 for other roles than a nurse, the front desk or an admin; 400 for a death; 409 "The checklist isn't
    * finished: <lines>".
    */
   async gatePass(actor: Actor, orderId: string): Promise<GatePassView> {
@@ -189,7 +193,8 @@ export class DischargeLeavingService {
    * falls back to the bills as they stand.
    */
   private async reprintLeft(order: DischargeOrderDocument): Promise<GatePassView> {
-    if (!order.gatePass?.number) throw new ConflictException(NO_PASS);
+    // R51: a patient who walked out without a discharge has no valid pass, even one printed while the order was Ready.
+    if (!order.gatePass?.number || order.endedAs === LEFT_WITHOUT) throw new ConflictException(NO_PASS);
     const [plan, admission] = await Promise.all([this.planOf(order.plan), this.admissionOf(order.admission)]);
     const printed = await this.orders
       .findOneAndUpdate({ _id: order._id, state: 'left', 'gatePass.number': order.gatePass.number }, { $push: { 'gatePass.printedAt': this.clock() } }, { new: true })

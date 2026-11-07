@@ -376,6 +376,24 @@ describe('DischargeLeavingService', () => {
     assert.equal((await m.CoordinatorCounter.findOne({ key: 'discharge-gatepass' }).lean<any>()).last, taken);
   });
 
+  test('R51: a pass printed while Ready is never reprinted once the stay ended as Left without discharge', async () => {
+    const id = await ready();
+    leaving.clock = () => at(26, 11, 20);
+    assert.equal((await leaving.gatePass(NURSE, id)).number, 'GP-0001');
+    // The patient walked out with the pass before Patient left was pressed: the nurse records Left without discharge.
+    leaving.clock = () => at(26, 13);
+    await leaving.leftWithoutDischarge(NURSE, planId, { reason: LWD_REASON, lastSeenAt: at(26, 12) });
+    const row = await stored(id);
+    assert.deepEqual([row.state, row.endedAs, row.gatePass.number], ['left', 'left-without-discharge', 'GP-0001']);
+    leaving.clock = () => at(26, 15);
+    await assert.rejects(leaving.gatePass(DESK, id), (e: unknown) => {
+      assert.ok(e instanceof ConflictException, String(e));
+      assert.equal((e as ConflictException).message, 'No gate pass was printed for this discharge.');
+      return true;
+    });
+    assert.equal((await stored(id)).gatePass.printedAt.length, 1, 'the refused reprint is not recorded');
+  });
+
   test('R49: a reprint after leaving is a faithful copy of the pass the patient left with', async () => {
     // Final with nothing due: the first print says so, and the pass stores it.
     const id = await ready(homeNone(), { state: 'final', totals: totals(4200, 4200) });

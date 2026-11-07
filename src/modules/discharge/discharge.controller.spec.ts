@@ -91,6 +91,14 @@ function bodyType(name: string): unknown {
   return (Reflect.getMetadata('design:paramtypes', DischargeController.prototype, name) as unknown[])[entry![1].index];
 }
 const throughPipe = (name: string, body: unknown) => pipe.transform(body, { type: 'body', metatype: bodyType(name) as never, data: '' });
+/** The type Nest validates a handler's @Query() against, and the query run through the pipe. */
+function queryType(name: string): unknown {
+  const args = (Reflect.getMetadata(ROUTE_ARGS_METADATA, DischargeController, name) ?? {}) as Record<string, { index: number }>;
+  const entry = Object.entries(args).find(([k]) => k.startsWith(`${RouteParamtypes.QUERY}:`));
+  assert.ok(entry, `${name} has a @Query()`);
+  return (Reflect.getMetadata('design:paramtypes', DischargeController.prototype, name) as unknown[])[entry![1].index];
+}
+const throughQuery = (name: string, query: unknown) => pipe.transform(query, { type: 'query', metatype: queryType(name) as never, data: '' });
 
 const PLAN = '507f1f77bcf86cd799439011';
 const ORDER_ID = '507f1f77bcf86cd799439012';
@@ -217,6 +225,21 @@ describe('DischargeController', () => {
     ]) {
       await assert.rejects(throughPipe('order', bad), BadRequestException, JSON.stringify(bad));
     }
+  });
+
+  test('R50: sign and save need `seen` on the HTTP body (400 without it); the service argument stays optional', async () => {
+    for (const body of [{}, { seen: '' }, { seen: 'yesterday' }]) {
+      await assert.rejects(throughPipe('signSummary', body), BadRequestException, `sign ${JSON.stringify(body)}`);
+      await assert.rejects(throughPipe('saveSummary', { ...body, sections: { diagnosis: 'CAP' } }), BadRequestException, `save ${JSON.stringify(body)}`);
+    }
+    assert.deepEqual(JSON.parse(JSON.stringify(await throughPipe('signSummary', { seen: T }))), { seen: T });
+    const saved = JSON.parse(JSON.stringify(await throughPipe('saveSummary', { sections: { diagnosis: 'CAP' }, seen: T })));
+    assert.deepEqual(saved, { sections: { diagnosis: 'CAP' }, seen: T });
+  });
+
+  test('M4: the queue search is trimmed like the ward and doctor filters', async () => {
+    const q = (await throughQuery('queue', { ward: '  General ward A ', doctor: ' Dr. Shajin ', q: '  ravi  ' })) as Record<string, unknown>;
+    assert.deepEqual([q.ward, q.doctor, q.q], ['General ward A', 'Dr. Shajin', 'ravi']);
   });
 
   test('each route calls its service with the actor first; a change answers with the plan\'s detail', async () => {

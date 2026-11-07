@@ -119,7 +119,7 @@ export class DischargeQueueQueryDto {
   @ApiPropertyOptional({ description: "The ward's name, as the rows show it" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) ward?: string;
   @ApiPropertyOptional({ description: "The admission's doctor, as the rows show it" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) doctor?: string;
   @ApiPropertyOptional({ enum: ['due', ...SHOWN_STATUSES] }) @IsOptional() @IsIn(['due', ...SHOWN_STATUSES]) status?: string;
-  @ApiPropertyOptional({ description: "Part of the patient's name or UHID, or of the bed label" }) @IsOptional() @IsString() @MaxLength(100) q?: string;
+  @ApiPropertyOptional({ description: "Part of the patient's name or UHID, or of the bed label" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) q?: string;
 }
 
 /** `PATCH /discharge/plans/:planId/target`: a day from today on (the service checks the day), and an optional note. */
@@ -149,12 +149,13 @@ export class DischargeTickDto {
 export class DischargeSummarySaveDto {
   @ApiPropertyOptional({ description: 'Section key to text' }) @IsOptional() @IsObject() sections?: Record<string, string>;
   @ApiPropertyOptional() @IsOptional() @IsString() course?: string;
-  @ApiPropertyOptional({ description: "The summary's updatedAt as the editor loaded it" }) @IsOptional() @IsISO8601() seen?: string;
+  /** R50: required on the HTTP body, so a doctor never saves over text they did not load (the service's own argument stays optional). */
+  @ApiProperty({ description: "The summary's updatedAt as the editor loaded it" }) @IsISO8601() seen: string;
 }
 
-/** `POST /discharge/orders/:id/summary/sign`. */
+/** `POST /discharge/orders/:id/summary/sign`. R50: `seen` is required, so a doctor never signs text they did not see. */
 export class DischargeSignDto {
-  @ApiPropertyOptional({ description: "The summary's updatedAt as the editor loaded it" }) @IsOptional() @IsISO8601() seen?: string;
+  @ApiProperty({ description: "The summary's updatedAt as the editor loaded it" }) @IsISO8601() seen: string;
 }
 
 /** `POST /discharge/plans/:planId/left-without-discharge`. */
