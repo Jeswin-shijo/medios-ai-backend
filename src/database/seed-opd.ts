@@ -22,6 +22,16 @@ export interface SeedDoctor {
   active: boolean;
 }
 
+/**
+ * The reception kiosk's demo cards, for patients not checked in yet, so the kiosk can be tried without real cards
+ * (seed.ts links them). The Discharge seed keeps these patients out of its inpatient stories (David Raj is its own story).
+ */
+export const DEMO_CARDS: readonly { cardId: string; uhid: string }[] = [
+  { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
+  { cardId: '0004567890', uhid: 'MHK202500325' }, // David Raj
+  { cardId: '04C8D9E0F1A2B3', uhid: 'MHK202500326' }, // Selvi A
+];
+
 export function buildDepartments(): SeedDepartment[] {
   const rows: [string, string, string, string, string][] = [
     ['gen-med', 'General Medicine', 'G', 'medical-services', '#1E6BFF'],

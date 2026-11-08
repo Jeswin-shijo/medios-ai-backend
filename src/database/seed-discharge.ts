@@ -36,6 +36,7 @@ import { DischargeOverviewService } from '../modules/discharge/discharge-overvie
 import { DischargePlansService } from '../modules/discharge/discharge-plans.service';
 import { DischargeSettingsService } from '../modules/discharge/discharge-settings.service';
 import { DischargeSummaryService } from '../modules/discharge/discharge-summary.service';
+import { atClinicTime } from '../modules/discharge/discharge-time';
 import { DISCHARGE_START } from '../modules/discharge/discharge.scheduler';
 import { DischargeOrder, DischargeOrderSchema, takeHomeOrderIds } from '../modules/discharge/schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanSchema } from '../modules/discharge/schemas/discharge-plan.schema';
@@ -101,6 +102,7 @@ import { TaskAlertItem, TaskAlertItemSchema } from '../modules/tasks-alerts/sche
 import { TimelineEvent, TimelineEventSchema } from '../modules/timeline/schemas/timeline.schema';
 import { TimelineService } from '../modules/timeline/timeline.service';
 import { User, UserRole, UserSchema } from '../modules/users/schemas/user.schema';
+import { DEMO_CARDS } from './seed-opd';
 
 // Loosely typed on purpose (see seed.ts).
 const model = (cls: { name: string }, schema: Schema): Model<any> => mongoose.models[cls.name] ?? mongoose.model(cls.name, schema);
@@ -109,6 +111,8 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 /** The earliest story moment, in minutes before now: the over-target stay's order. Earlier in the clinic day than this, every story moment is drawn closer to now. */
 const STORY_SPAN_MIN = 335;
+/** "08:05" for a clinic-clock moment. */
+const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 /** Made-up patients, made only when the hospital has too few free ones; a reseed removes them. */
 export const DISCHARGE_MARK = 'Seed: discharge demo';
 /** Patients of the other agents' stories, never used here even when free. */
@@ -341,6 +345,12 @@ const tab = (medicine: string, product: string, dose: number, frequency: LineInp
  * last, after seedRevenue: the stays are billed by Revenue's own services. Both agents' start stamps are set last, so
  * neither one-minute pass back-bills, re-sends or repairs a seeded record. No death, no Left without discharge, and no new
  * logins. `nowMs` is for tests, which pin the clock (Date) to it as well: the live services stamp their own records.
+ *
+ * Run it only from seed.ts, after the other seeds: it builds on their records and writes into other agents' collections
+ * (admissions, bills, take-home orders, follow-ups) through their services, which only those agents' own seeds replace. A
+ * standalone second run is unsupported: David Raj's second take-home amoxicillin would raise a red "Same medicine twice",
+ * and the seed stops on any red take-home flag. Seeded before the reminder time (Settings → Discharge, default 09:00) or
+ * early in the day, it prints one warning: the morning reminder waits for its time, and the story times are bunched.
  */
 export async function seedDischarge(clinicDay: string, nowMs: number = Date.now()): Promise<void> {
   if (Math.abs(Date.now() - nowMs) > 5 * MIN) throw new Error('Discharge seed: nowMs must be the clock now (a test pins Date to it): the live services stamp their records with it.');
@@ -432,7 +442,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   await w.escalations.ensureDefaults();
   // As in seedRevenue: the deposit and top-up listeners don't run on every bed day here; the seed calls them where a desk payment would.
   w.bills.onTotalsChanged.length = 0;
-  const { leaveMinutes } = await w.dischargeSettings.get();
+  const { leaveMinutes, reminderTime } = await w.dischargeSettings.get();
 
   // ---- The clinic clock -------------------------------------------------------------------------------
   const now = clinicNow();
@@ -440,6 +450,14 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
   // Early in the clinic day the stories are drawn closer to now, so every "earlier today" stays today.
   const scale = Math.max(0, Math.min(1, (now.getTime() - dayStart - MIN) / (STORY_SPAN_MIN * MIN)));
   const ago = (minutes: number) => new Date(now.getTime() - minutes * MIN * scale);
+  // Early in the day the demo is not whole: say so once (the reminder is never forced before its time, a state the live
+  // product never produces; its own pass raises it at the reminder time).
+  if (scale < 1 || now.getTime() < atClinicTime(clinicDay, reminderTime).getTime()) {
+    console.warn(
+      `⚠️ Discharge seed: seeded at ${hhmm(now)} (clinic clock), early in the day: the morning reminder won't show until ${reminderTime}; ` +
+        `story times are bunched together; before about 04:15, no stay is over target. Reseed after ${reminderTime} for the full story.`,
+    );
+  }
   /** Sets the Discharge services' clinic clock to `at` (R7); null puts the live clock back. */
   const clockAt = (at: Date | null) => {
     const c = at ? () => new Date(at.getTime()) : () => clinicNow();
@@ -478,18 +496,27 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
       ])
     ).flat().map(String),
   );
-  const outpatientsToday = new Set<string>((await M.Appointment.distinct('uhid', { date: clinicDay, status: { $ne: 'Cancelled' } })).map(String));
-  // Adults with no other agent's work on them, those with no outpatient visit today first.
-  const free = (await M.Patient.find({ detailsPending: { $ne: true }, address: { $ne: DISCHARGE_MARK } }).sort({ uhid: 1 }).lean<any[]>())
-    .filter((p) => !busy.has(String(p._id)) && (p.age ?? 0) >= 14 && !OTHER_STORIES.test(String(p.name).trim()))
-    .sort((a, b) => Number(outpatientsToday.has(a.uhid)) - Number(outpatientsToday.has(b.uhid)));
+  // Kept out too (R56): anyone in today's outpatient list (an inpatient being discharged is not also waiting in OPD), and the
+  // reception kiosk's demo-card patients (a check-in demo card must not belong to an inpatient).
+  const outpatientsToday = new Set<string>((await M.Appointment.distinct('uhid', { date: clinicDay, status: { $ne: 'Canceled' } })).map(String));
+  const kioskCards = new Set<string>(DEMO_CARDS.map((c) => c.uhid));
+  // Adults with no other agent's work on them.
+  const free = (await M.Patient.find({ detailsPending: { $ne: true }, address: { $ne: DISCHARGE_MARK } }).sort({ uhid: 1 }).lean<any[]>()).filter(
+    (p) =>
+      !busy.has(String(p._id)) &&
+      !outpatientsToday.has(p.uhid) &&
+      !kioskCards.has(p.uhid) &&
+      (p.age ?? 0) >= 14 &&
+      !OTHER_STORIES.test(String(p.name).trim()),
+  );
   // Made-up patients of an earlier run with no stay any more go; a hospital short of free patients gets new ones.
   await M.Patient.deleteMany({ address: DISCHARGE_MARK, _id: { $nin: await M.Admission.distinct('patient', { status: 'active' }) } });
   const spare = { Male: 0, Female: 0 };
   const take = async (gender: 'Male' | 'Female' | 'any') => {
     const i = free.findIndex((p) => gender === 'any' || p.gender === gender);
     if (i >= 0) return free.splice(i, 1)[0];
-    const g = gender === 'any' ? 'Female' : gender;
+    // A private room takes either: the gender with fewer made-up patients so far.
+    const g = gender === 'any' ? (spare.Male <= spare.Female ? 'Male' : 'Female') : gender;
     const made = SPARE_PATIENTS[g][spare[g]++];
     if (!made) throw new Error(`Discharge seed: not enough free ${g.toLowerCase()} patients.`);
     return (await w.patients.create({ name: made.name, age: made.age, gender: g, phone: `90000097${String(spare.Male + spare.Female).padStart(2, '0')}`, address: DISCHARGE_MARK })).toObject();

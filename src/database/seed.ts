@@ -43,7 +43,7 @@ import { seedRevenue } from './seed-revenue';
 import { seedScheduling } from './seed-scheduling';
 import { resolveDemoPassword } from './seed-password';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
-import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
+import { DEMO_CARDS, buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -132,11 +132,6 @@ async function seedOpd(doctorUserId: string) {
 }
 
 const MINUTE = 60_000;
-const DEMO_CARDS = [
-  { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
-  { cardId: '0004567890', uhid: 'MHK202500325' }, // David Raj
-  { cardId: '04C8D9E0F1A2B3', uhid: 'MHK202500326' }, // Selvi A
-];
 
 /**
  * The demo day's token queue, in step with its appointments: everyone who has

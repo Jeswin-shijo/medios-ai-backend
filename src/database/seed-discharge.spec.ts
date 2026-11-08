@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, mock, test } from 'node:test';
 import { Logger } from '@nestjs/common';
+import mongoose from 'mongoose';
+import { displayDate, displayDateTime } from '../common/utils/clinic-time';
 import { hourOf } from '../common/utils/series';
 import { AppointmentEvents } from '../modules/appointments/appointment-events';
 import { AgentRegistry } from '../modules/coordinator/agent-registry';
@@ -39,10 +41,10 @@ import { SettingsService } from '../modules/settings/settings.service';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../test/test-db';
 import { seedBeds } from './seed-beds';
 import { seedCoordinator } from './seed-coordinator';
-import { seedDischarge, wire } from './seed-discharge';
+import { DISCHARGE_MARK, seedDischarge, wire } from './seed-discharge';
 import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
-import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
+import { DEMO_CARDS, buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 import { seedPharmacy } from './seed-pharmacy';
 import { seedRevenue } from './seed-revenue';
 import { seedScheduling } from './seed-scheduling';
@@ -61,28 +63,36 @@ const DAY_START = new Date(2026, 8, 26, 0, 0, 0, 0);
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
 const DAVID = 'MHK202500325';
 const JAMES = 'MHK202500327';
+/** The real clock, kept before the spec mocks Date. */
+const RealDate = Date;
 
 describe('seedDischarge', () => {
   const m = models();
   const ids: Record<string, string> = {};
   let savedClinic: string | undefined;
   let log: string[] = [];
+  /** What the 10:00 seed warned about (nothing: the demo is whole by then). */
+  let warned: string[] = [];
   /** The logins before the Discharge seed ran (Scheduling adds the doctors'). */
   let usersBefore = 0;
 
-  /** Quiet console while seeding; returns what was logged. */
-  const quiet = async (work: () => Promise<void>): Promise<string[]> => {
-    const lines: string[] = [];
-    const real = console.log;
+  /** Quiet console while seeding; returns what was logged and what was warned. */
+  const quiet = async (work: () => Promise<void>): Promise<{ log: string[]; warn: string[] }> => {
+    const out = { log: [] as string[], warn: [] as string[] };
+    const [realLog, realWarn] = [console.log, console.warn];
     console.log = (...a: unknown[]) => {
-      lines.push(a.join(' '));
+      out.log.push(a.join(' '));
+    };
+    console.warn = (...a: unknown[]) => {
+      out.warn.push(a.join(' '));
     };
     try {
       await work();
     } finally {
-      console.log = real;
+      console.log = realLog;
+      console.warn = realWarn;
     }
-    return lines;
+    return out;
   };
 
   /** The fixtures seed.ts replaces before the agent seeds: a reseed starts from the same patients, appointments and records. */
@@ -110,8 +120,8 @@ describe('seedDischarge', () => {
     await quiet(() => seedRevenue(DAY, nowMs + GAP));
   };
 
-  /** Runs the Discharge seed at `nowMs` without CLINIC_DATE (the seed must not depend on it); returns its log. */
-  const runSeed = async (nowMs: number): Promise<string[]> => {
+  /** Runs the Discharge seed at `nowMs` without CLINIC_DATE (the seed must not depend on it); returns its log and warnings. */
+  const runSeed = async (nowMs: number): Promise<{ log: string[]; warn: string[] }> => {
     delete process.env.CLINIC_DATE;
     mock.timers.setTime(nowMs);
     try {
@@ -161,6 +171,13 @@ describe('seedDischarge', () => {
 
   before(async () => {
     await connectTestDb();
+    // Mongoose's staleness check (`readyState`) reads the real clock, but its driver adapter stamps each heartbeat with the
+    // global Date, which this spec mocks to a moment before the real date: from the first heartbeat after about 10 s the
+    // connection would look stale and every query would buffer until it timed out. This spec runs longer than that, so each
+    // heartbeat is stamped again with the real clock (this listener runs after mongoose's own).
+    mongoose.connection.getClient().on('serverHeartbeatSucceeded', () => {
+      (mongoose.connection as unknown as { _lastHeartbeatAt: number })._lastHeartbeatAt = RealDate.now();
+    });
     await resetTestDb();
     Logger.overrideLogger(false);
     savedClinic = process.env.CLINIC_DATE;
@@ -189,7 +206,7 @@ describe('seedDischarge', () => {
     await fixtures();
     await theRest(NOW);
     usersBefore = await m.User.countDocuments().exec();
-    log = await runSeed(SEED_NOW);
+    ({ log, warn: warned } = await runSeed(SEED_NOW));
   });
 
   after(async () => {
@@ -257,6 +274,14 @@ describe('seedDischarge', () => {
     assert.equal(summary.signedBy.name, 'Dr. Shajin');
     const doc = (await m.ClinicalDocument.findById(summary.documentId).lean<any>().exec())!;
     assert.deepEqual([doc.uhid, doc.status, doc.category, doc.title, doc.date], [DAVID, 'Signed', 'Discharge Summary', 'Discharge summary', '26 Sep 2026']);
+    // A15: signed on the clinic clock, at the signature (63 minutes before now), never the real day.
+    assert.equal(time(summary.signedAt), CLINIC_NOW.getTime() - 63 * MIN);
+    assert.equal(doc.signedOn, displayDateTime(new Date(CLINIC_NOW.getTime() - 63 * MIN)));
+    for (const s of await m.DischargeSummary.find({ signedAt: { $ne: null } }).lean<any[]>().exec()) {
+      const d = (await m.ClinicalDocument.findById(s.documentId).lean<any>().exec())!;
+      assert.deepEqual([d.status, d.date, d.signedOn, d.signedBy], ['Signed', displayDate(s.signedAt), displayDateTime(s.signedAt), 'Dr. Shajin'], `${s.kind} document`);
+      assert.match(d.signedOn, /^26 Sep 2026/);
+    }
 
     // His bill stays as seedRevenue left it: open, the final bill asked for, one line needing a price; so the bill line waits.
     const bill = (await m.Bill.findOne({ kind: 'admission', admission: order.admission }).lean<any>().exec())!;
@@ -273,6 +298,7 @@ describe('seedDischarge', () => {
     assert.ok(leave.dueAt.getTime() > SEED_NOW, 'not yet due');
     assert.equal(await m.Clock.countDocuments({ def: 'discharge-summary', ref: String(order._id) }).exec(), 0);
     assert.match(log.join('\n'), /✅ Discharge/);
+    assert.deepEqual(warned, [], 'the 10:00 seed is whole: no early-seed warning');
   });
 
   test('the queue has every state listed', async () => {
@@ -345,6 +371,28 @@ describe('seedDischarge', () => {
       assert.ok(s.counts.bedsFreeing >= s.counts.leftToday, 'beds freeing counts the stays that ended');
     }
     assert.deepEqual([snaps.at(-1)!.counts.clearing, snaps.at(-1)!.counts.ready, snaps.at(-1)!.counts.leftToday], [4, 1, 3]);
+  });
+
+  test("the story patients are neither in today's outpatient list nor the kiosk's demo cards", async () => {
+    const plans = await m.DischargePlan.find().lean<any[]>().exec();
+    const stories = plans.filter((p) => p.patientUhid !== DAVID && p.patientUhid !== JAMES);
+    assert.equal(stories.length, 10);
+    const outpatients = new Set(await m.Appointment.distinct('uhid', { date: DAY, status: { $ne: 'Canceled' } }).exec());
+    const cards = new Set(DEMO_CARDS.map((c) => c.uhid));
+    for (const p of stories) {
+      assert.ok(!outpatients.has(p.patientUhid), `${p.patientName} (${p.bedLabel}) has an outpatient visit today`);
+      assert.ok(!cards.has(p.patientUhid), `${p.patientName} (${p.bedLabel}) holds a kiosk demo card`);
+    }
+    // The kiosk's card patients are not inpatients, and the shortfall is made up through PatientsService, marked for a reseed.
+    for (const uhid of DEMO_CARDS.map((c) => c.uhid).filter((u) => u !== DAVID)) {
+      assert.equal(await m.Admission.countDocuments({ patientUhid: uhid, status: 'active' }).exec(), 0, uhid);
+    }
+    const made = await m.Patient.find({ address: DISCHARGE_MARK }).lean<any[]>().exec();
+    assert.ok(made.length >= 1, 'made-up patients fill the shortfall');
+    for (const p of made) {
+      assert.ok(stories.some((s) => s.patientUhid === p.uhid), `${p.name} is a story patient`);
+      assert.match(p.uhid, /^MHK\d{9}$/);
+    }
   });
 
   test('two Home and one Against advice left today, one over target; each has endedAs', async () => {
@@ -424,19 +472,34 @@ describe('seedDischarge', () => {
     const clocks = await m.Clock.find({ def: /^discharge-/ }).lean<any[]>().exec();
     assert.ok(clocks.length >= 8, `${clocks.length} discharge clocks`);
     const hay = (text: string) => text.toLowerCase();
+    // The story patients' phone numbers too: as stored, and as their last ten digits.
+    const storyPatients = await m.Patient.find({ _id: { $in: await m.DischargePlan.distinct('patient').exec() } }).select('phone').lean<any[]>().exec();
+    assert.equal(storyPatients.length, 12);
+    const phones = storyPatients.flatMap((p) => {
+      const raw = String(p.phone ?? '').trim();
+      const digits = raw.replace(/\D/g, '');
+      return raw.length >= 6 ? [raw, ...(digits.length >= 10 ? [digits.slice(-10)] : [])] : [];
+    });
+    assert.ok(phones.length >= 12, `${phones.length} phone forms`);
+    const noPhone = (text: string, what: string) => {
+      for (const ph of phones) assert.ok(!text.includes(ph), `${what} holds the phone ${ph}`);
+    };
     for (const msg of messages) {
       const text = hay(`${msg.summary} ${JSON.stringify(msg.payload ?? {})}`);
       for (const n of names) assert.ok(!text.includes(n.toLowerCase()), `${msg.type} names ${n}: ${msg.summary}`);
+      noPhone(text, `${msg.type}: ${msg.summary}`);
       assert.ok(msg.summary.length <= 140, msg.summary);
       assert.match(msg.summary, /^.+: .+ \((Home|Transfer|Against advice)\)$|^.+: Discharge (planned for|target moved to) \d{1,2} \w{3} \d{4}$/, msg.summary);
     }
     for (const a of alerts) {
       const text = hay(`${a.title} ${a.subtitle ?? ''}`);
       for (const n of names) assert.ok(!text.includes(n.toLowerCase()), `${a.link} names ${n}: ${a.title}`);
+      noPhone(text, `${a.link}: ${a.title}`);
     }
     for (const c of clocks) {
       const text = hay(c.detail ?? '');
       for (const n of names) assert.ok(!text.includes(n.toLowerCase()), `${c.def} names ${n}: ${c.detail}`);
+      noPhone(text, `${c.def}: ${c.detail}`);
     }
   });
 
@@ -559,6 +622,29 @@ describe('seedDischarge', () => {
       assert.deepEqual(await counts(), first);
       const shape = ((await wire().overview.queue()) as any[]).map((r) => `${r.status}:${r.kind ?? '-'}:${r.waitingKey ?? '-'}`).sort();
       assert.equal(shape.length, 9);
+    } finally {
+      mock.timers.setTime(SEED_NOW);
+    }
+  });
+
+  test('a seed early in the clinic day warns once and never forces the reminder; the 10:00 seed does not warn', async () => {
+    assert.deepEqual(warned, []);
+    // The next real day at 06:00: before the 09:00 reminder time (the stories still fit, scale 1).
+    const early = new Date(2026, 9, 30, 6, 0, 0, 0).getTime();
+    await fixtures();
+    await theRest(early);
+    try {
+      const { warn } = await runSeed(early + 2 * GAP);
+      assert.equal(warn.length, 1, warn.join('\n'));
+      assert.match(warn[0], /seeded at 06:00/);
+      assert.match(warn[0], /the morning reminder won't show until 09:00/);
+      assert.match(warn[0], /story times are bunched together/);
+      assert.match(warn[0], /before about 04:15, no stay is over target/);
+      assert.match(warn[0], /Reseed after 09:00 for the full story/);
+      // The due-today stay is there, but its reminder waits for its time.
+      const rows = (await wire().overview.queue()) as any[];
+      assert.equal(rows.filter((r) => r.status === 'due-today').length, 1);
+      assert.equal(await m.TaskAlertItem.countDocuments({ link: /^discharge-plan:.*:reminder$/ }).exec(), 0);
     } finally {
       mock.timers.setTime(SEED_NOW);
     }
