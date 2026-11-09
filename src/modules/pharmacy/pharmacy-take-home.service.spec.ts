@@ -305,6 +305,32 @@ describe('PharmacyTakeHomeService and the Discharge handlers', () => {
     assert.equal((await w.sent('pharmacy.cancelled')).length, 2);
   });
 
+  test('B3-M4: after a cancelled discharge, the same medicine on the ward is a red double again, not a continuation', async () => {
+    const ward = await wardOrder();
+    const wardLine = ward.lines[0].id;
+    await w.checks.approve(PHARM, wardLine, {});
+    const th = await place([enoxaparin60]);
+    await w.checks.approve(PHARM, th.lines[0].id, {});
+    // Issued: the patient holds the take-home supply.
+    await issue(th.lines[0].id);
+    assert.deepEqual(twice((await w.lineDoc(wardLine)).flags), [NOTE]);
+
+    await cancelled(caseId);
+    const order: any = await m.PharmacyOrder.findById(th.id).lean();
+    assert.ok(order.takeHomeCancelledAt, 'the take-home order is marked');
+    // The ward line is rechecked: a red double, so its approval no longer covers it and it goes back to To check.
+    const doc = await w.lineDoc(wardLine);
+    assert.deepEqual(twice(doc.flags), [RED_TWICE]);
+    assert.equal(doc.status, 'to-check');
+    // Another ward order of it reads red too, in the preview and once saved.
+    const preview = await w.orders.preview({ patientId: w.patientId, lines: [enoxaparin40] });
+    assert.ok(preview.lines[0].flags.some((f) => f.key === 'double.enoxaparin' && f.severity === 'red'), JSON.stringify(preview.lines[0].flags));
+    // A take-home order placed after the cancel (a new discharge order) is a continuation again.
+    const again = await place([enoxaparin60]);
+    assert.deepEqual(twice(again.lines[0].flags).filter((f) => f[1] === 'info'), [NOTE]);
+    assert.equal(((await m.PharmacyOrder.findById(again.id).lean()) as any).takeHomeCancelledAt, undefined);
+  });
+
   test('the handlers run twice and cancel once', async () => {
     const ward = await wardOrder([aspirin300]);
     const th = await place([amoxicillin500]);

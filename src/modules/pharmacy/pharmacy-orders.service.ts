@@ -72,7 +72,7 @@ export interface LineSpec {
 export interface RecheckResult {
   line: PharmacyLineDocument;
   newRed: Flag[];
-  reason: 'order' | 'prescription' | 'kidney' | 'procedure';
+  reason: 'order' | 'prescription' | 'kidney' | 'procedure' | 'discharge-cancelled';
 }
 
 export interface CreateOrderInput {
@@ -108,11 +108,15 @@ export interface OrderOptions {
 export type LineContext = Pick<CheckLine, 'caseId' | 'takeHome' | 'setting'>;
 
 /** The context of an order's lines. */
-export const orderContext = (o: { case: unknown; setting: PharmacySetting; takeHome?: boolean }): LineContext => ({
+export const orderContext = (o: { case: unknown; setting: PharmacySetting; takeHome?: boolean; takeHomeCancelledAt?: Date | null }): LineContext => ({
   caseId: String(o.case),
   setting: o.setting,
-  takeHome: !!o.takeHome,
+  // B3-M4: a take-home order whose discharge was cancelled no longer continues anything.
+  takeHome: !!o.takeHome && !o.takeHomeCancelledAt,
 });
+/** The order fields `orderContext` reads. */
+const CONTEXT_FIELDS = 'case setting takeHome takeHomeCancelledAt';
+type ContextFields = { case: Types.ObjectId; setting: PharmacySetting; takeHome?: boolean; takeHomeCancelledAt?: Date };
 
 export interface PreviewResult {
   patient: PatientFactsView;
@@ -198,7 +202,7 @@ export class PharmacyOrdersService {
       const own = isValidObjectId(input.replacingLineId) ? await this.lines.findOne({ _id: input.replacingLineId, patient: patient._id }).select('_id order').lean().exec() : null;
       if (!own) throw new BadRequestException('replacingLineId must be a medicine line of this patient');
       exclude.push(String(own._id));
-      const order = await this.orders.findById(own.order).select('case setting takeHome').lean<{ case: Types.ObjectId; setting: PharmacySetting; takeHome?: boolean }>().exec();
+      const order = await this.orders.findById(own.order).select(CONTEXT_FIELDS).lean<ContextFields>().exec();
       where ??= order ? orderContext(order) : undefined;
     }
     const drafts = await this.draftFlags(String(patient._id), facts, specs, exclude, where ?? (await this.directContext(String(patient._id))));
@@ -370,7 +374,7 @@ export class PharmacyOrdersService {
       .exec();
     const ids = [...new Set(docs.map((l) => String(l.order)))];
     const orders = ids.length
-      ? await this.orders.find({ _id: { $in: ids } }).select('case setting takeHome').lean<{ _id: Types.ObjectId; case: Types.ObjectId; setting: PharmacySetting; takeHome?: boolean }[]>().exec()
+      ? await this.orders.find({ _id: { $in: ids } }).select(CONTEXT_FIELDS).lean<(ContextFields & { _id: Types.ObjectId })[]>().exec()
       : [];
     const where = new Map(orders.map((o) => [String(o._id), orderContext(o)] as [string, LineContext]));
     return docs.map((doc) => ({ doc, check: { ...asCheckLine(doc), ...where.get(String(doc.order)) } }));

@@ -34,6 +34,11 @@ export class PharmacyOrder {
    * overnight (B3-I2).
    */
   @Prop({ type: Date }) dueFrom?: Date;
+  /**
+   * Real time, take-home orders only: the discharge it was for was cancelled (B3-M4). Its lines no longer carry a ward
+   * medicine on at home, so the checks treat them as ward lines: the same medicine on the ward is a red double again.
+   */
+  @Prop({ type: Date }) takeHomeCancelledAt?: Date;
   /** Clinic clock. */
   @Prop({ required: true, type: Date }) orderedAt: Date;
   /** Real time: set after pharmacy.ordered went out. */

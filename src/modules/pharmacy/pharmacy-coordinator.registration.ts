@@ -248,9 +248,22 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     });
   }
 
-  /** A discharge order was cancelled: only the waiting lines of the case's take-home orders are cancelled. */
+  /**
+   * A discharge order was cancelled: only the waiting lines of the case's take-home orders are cancelled. B3-M4: those
+   * take-home orders (the ones placed before the message) are then marked `takeHomeCancelledAt`, so a line already
+   * issued no longer reads as carrying a ward medicine on at home, and the patient's lines are checked again: the same
+   * medicine on the ward is a red double. Safe to run again: an order is marked once, and a recheck that changes
+   * nothing changes nothing.
+   */
   private onDischargeCancelled(messageId: string): Promise<void> {
-    return this.quietly('discharge.cancelled', messageId, (message) => this.cancelWaitingOn(message, { takeHome: true }, 'Discharge cancelled'));
+    return this.quietly('discharge.cancelled', messageId, async (message) => {
+      await this.cancelWaitingOn(message, { takeHome: true }, 'Discharge cancelled');
+      const placed = { case: message.case, takeHome: true, createdAt: { $lte: new Date(message.createdAt) } };
+      const orders = await this.orderDocs.find(placed).select('patient takeHomeCancelledAt').lean<{ _id: unknown; patient: unknown; takeHomeCancelledAt?: Date }[]>().exec();
+      if (!orders.length) return;
+      await this.orderDocs.updateMany({ ...placed, takeHomeCancelledAt: null }, { $set: { takeHomeCancelledAt: new Date() } }).exec();
+      for (const patient of new Set(orders.map((o) => String(o.patient)))) await this.orders.recheckPatient(patient, 'discharge-cancelled');
+    });
   }
 
   /**
