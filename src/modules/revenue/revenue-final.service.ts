@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { clinicNow } from '../../common/utils/clinic-time';
+import { clinicNow, displayTime } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { Appointment, AppointmentDocument } from '../appointments/schemas/appointment.schema';
@@ -30,9 +30,8 @@ const COLLECTED = ['collected', 'received', 'awaiting-validation', 'released'];
 const finalLink = (billId: unknown) => `revenue-bill:${String(billId)}:final`;
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 const list = (names: string[]) => (names.length > 4 ? `${names.slice(0, 4).join(', ')} and ${names.length - 4} more` : names.join(', '));
-const pad = (n: number) => String(n).padStart(2, '0');
-/** "14:30": a clinic-clock moment as a 24-hour time. */
-const hhmm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/** "02:30 PM": a clinic-clock moment in the app's 12-hour format (B3-M6). */
+const hhmm = (d: Date) => displayTime(d);
 const date = (v: unknown): Date | null => {
   const d = typeof v === 'string' || v instanceof Date ? new Date(v) : null;
   return d && !isNaN(d.getTime()) ? d : null;

@@ -393,7 +393,7 @@ describe('FinalBillService', () => {
     await deliver('discharge', 'discharge.window-opened', payload);
     await until(async () => (await finalTask(b._id)).length === 1 && (await running('revenue-final')).length === 1, 'the final request');
     const [task] = await finalTask(b._id);
-    assert.deepEqual([task.title, task.subtitle, task.status], [`Prepare final bill: ${b.number}`, 'Discharge ordered: leaving ~14:30', 'Pending']);
+    assert.deepEqual([task.title, task.subtitle, task.status], [`Prepare final bill: ${b.number}`, 'Discharge ordered: leaving ~02:30 PM', 'Pending']);
     assert.ok(!/Ravi/.test(task.title + task.subtitle), 'no name in the task title or subtitle');
     const [req] = await sent('revenue.final-requested');
     assert.equal(String((req.payload as any).billId), String(b._id));
@@ -414,7 +414,7 @@ describe('FinalBillService', () => {
     await order(adm._id, { plannedLeaveAt: new Date(2026, 8, 26, 14, 30) });
     await m.TaskAlertItem.deleteMany({ link: /:final$/ });
     assert.equal(await final.ensureFinalTask(String(b._id)), true);
-    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~14:30');
+    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~02:30 PM');
   });
 
   test('the desk route while an order is open gets the leaving subtitle', async () => {
@@ -423,7 +423,7 @@ describe('FinalBillService', () => {
     await order(adm._id);
     // POST /revenue/bills/:id/final/request calls request(actor, id) with no options.
     assert.equal(await final.request(DESK, String(b._id)), true);
-    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~16:05');
+    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~04:05 PM');
 
     // Once the patient has left, the stay's bill says so, even if the order was not yet marked as left.
     const gone = await m.Admission.create({ patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'discharged', admittedAt: T0, dischargedAt: new Date(), admittedBy: 'Nurse' });
@@ -439,9 +439,9 @@ describe('FinalBillService', () => {
     const warning = async () => (await final.prepare(DESK, String(b._id))).warnings.find((w) => w.kind === 'admission')?.text;
     assert.equal(await warning(), 'The patient is still admitted');
     const o = await order(adm._id);
-    assert.equal(await warning(), 'Discharge ordered, leaving ~16:05');
+    assert.equal(await warning(), 'Discharge ordered, leaving ~04:05 PM');
     await m.DischargeOrder.updateOne({ _id: o._id }, { $set: { state: 'ready', plannedLeaveAt: new Date(2026, 8, 27, 9, 0) } });
-    assert.equal(await warning(), 'Discharge ordered, leaving ~09:00');
+    assert.equal(await warning(), 'Discharge ordered, leaving ~09:00 AM');
     await m.DischargeOrder.updateOne({ _id: o._id }, { $set: { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: T0 } } });
     assert.equal(await warning(), 'The patient is still admitted', 'a cancelled order is not active');
     await order(new Types.ObjectId());

@@ -380,7 +380,7 @@ describe('RevenueReconcileService', () => {
     await age(m.Bill, waiting._id);
     await reconcile.reconcile();
     const [task] = await m.TaskAlertItem.find({ link: `revenue-bill:${bill._id}:final` }).lean();
-    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~14:30');
+    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~02:30 PM');
     assert.equal((await sent('revenue.final-requested')).length, 1);
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${waiting._id}:final` }), 0, 'no window yet: not asked for');
     await age(m.Bill, bill._id);
@@ -401,7 +401,7 @@ describe('RevenueReconcileService', () => {
     await age(m.Bill, continuation._id);
     await reconcile.reconcile();
     const [task] = await m.TaskAlertItem.find({ link: `revenue-bill:${continuation._id}:final` }).lean();
-    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~14:30');
+    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~02:30 PM');
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${settled._id}:final` }), 0);
   });
 
