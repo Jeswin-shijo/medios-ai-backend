@@ -246,11 +246,15 @@ export class DischargeRegistration implements OnModuleInit {
   /**
    * "Discharge complete" (ruling R18). 'n/a' when the case has no admission, or a sample one; 'pass' once the
    * admission's plan is completed, or the admission itself is discharged (a stay that ended before this agent,
-   * or by the old route, must not hold its case open); 'fail' otherwise.
+   * or by the old route, must not hold its case open); 'fail' otherwise. B2-M3: a case with no admission ref that a
+   * plan not yet completed points at (attached to it later) is 'fail', not 'n/a'.
    */
   private async closeCheck(caseId: string): Promise<CloseCheckResult> {
     const admissionId = (await this.cases.get(caseId))?.refs?.admissionId;
-    if (!admissionId || !Types.ObjectId.isValid(admissionId)) return 'n/a';
+    if (!admissionId || !Types.ObjectId.isValid(admissionId)) {
+      if (!Types.ObjectId.isValid(caseId)) return 'n/a';
+      return (await this.plans.exists({ case: new Types.ObjectId(caseId), state: { $ne: 'completed' } }).exec()) ? 'fail' : 'n/a';
+    }
     const admission = await this.admissions.findById(admissionId).select('status sample').lean<{ status: string; sample?: boolean }>().exec();
     if (admission?.sample) return 'n/a';
     if (admission?.status === 'discharged') return 'pass';

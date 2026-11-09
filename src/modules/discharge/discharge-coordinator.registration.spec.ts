@@ -305,6 +305,18 @@ describe('DischargeRegistration', () => {
     assert.equal(await closeCheck(otherCase), 'n/a', 'a sample admission');
   });
 
+  test('B2-M3: close check: a case with no admission ref fails while an open plan points at it, and is n/a once that plan completes', async () => {
+    const a = await admission();
+    // The plan was attached to this case later; the case never got the admission ref.
+    const p = await plan(a._id, 'ordered');
+    assert.equal(await closeCheck(), 'fail', 'an open plan on the case');
+    await m.DischargePlan.updateOne({ _id: p._id }, { $set: { state: 'completed' } });
+    assert.equal(await closeCheck(), 'n/a', 'completed');
+    // Another case's open plan does not hold this one.
+    await m.DischargePlan.updateOne({ _id: p._id }, { $set: { state: 'planned', case: new Types.ObjectId() } });
+    assert.equal(await closeCheck(), 'n/a');
+  });
+
   test('close check: an admission discharged before the Discharge Agent, with no plan, passes', async () => {
     const a = await admission({ status: 'discharged', dischargedAt: new Date(), dischargedBy: 'Nurse Anjali Thomas' });
     await cases.addRefs(caseId, { admissionId: String(a._id) });
