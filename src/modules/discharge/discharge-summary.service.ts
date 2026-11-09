@@ -345,15 +345,19 @@ export class DischargeSummaryService {
       edits.push(key);
     }
     if (courseText !== undefined && courseText !== (current.course?.text ?? '')) set.course = { text: courseText, source: 'staff' };
-    if (!Object.keys(set).length) return this.reread(current._id);
+    // B2-I1: the answer is the version this call read or wrote, never a re-read: a refresh landing after the write is a
+    // later version, and handing it back as "seen" would let the editor's next save overwrite text nobody saw.
+    if (!Object.keys(set).length) return this.summaries.hydrate(current);
     const update: Record<string, unknown> = { $set: set };
     if (edits.length) update.$addToSet = { edited: { $each: edits } };
-    const res = await this.summaries.updateOne({ _id: current._id, signedAt: null, ...(loaded ? { updatedAt: loaded } : {}) }, update).exec();
-    if (!res.matchedCount) {
+    const written = await this.summaries
+      .findOneAndUpdate({ _id: current._id, signedAt: null, ...(loaded ? { updatedAt: loaded } : {}) }, update, { new: true })
+      .exec();
+    if (!written) {
       const now = await this.summaries.findById(current._id).select('signedAt').lean<{ signedAt?: Date }>().exec();
       throw now?.signedAt ? new ConflictException(ALREADY_SIGNED) : changed();
     }
-    return this.reread(current._id);
+    return written;
   }
 
   /**
@@ -372,9 +376,17 @@ export class DischargeSummaryService {
     this.mayEdit(actor);
     const order = await this.openOrder(orderId);
     const loaded = seenAt(seen);
-    const s = await this.summaries.findOne({ order: order._id }).lean<LeanSummary>().exec();
+    let s = await this.summaries.findOne({ order: order._id }).lean<LeanSummary>().exec();
     if (!s) throw new NotFoundException(NOT_DRAFTED);
     if (s.signedAt) throw new ConflictException(SIGNED_ONCE);
+    // B2-M1: a never-signed summary follows the record first, so a result released while the editor was open is
+    // either in the signed text (no `seen`) or makes this 409 (the version the doctor saw is no longer the current one).
+    if (!s.versions?.length) {
+      await this.refreshDraft(s, order);
+      s = await this.summaries.findById(s._id).lean<LeanSummary>().exec();
+      if (!s) throw new NotFoundException(NOT_DRAFTED);
+      if (s.signedAt) throw new ConflictException(SIGNED_ONCE);
+    }
     if (loaded && time(s.updatedAt) !== loaded.getTime()) throw changed();
     const now = this.clock();
     const [plan, admission, patient] = await Promise.all([this.planOf(order), this.admissionOf(order), this.patientOf(order)]);
@@ -480,12 +492,15 @@ export class DischargeSummaryService {
     if (s.signedAt) throw new ConflictException(ALREADY_SIGNED);
     if (s.course?.source === 'staff') throw new ConflictException(STAFF_COURSE);
     const course = await this.courseOf(await this.record(order));
-    const res = await this.summaries.updateOne({ _id: s._id, signedAt: null, 'course.source': { $ne: 'staff' } }, { $set: { course } }).exec();
-    if (!res.matchedCount) {
+    // B2-I1: answered with the version written, never a re-read.
+    const written = await this.summaries
+      .findOneAndUpdate({ _id: s._id, signedAt: null, 'course.source': { $ne: 'staff' } }, { $set: { course } }, { new: true })
+      .exec();
+    if (!written) {
       const current = await this.summaries.findById(s._id).select('signedAt').lean<{ signedAt?: Date }>().exec();
       throw new ConflictException(current?.signedAt ? ALREADY_SIGNED : STAFF_COURSE);
     }
-    return this.reread(s._id);
+    return written;
   }
 
   /**

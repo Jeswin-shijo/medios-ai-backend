@@ -764,6 +764,123 @@ describe('DischargeSummaryService', () => {
     await assert.rejects(summary.save(DOC, id, {}, undefined, 'not a time'), BadRequestException);
   });
 
+  // ---------- B2-I1 / B2-M1: the answer is the version written; sign reads the record first ----------
+
+  /**
+   * Runs `land` once, right after the next call of one of `methods` on the summaries model resolves: the moment
+   * between a read or a write and the answer. Returns the undo.
+   */
+  const landAfter = (methods: string[], land: () => Promise<unknown>) => {
+    const model = m.DischargeSummary as any;
+    const saved = methods.map((name) => [name, Object.getOwnPropertyDescriptor(model, name)] as const);
+    let armed = true;
+    for (const name of methods) {
+      const real = model[name];
+      model[name] = function (this: unknown, ...args: unknown[]) {
+        const q = real.apply(this, args);
+        const exec = q.exec.bind(q);
+        q.exec = async () => {
+          const r = await exec();
+          if (armed) {
+            armed = false;
+            await land();
+          }
+          return r;
+        };
+        return q;
+      };
+    }
+    return () => {
+      for (const [name, d] of saved) {
+        if (d) Object.defineProperty(model, name, d);
+        else delete model[name];
+      }
+    };
+  };
+  /** A refresh from the record landing on the stored summary (a released result), straight on the collection. */
+  const refreshLands = (orderId: unknown) => () =>
+    m.DischargeSummary.collection.updateOne(
+      { order: new Types.ObjectId(String(orderId)) },
+      { $set: { 'sections.results': 'Refreshed meanwhile', updatedAt: new Date(Date.now() + 60_000) } },
+    );
+
+  test('B2-I1: save answers with the version it wrote, never a refresh that lands after the write', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const opened = (await summary.draft(id)).toObject() as any;
+    const undo = landAfter(['updateOne', 'findOneAndUpdate'], refreshLands(o._id));
+    let answer: any;
+    try {
+      answer = (await summary.save(DOC, id, { reason: 'Fever and cough' }, undefined, opened.updatedAt.toISOString())).toObject();
+    } finally {
+      undo();
+    }
+    assert.equal(answer.sections.reason, 'Fever and cough');
+    assert.equal(answer.sections.results, opened.sections.results, 'the refresh is not in the answer');
+    const s = await summaryOf(id);
+    assert.equal(s.sections.results, 'Refreshed meanwhile');
+    // So the editor's next save, with the version it was given, is refused rather than overwriting what it never saw.
+    assert.notEqual(answer.updatedAt.getTime(), s.updatedAt.getTime());
+    await assert.rejects(summary.save(DOC, id, { reason: 'Fever' }, undefined, answer.updatedAt.toISOString()), changedSince);
+  });
+
+  test('B2-I1: a save that changes nothing answers with the version it read', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const opened = (await summary.draft(id)).toObject() as any;
+    const undo = landAfter(['findOne'], refreshLands(o._id));
+    let answer: any;
+    try {
+      answer = (await summary.save(DOC, id, { reason: opened.sections.reason }, undefined, opened.updatedAt.toISOString())).toObject();
+    } finally {
+      undo();
+    }
+    assert.deepEqual([answer.sections.results, answer.updatedAt.getTime()], [opened.sections.results, opened.updatedAt.getTime()]);
+    assert.equal((await summaryOf(id)).sections.results, 'Refreshed meanwhile');
+  });
+
+  test('B2-I1: Redraft answers with the version it wrote', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const opened = (await summary.draft(id)).toObject() as any;
+    const undo = landAfter(['updateOne', 'findOneAndUpdate'], refreshLands(o._id));
+    let answer: any;
+    try {
+      answer = (await summary.redraftCourse(DOC, id)).toObject();
+    } finally {
+      undo();
+    }
+    assert.deepEqual(answer.course, { text: BARE_COURSE, source: 'rules' });
+    assert.equal(answer.sections.results, opened.sections.results, 'the refresh is not in the answer');
+    assert.equal((await summaryOf(id)).sections.results, 'Refreshed meanwhile');
+  });
+
+  test('B2-M1: a result released while the editor is open makes sign 409; reloaded, the signed text has it', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    const seen = (await summary.draft(id)).updatedAt!.toISOString();
+    // Released after the editor loaded the summary; nothing drafted again since.
+    await labRequest([{ test: 'crp', status: 'released', releasedAt: at(26, 10), results: [row('CRP', 3, 'mg/L')] }]);
+    await assert.rejects(summary.sign(DOC, id, seen), changedSince);
+    const s = await summaryOf(id);
+    assert.deepEqual([s.signedAt, s.sections.results], [undefined, 'CRP, 26 Sep 2026: 3 mg/L'], 'not signed; the summary follows the record');
+    assert.equal(await m.ClinicalDocument.countDocuments(), 0, 'no document');
+
+    await summary.sign(DOC, id, s.updatedAt.toISOString());
+    const [d] = await m.ClinicalDocument.find().lean<any[]>();
+    assert.match(d.description, /\nKey results\nCRP, 26 Sep 2026: 3 mg\/L\n/);
+  });
+
+  test('B2-M1: without a seen, sign signs the summary as the record has it now', async () => {
+    const o = await place(planId, homeNone());
+    const id = String(o._id);
+    await summary.draft(id);
+    await labRequest([{ test: 'crp', status: 'released', releasedAt: at(26, 10), results: [row('CRP', 3, 'mg/L')] }]);
+    await summary.sign(DOC, id);
+    const [d] = await m.ClinicalDocument.find().lean<any[]>();
+    assert.match(d.description, /\nKey results\nCRP, 26 Sep 2026: 3 mg\/L\n/);
+  });
+
   // ---------- R39: the note is its own section; R40: a template course follows the record ----------
 
   test('R39: the note is its own section, refreshed from the order (also after an edit during the AI wait), never in course.text', async () => {
