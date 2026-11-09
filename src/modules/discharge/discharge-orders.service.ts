@@ -89,7 +89,7 @@ export interface OrderPatch {
   note?: string;
   /** More take-home medicines, as another take-home order, while none of this order's is issued. */
   takeHome?: { lines: LineInput[] };
-  /** A follow-up, while none is stored on the order. */
+  /** A follow-up, while none is stored on the order, or the stored one no longer holds in Scheduling (R61 M6): it replaces it. */
   followUp?: FollowUpChoice;
 }
 
@@ -298,7 +298,8 @@ export class DischargeOrdersService {
   /**
    * While the patient is still in the bed: the planned time (a window not yet open moves with it, and opens now when
    * that is due), the diagnosis, condition and note; more take-home medicines as another take-home order while none of
-   * this order's is issued; and a follow-up while none is stored. Checked first, then placed and booked, then saved;
+   * this order's is issued; and a follow-up while none is stored, or in place of one Scheduling no longer holds as booked
+   * or waitlisted (R61 M6). Checked first, then placed and booked, then saved;
    * a failure after placing cancels the new take-home order.
    */
   async edit(actor: Actor, orderId: string, patch: OrderPatch): Promise<DischargeOrderDocument> {
@@ -335,7 +336,8 @@ export class DischargeOrdersService {
     const followUp = patch.followUp !== undefined ? followUpChoice(patch.followUp) : null;
     if (followUp) {
       if (LINE_RULE[order.kind]['follow-up'] === '-') throw new BadRequestException(`A ${KIND_LABEL[order.kind].toLowerCase()} order takes no follow-up.`);
-      if (order.followUp) throw new ConflictException('A follow-up is already booked. Change it in Scheduling.');
+      // R61 M6: a stored follow-up that no longer holds in Scheduling (missed, overdue, completed, gone) can be replaced.
+      if (order.followUp && (await this.lines.followUpHolds(order.followUp.followUpId))) throw new ConflictException('A follow-up is already booked. Change it in Scheduling.');
     }
 
     const leaving = planned ?? order.plannedLeaveAt;
@@ -351,7 +353,9 @@ export class DischargeOrdersService {
       const update: Record<string, unknown> = {};
       if (followUp) {
         const outcome = await this.followUps.order(actor, { patientId: String(order.patient), ...followUp });
-        filter.followUp = null;
+        // Matching the follow-up first read (none, or the one replaced), so two edits at once never both book.
+        if (order.followUp) filter['followUp.followUpId'] = order.followUp.followUpId;
+        else filter.followUp = null;
         Object.assign(set, { followUp: stored(outcome), noFollowUp: false });
       }
       if (placed) {

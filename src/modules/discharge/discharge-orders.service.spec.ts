@@ -657,6 +657,36 @@ describe('DischargeOrdersService', () => {
     near(opened.payload.leaveDueAt, toRealTime(at(26, 15)).getTime() + 120 * MIN, 'leaveDueAt');
   });
 
+  test('R61 M6: a follow-up no longer booked or waitlisted in Scheduling can be replaced by an edit; a live one cannot', async () => {
+    const o = await orders.order(DOC, planId, home());
+    const id = String(o._id);
+    const first = (await stored(id)).followUp;
+    assert.equal(first.status, 'booked');
+    // Booked: still 409.
+    await assert.rejects(orders.edit(DOC, id, { followUp: { inDays: 10, doctorId: String(shajin._id) } }), {
+      name: 'ConflictException', message: 'A follow-up is already booked. Change it in Scheduling.',
+    });
+    for (const status of ['Pending']) {
+      await m.FollowUpItem.updateOne({ _id: first.followUpId }, { $set: { status } });
+      await assert.rejects(orders.edit(DOC, id, { followUp: { inDays: 10, doctorId: String(shajin._id) } }), ConflictException, status);
+    }
+    // Missed in Scheduling: the doctor books a new one here, and it replaces the old on the order.
+    await m.FollowUpItem.updateOne({ _id: first.followUpId }, { $set: { status: 'Missed' } });
+    assert.equal((await stored(id)).lines.find((l: any) => l.key === 'follow-up').state, 'done', 'not refreshed yet');
+    await orders.edit(DOC, id, { followUp: { inDays: 10, doctorId: String(shajin._id) } });
+    let row = await stored(id);
+    assert.notEqual(row.followUp.followUpId, first.followUpId);
+    assert.deepEqual([row.followUp.status, row.noFollowUp], ['booked', false]);
+    assert.equal((await m.FollowUpItem.findById(row.followUp.followUpId).lean<any>()).status, 'Scheduled');
+    assert.equal(row.lines.find((l: any) => l.key === 'follow-up').state, 'done');
+    assert.equal(await m.FollowUpItem.countDocuments(), 2);
+    // Gone from Scheduling altogether: replaced too.
+    await m.FollowUpItem.deleteOne({ _id: row.followUp.followUpId });
+    await orders.edit(DOC, id, { followUp: { inDays: 14, doctorId: String(shajin._id) } });
+    row = await stored(id);
+    assert.equal((await m.FollowUpItem.findById(row.followUp.followUpId).lean<any>()).status, 'Scheduled');
+  });
+
   test('R29: once the window is open, the planned time cannot move past its target', async () => {
     // Ordered at 11:00 for 13:00: 13:00 less the 2 h target is the order time, so the window opens at 11:00.
     const o = await orders.order(DOC, planId, home({ plannedLeaveAt: at(26, 13), followUp: 'none' }));

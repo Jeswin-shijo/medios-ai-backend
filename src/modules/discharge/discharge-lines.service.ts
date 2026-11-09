@@ -455,6 +455,12 @@ export class DischargeLinesService {
     return entry({ key: 'take-home', state: 'done', detail: joined(TAKE_HOME_ENDED.map((s) => count(s) > 0 && `${count(s)} ${s}`)) });
   }
 
+  /** True while Scheduling's follow-up item is Scheduled (booked) or Pending (waitlisted): the order's follow-up still holds. */
+  async followUpHolds(followUpId: unknown): Promise<boolean> {
+    if (!isValidObjectId(followUpId)) return false;
+    return !!(await this.followUps.exists({ _id: followUpId, status: { $in: ['Scheduled', 'Pending'] } }).exec());
+  }
+
   /**
    * Not needed when the doctor said so. Otherwise done while Scheduling's follow-up is Scheduled (booked) or Pending
    * (on the waitlist: the desk will call with a time); anything else, or no follow-up at all, waits.
