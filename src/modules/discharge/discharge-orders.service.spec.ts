@@ -464,6 +464,23 @@ describe('DischargeOrdersService', () => {
     assert.equal((await w.sent('discharge.window-opened'))[0].summary, `${BED}: Discharge window opened (Died)`);
   });
 
+  test('B1-M4: a time of death before the admission is 400; at the admission it is taken', async () => {
+    const admission = await m.Admission.create({
+      patient: w.patientId, patientUhid: w.patientUhid, patientName: 'Ravi Kumar', bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3,
+      admittedAt: at(24, 10), admittedBy: 'Front Desk',
+    });
+    await m.DischargePlan.updateOne({ _id: planId }, { $set: { admission: admission._id } });
+    const died = (timeOfDeath: Date): OrderInput => ({ kind: 'died', diagnosis: 'Acute myocardial infarction', timeOfDeath, causeOfDeath: 'Cardiogenic shock' });
+    await assert.rejects(orders.order(DOC, planId, died(at(24, 9, 59))), (e: unknown) => {
+      assert.ok(e instanceof BadRequestException);
+      assert.equal((e as Error).message, 'The time of death cannot be before the admission (24 Sep 2026, 10:00 AM).');
+      return true;
+    });
+    assert.equal(await m.DischargeOrder.countDocuments(), 0);
+    const o = await orders.order(DOC, planId, died(at(24, 10)));
+    assert.equal((await stored(o._id)).timeOfDeath.getTime(), at(24, 10).getTime());
+  });
+
   test('a nurse cannot order', async () => {
     for (const who of [NURSE, DESK, PHARM]) {
       await assert.rejects(orders.order(who, planId, home()), ForbiddenException, who.name);

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { clinicNow, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
+import { clinicNow, displayDateTime, isoDate, parseIsoDay } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { BedsService } from '../beds/beds.service';
 import { CasesService } from '../coordinator/cases.service';
@@ -230,6 +230,13 @@ export class DischargeOrdersService {
     const { leaveMinutes } = await this.settings.get();
     const v = this.checkOrder(input, now, leaveMinutes);
     const plan = await this.planOf(planId);
+    if (v.timeOfDeath) {
+      // B1-M4: a death is within the stay.
+      const admitted = await this.plansService.admittedAt(plan.admission);
+      if (admitted && v.timeOfDeath.getTime() < admitted.getTime()) {
+        throw new BadRequestException(`The time of death cannot be before the admission (${displayDateTime(admitted)}).`);
+      }
+    }
     if (plan.state === 'completed') throw new ConflictException(PLAN_COMPLETE);
     if (await this.orders.exists({ plan: plan._id, state: { $in: LIVE_ORDER_STATES } }).exec()) throw new ConflictException(ALREADY_ORDERED);
     const caseId = await this.caseOf(plan);

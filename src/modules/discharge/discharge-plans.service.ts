@@ -276,6 +276,13 @@ export class DischargePlansService implements OnModuleInit, OnModuleDestroy {
     return marked.modifiedCount === 1;
   }
 
+  /** When the stay began (clinic clock), or null for an unknown admission. */
+  async admittedAt(admissionId: unknown): Promise<Date | null> {
+    if (!isValidObjectId(admissionId)) return null;
+    const a = await this.admissions.findById(admissionId).select('admittedAt').lean<{ admittedAt?: Date }>().exec();
+    return a?.admittedAt ? new Date(a.admittedAt) : null;
+  }
+
   /** Closes the plan's morning reminder, if it is open. Safe to repeat; a failure is logged, never thrown. */
   async closeReminder(planId: string): Promise<void> {
     try {
