@@ -34,7 +34,7 @@ import { ReceptionSession, ReceptionSessionSchema } from '../modules/reception/s
 import { OtpChallenge, OtpChallengeSchema } from '../modules/reception/schemas/otp-challenge.schema';
 import { formatTokenLabel, newSecret } from '../modules/reception/format';
 import { seedBeds } from './seed-beds';
-import { DEMO_CARDS, seedDemoCards } from './seed-cards';
+import { seedDemoCards } from './seed-cards';
 import { seedCoordinator } from './seed-coordinator';
 import { seedDischarge } from './seed-discharge';
 import { seedEr } from './seed-er';

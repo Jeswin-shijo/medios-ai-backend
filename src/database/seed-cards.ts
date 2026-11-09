@@ -1,13 +1,10 @@
 import { Model } from 'mongoose';
 import { PatientCardDocument } from '../modules/queue/schemas/patient-card.schema';
+import { DEMO_CARDS } from './seed-opd';
 import { cardIdCandidates } from '../modules/queue/patient-cards.service';
 
-/** Demo cards for patients not checked in yet, so the kiosk can be tried without real cards. */
-export const DEMO_CARDS = [
-  { cardId: '04A1B2C3', uhid: 'MHK202500324' }, // Rekha S
-  { cardId: '0004567890', uhid: 'MHK202500325' }, // David Raj
-  { cardId: '04C8D9E0F1A2B3', uhid: 'MHK202500326' }, // Selvi A
-];
+// The demo card list lives in seed-opd (the Discharge seed keeps these patients out of its stories).
+export { DEMO_CARDS };
 
 /**
  * Makes each demo card its patient's one active card, so the demo cards always work
