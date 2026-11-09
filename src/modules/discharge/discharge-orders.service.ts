@@ -329,7 +329,7 @@ export class DischargeOrdersService {
       if (!order.case) throw new ConflictException('This stay has no case for the take-home medicines. Order them from the Pharmacy Agent.');
       const ids = takeHomeOrderIds(order);
       if (ids.length && (await this.pharmacyLines.exists({ order: { $in: ids }, status: { $in: ['issued', 'stopped'] } }).exec())) {
-        throw new ConflictException('Take-home medicines were already issued. Order more from the Pharmacy Agent.');
+        throw new ConflictException('Take-home medicines were already issued. To add more, cancel the discharge order and order again.');
       }
     }
     const followUp = patch.followUp !== undefined ? followUpChoice(patch.followUp) : null;

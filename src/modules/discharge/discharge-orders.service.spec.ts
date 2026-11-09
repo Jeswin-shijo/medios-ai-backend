@@ -633,7 +633,10 @@ describe('DischargeOrdersService', () => {
     // Once a take-home medicine is issued, no more can be added here.
     const [issuedLine] = await linesOf(first);
     await m.PharmacyLine.updateOne({ _id: issuedLine._id }, { $set: { status: 'issued' } });
-    await assert.rejects(orders.edit(DOC, id, { takeHome: { lines: [omeprazole20] } }), ConflictException);
+    await assert.rejects(orders.edit(DOC, id, { takeHome: { lines: [omeprazole20] } }), {
+      name: 'ConflictException',
+      message: 'Take-home medicines were already issued. To add more, cancel the discharge order and order again.',
+    });
     assert.equal((await takeHomes()).length, 2);
     // Bad values are 400.
     await assert.rejects(orders.edit(DOC, id, { diagnosis: '' }), BadRequestException);
