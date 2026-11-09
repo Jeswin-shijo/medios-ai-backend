@@ -100,6 +100,12 @@ const given = (v: unknown) => v !== undefined && v !== null && v !== '';
 const by = (actor: Actor) => ({ id: actor.id, name: actor.name });
 const isDuplicate = (e: unknown) => (e as { code?: number })?.code === DUPLICATE_KEY;
 
+/**
+ * B3-I2: the real moment before which a take-home order's check and issue are not due: the planned leaving time (clinic
+ * clock, as real time) less the order-to-leaving target, so an evening order for tomorrow pages nobody overnight.
+ */
+const takeHomeDueFrom = (plannedLeaveAt: Date, leaveMinutes: number): Date => new Date(toRealTime(plannedLeaveAt).getTime() - leaveMinutes * MIN_MS);
+
 /** Trimmed text of `min` to `max` characters, or 400. */
 function text(v: unknown, field: string, min: number, max: number): string {
   if (typeof v !== 'string') throw new BadRequestException(`${field} must be text.`);
@@ -230,7 +236,11 @@ export class DischargeOrdersService {
     if (v.takeHomeLines && !caseId) throw new ConflictException('This stay has no case for the take-home medicines. Order them from the Pharmacy Agent.');
 
     const placed = v.takeHomeLines
-      ? (await this.takeHome.place(actor, { patientId: String(plan.patient), caseId: caseId!, plannedLeaveAt: v.plannedLeaveAt, lines: v.takeHomeLines })).id
+      ? (
+          await this.takeHome.place(actor, {
+            patientId: String(plan.patient), caseId: caseId!, plannedLeaveAt: v.plannedLeaveAt, lines: v.takeHomeLines, dueFrom: takeHomeDueFrom(v.plannedLeaveAt, leaveMinutes),
+          })
+        ).id
       : null;
     let saved: DischargeOrderDocument;
     try {
@@ -321,8 +331,13 @@ export class DischargeOrdersService {
       if (order.followUp) throw new ConflictException('A follow-up is already booked. Change it in Scheduling.');
     }
 
+    const leaving = planned ?? order.plannedLeaveAt;
     const placed = lines
-      ? (await this.takeHome.place(actor, { patientId: String(order.patient), caseId: String(order.case), plannedLeaveAt: planned ?? order.plannedLeaveAt, lines })).id
+      ? (
+          await this.takeHome.place(actor, {
+            patientId: String(order.patient), caseId: String(order.case), plannedLeaveAt: leaving, lines, dueFrom: takeHomeDueFrom(leaving, leaveMinutes),
+          })
+        ).id
       : null;
     try {
       const filter: Record<string, unknown> = { _id: order._id, state: { $in: OPEN_ORDER_STATES } };
@@ -353,6 +368,13 @@ export class DischargeOrdersService {
     if (placed) await this.lineWaits(order, 'take-home');
     if (followUp) await this.lineWaits(order, 'follow-up');
     if (planned) {
+      // B3-I2, B1-M9: Pharmacy's take-home orders follow the new time, and their check and issue wait for the new window.
+      const ids = takeHomeOrderIds(order).map(String).filter((x) => x !== placed);
+      if (ids.length) {
+        await this.takeHome
+          .setPlannedLeave(ids, planned, takeHomeDueFrom(planned, leaveMinutes))
+          .catch((e: Error) => this.logger.warn(`Discharge order ${String(order._id)}: Pharmacy's leaving time not moved (${e.message})`));
+      }
       this.touchBeds();
       // A window not open yet moves with the planned time; one opened, or started early, stays.
       if (!order.windowOpenedAt && !order.startedNow) {

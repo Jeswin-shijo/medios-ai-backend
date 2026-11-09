@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import type { Actor } from '../beds/actor';
@@ -20,6 +20,8 @@ export const TAKE_HOME_NOTE = 'Take-home medicines';
  */
 @Injectable()
 export class PharmacyTakeHomeService {
+  private readonly logger = new Logger(PharmacyTakeHomeService.name);
+
   constructor(
     private readonly orders: PharmacyOrdersService,
     private readonly checks: PharmacyChecksService,
@@ -32,15 +34,57 @@ export class PharmacyTakeHomeService {
     return this.orders.preview({ patientId: input.patientId, lines: input.lines }, this.context(input.caseId));
   }
 
-  /** Places the take-home order on the case: Ward, urgent, with the planned leaving time (clinic clock). */
-  async place(actor: Actor, input: { patientId: string; caseId: string; plannedLeaveAt: Date; lines: LineInput[] }): Promise<PharmacyOrderView> {
+  /**
+   * Places the take-home order on the case: Ward, urgent, with the planned leaving time (clinic clock). `dueFrom` (real
+   * time) is the start of the discharge window: no check or issue of this order is due before it (B3-I2), so an
+   * evening order for tomorrow pages nobody overnight. Without it the urgent targets apply as for any ward order.
+   */
+  async place(actor: Actor, input: { patientId: string; caseId: string; plannedLeaveAt: Date; lines: LineInput[]; dueFrom?: Date }): Promise<PharmacyOrderView> {
     const at = input.plannedLeaveAt;
     if (!(at instanceof Date) || isNaN(at.getTime())) throw new BadRequestException('plannedLeaveAt must be a valid date');
+    const from = input.dueFrom instanceof Date && !isNaN(input.dueFrom.getTime()) ? input.dueFrom : undefined;
     return this.orders.order(
       actor,
       { patientId: input.patientId, priority: 'urgent', note: TAKE_HOME_NOTE, lines: input.lines },
-      { setting: 'Ward', takeHome: true, plannedLeaveAt: at, caseId: String(input.caseId) },
+      { setting: 'Ward', takeHome: true, plannedLeaveAt: at, caseId: String(input.caseId), ...(from ? { dueFrom: from } : {}) },
     );
+  }
+
+  /**
+   * The doctor moved the planned leaving time (B1-M9, B3-I2): each take-home order among `orderIds` takes the new time
+   * (clinic clock) and the new `dueFrom` (real time; unset when not given), its open rounds are re-synced, and the start
+   * message of each round whose due time moved goes again under its own key, so the running clock moves with it. Any
+   * other order is never touched. Returns how many orders it changed. Never throws: a failure is logged.
+   */
+  async setPlannedLeave(orderIds: string[], at: Date, dueFrom?: Date): Promise<number> {
+    if (!(at instanceof Date) || isNaN(at.getTime())) return 0;
+    const from = dueFrom instanceof Date && !isNaN(dueFrom.getTime()) ? dueFrom : null;
+    let changed = 0;
+    for (const id of [...new Set(orderIds.map(String))].filter((x) => isValidObjectId(x))) {
+      try {
+        const before = await this.orderDocs
+          .findOneAndUpdate(
+            { _id: id, takeHome: true },
+            from ? { $set: { plannedLeaveAt: at, dueFrom: from } } : { $set: { plannedLeaveAt: at }, $unset: { dueFrom: 1 } },
+          )
+          .lean<{ checkDueAt?: Date; issueDueAt?: Date }>()
+          .exec();
+        if (!before) continue;
+        changed += 1;
+        await this.orders.syncRounds(id);
+        const after = await this.orderDocs.findById(id).select('checkOpen checkDueAt issueOpen issueDueAt').lean<PharmacyOrder>().exec();
+        const tag = `leave:${at.getTime()}:${Date.now()}`;
+        for (const clock of ['check', 'issue'] as const) {
+          const was = before[`${clock}DueAt`];
+          const now = after?.[`${clock}DueAt`];
+          if (!after?.[`${clock}Open`] || !now || (was && new Date(was).getTime() === new Date(now).getTime())) continue;
+          await this.orders.resendStart(id, clock, tag);
+        }
+      } catch (e) {
+        this.logger.warn(`Take-home order ${id}: the planned leaving time was not moved (${(e as Error).message})`);
+      }
+    }
+    return changed;
   }
 
   /**

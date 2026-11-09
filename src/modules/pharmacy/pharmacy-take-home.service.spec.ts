@@ -168,6 +168,42 @@ describe('PharmacyTakeHomeService and the Discharge handlers', () => {
     assert.deepEqual([direct.lines[0].takeHome, 'plannedLeaveAt' in direct.lines[0]], [false, false]);
   });
 
+  test('B3-I2: a take-home check and issue are never due before dueFrom; setPlannedLeave moves them and the running clock', async () => {
+    const MIN = 60_000;
+    const from = new Date(Date.now() + 12 * 60 * MIN);
+    const v = await w.takeHome.place(DOC, { patientId: w.patientId, caseId, plannedLeaveAt: LEAVE, lines: [amoxicillin500], dueFrom: from });
+    let doc: any = await m.PharmacyOrder.findById(v.id).lean();
+    assert.deepEqual([doc.checkDueAt.getTime(), new Date(doc.dueFrom).getTime()], [from.getTime(), from.getTime()]);
+    assert.equal((await m.Clock.findOne({ def: 'pharmacy-check', ref: `${v.id}:c1` }).lean<any>())!.dueAt.getTime(), from.getTime());
+    await w.checks.approve(PHARM, v.lines[0].id, {});
+    doc = await m.PharmacyOrder.findById(v.id).lean();
+    assert.equal(doc.issueDueAt.getTime(), from.getTime());
+    assert.equal((await m.Clock.findOne({ def: 'pharmacy-issue', ref: `${v.id}:i1` }).lean<any>())!.dueAt.getTime(), from.getTime());
+
+    // The leaving time moves two hours on: the order, its due time and the running clock move with it (B1-M9 too).
+    const later = new Date(from.getTime() + 120 * MIN);
+    const leaveLater = new Date(LEAVE.getTime() + 120 * MIN);
+    assert.equal(await w.takeHome.setPlannedLeave([v.id], leaveLater, later), 1);
+    doc = await m.PharmacyOrder.findById(v.id).lean();
+    assert.deepEqual([new Date(doc.plannedLeaveAt).getTime(), new Date(doc.dueFrom).getTime(), doc.issueDueAt.getTime()], [leaveLater.getTime(), later.getTime(), later.getTime()]);
+    assert.equal((await m.Clock.findOne({ def: 'pharmacy-issue', ref: `${v.id}:i1`, state: 'running' }).lean<any>())!.dueAt.getTime(), later.getTime());
+    assert.equal((await w.orders.get(v.id)).lines[0].plannedLeaveAt, leaveLater.toISOString(), "Pharmacy's own view shows the new time");
+    assert.equal(await m.Clock.countDocuments({ def: 'pharmacy-issue' }), 1, 'the same clock moved; none was added');
+
+    // Leaving within the hour: the priority's target again.
+    const line = await w.lineDoc(v.lines[0].id);
+    await w.takeHome.setPlannedLeave([v.id], LEAVE, new Date(Date.now() - 60 * MIN));
+    doc = await m.PharmacyOrder.findById(v.id).lean();
+    assert.equal(doc.issueDueAt.getTime(), new Date(line.issueFrom).getTime() + 60 * MIN);
+    assert.equal((await m.Clock.findOne({ def: 'pharmacy-issue', ref: `${v.id}:i1`, state: 'running' }).lean<any>())!.dueAt.getTime(), doc.issueDueAt.getTime());
+
+    // Another kind of order is never touched.
+    const ward = await wardOrder([aspirin300]);
+    assert.equal(await w.takeHome.setPlannedLeave([ward.id, 'not-an-id'], leaveLater, later), 0);
+    const wardDoc: any = await m.PharmacyOrder.findById(ward.id).lean();
+    assert.deepEqual([wardDoc.plannedLeaveAt, wardDoc.dueFrom], [undefined, undefined]);
+  });
+
   test('place goes through the order flow: a red allergy needs a reason, and the case must be the open case of this patient', async () => {
     await m.Patient.updateOne({ _id: w.patientId }, { allergies: ['Penicillin'] });
     await assert.rejects(() => place([amoxicillin500]), { status: 400, message: 'Confirm the allergy for Amoxicillin with a reason, or remove it' });

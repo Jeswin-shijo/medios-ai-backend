@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Types } from 'mongoose';
+import { clinicNow } from '../../common/utils/clinic-time';
 import { DOC, PHARM, World, amoxicillin500, buildWorld, enoxaparin60, omeprazole20, pantoprazole40 } from '../../test/pharmacy-fixtures';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AppointmentEvents } from '../appointments/appointment-events';
@@ -275,6 +276,56 @@ describe('DischargeOrdersService', () => {
       ['discharge-leave', 'running', new Date(opened.payload.leaveDueAt).getTime()],
       ['discharge-summary', 'running', new Date(opened.payload.summaryDueAt).getTime()],
     ]);
+  });
+
+  // ---------- B3-I2: take-home clocks wait for the window ----------
+
+  /** The take-home order's Pharmacy clock of `def` (check or issue), first round. */
+  const pharmacyClock = async (def: 'check' | 'issue') => {
+    const [th] = await takeHomes();
+    return m.Clock.findOne({ def: `pharmacy-${def}`, ref: `${String(th._id)}:${def === 'check' ? 'c' : 'i'}1` }).lean<any>();
+  };
+
+  test('B3-I2: an evening order for 10:00 tomorrow starts no Pharmacy clock due before 08:00 tomorrow', async () => {
+    process.env.CLINIC_DATE = '2026-09-26';
+    orders.clock = () => EVENING;
+    await orders.order(DOC, planId, tomorrow({ takeHome: { lines: [pantoprazole40] } }));
+    const realWindow = toRealTime(at(27, 8)).getTime();
+    const [th] = await takeHomes();
+    near(th.dueFrom, realWindow, 'dueFrom');
+    near((await pharmacyClock('check')).dueAt, realWindow, 'check due');
+    // Approved tonight: the issue waits for the window too.
+    const [line] = await linesOf(th._id);
+    await w.checks.approve(PHARM, String(line._id), {});
+    near((await pharmacyClock('issue')).dueAt, realWindow, 'issue due');
+    // Nobody is paged overnight.
+    assert.equal(await w.clocks.checkDue(new Date(realWindow - 2 * MIN)), 0);
+    assert.equal(await m.Escalation.countDocuments(), 0);
+  });
+
+  test('B3-I2: a same-day order keeps the Pharmacy targets', async () => {
+    process.env.CLINIC_DATE = '2026-09-26';
+    const now = clinicNow();
+    orders.clock = () => now;
+    await orders.order(DOC, planId, home({ plannedLeaveAt: new Date(now.getTime() + 60 * MIN), followUp: 'none' }));
+    const [th] = await takeHomes();
+    const [line] = await linesOf(th._id);
+    // Urgent: checked within 60 minutes of the order, as any ward order.
+    assert.equal((await pharmacyClock('check')).dueAt.getTime(), new Date(line.enteredCheckAt).getTime() + 60 * MIN);
+    assert.ok(new Date(th.dueFrom).getTime() < Date.now(), 'the window is already open');
+  });
+
+  test('B3-I2: editing the planned time moves the take-home due times and Pharmacy\'s leaving time', async () => {
+    process.env.CLINIC_DATE = '2026-09-26';
+    orders.clock = () => EVENING;
+    const o = await orders.order(DOC, planId, tomorrow({ takeHome: { lines: [pantoprazole40] } }));
+    near((await pharmacyClock('check')).dueAt, toRealTime(at(27, 8)).getTime(), 'check due before');
+    await orders.edit(DOC, String(o._id), { plannedLeaveAt: at(27, 12) });
+    const [th] = await takeHomes();
+    assert.equal(new Date(th.plannedLeaveAt).getTime(), at(27, 12).getTime(), "Pharmacy's leaving time follows (B1-M9)");
+    near(th.dueFrom, toRealTime(at(27, 10)).getTime(), 'dueFrom after');
+    near((await pharmacyClock('check')).dueAt, toRealTime(at(27, 10)).getTime(), 'check due after');
+    assert.equal(await m.Clock.countDocuments({ def: 'pharmacy-check' }), 1);
   });
 
   test('Start now opens it at once', async () => {

@@ -90,6 +90,8 @@ export interface CreateOrderInput {
   takeHome?: boolean;
   /** Clinic clock; take-home orders only. */
   plannedLeaveAt?: Date;
+  /** Real time; take-home orders only: no check or issue is due before it. */
+  dueFrom?: Date;
 }
 
 /** Internal options of `order` (the public route passes none): the Discharge Agent's take-home order uses them. */
@@ -97,6 +99,8 @@ export interface OrderOptions {
   setting?: PharmacySetting;
   takeHome?: boolean;
   plannedLeaveAt?: Date;
+  /** Real time; take-home only: no check or issue is due before it (see the order schema). */
+  dueFrom?: Date;
   caseId?: string;
 }
 
@@ -169,8 +173,8 @@ export class PharmacyOrdersService {
   sendDone(orderId: string, clock: 'check' | 'issue', round: number): Promise<void> {
     return this.rounds.sendDone(orderId, clock, round);
   }
-  resendStart(orderId: string, clock: 'check' | 'issue'): Promise<boolean> {
-    return this.rounds.resendStart(orderId, clock);
+  resendStart(orderId: string, clock: 'check' | 'issue', keySuffix?: string): Promise<boolean> {
+    return this.rounds.resendStart(orderId, clock, keySuffix);
   }
   announceOrdered(order: PharmacyOrderDocument): Promise<boolean> {
     return this.rounds.announceOrdered(order);
@@ -226,7 +230,7 @@ export class PharmacyOrdersService {
 
     const order = await this.createOrder({
       patient, priority: input.priority, orderedBy: { id: actor.id, name: actor.name }, note: input.note, source: 'order',
-      setting: opts.setting, caseId: opts.caseId, takeHome: opts.takeHome, plannedLeaveAt: opts.plannedLeaveAt,
+      setting: opts.setting, caseId: opts.caseId, takeHome: opts.takeHome, plannedLeaveAt: opts.plannedLeaveAt, dueFrom: opts.dueFrom,
     });
     let added: PharmacyLineDocument[];
     try {
@@ -267,6 +271,7 @@ export class PharmacyOrdersService {
       ...(input.prescription ? { prescription: input.prescription, prescriptionRev: input.prescriptionRev ?? 0 } : {}),
       ...(input.takeHome ? { takeHome: true } : {}),
       ...(input.plannedLeaveAt ? { plannedLeaveAt: input.plannedLeaveAt } : {}),
+      ...(input.takeHome && input.dueFrom ? { dueFrom: input.dueFrom } : {}),
       orderedAt: clinicNow(),
     });
   }
