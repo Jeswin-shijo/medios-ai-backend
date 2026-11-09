@@ -130,6 +130,20 @@ function namesPatient(summary: string, name: string): boolean {
   return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])${pattern}(?![\\p{L}\\p{M}\\p{N}])`, 'iu').test(summary);
 }
 
+const KIND_LABELS = new Set<string>(Object.values(KIND_LABEL));
+
+/**
+ * B2-I2: the summary a message goes with when its own named the patient (a bed label carries the ward's short name,
+ * which can be a name): "Discharge update (<Kind>)", the kind from the payload, else from the summary's own
+ * "(<Kind>)" ending; "Discharge update" when neither says.
+ */
+function neutralSummary(payload: Record<string, unknown>, summary: string): string {
+  const kind = typeof payload.kind === 'string' && (COMPLETION_KINDS as readonly string[]).includes(payload.kind) ? KIND_LABEL[payload.kind as CompletionKind] : null;
+  const ending = /\(([^()]+)\)\s*$/.exec(summary)?.[1];
+  const label = kind ?? (ending && KIND_LABELS.has(ending) ? ending : null);
+  return label ? `Discharge update (${label})` : 'Discharge update';
+}
+
 /** Tells the Coordinator what the Discharge agent sends, and the clocks, rules and close check it brings. */
 @Injectable()
 export class DischargeRegistration implements OnModuleInit {
@@ -161,8 +175,10 @@ export class DischargeRegistration implements OnModuleInit {
   /**
    * Sends a Discharge message to the Coordinator, on the case when there is one. Callers write the summary as
    * "<bedLabel>: <what happened> (<Kind>)": no patient name, at most 140 characters (the Coordinator clips a
-   * longer one). As a safety net, a summary holding the case's patient name is not sent; with no case it cannot
-   * be checked, so callers must keep names out. Never throws. True when the message went, or the same one went
+   * longer one). As a safety net, a summary holding the case's patient name as words of its own is replaced by a
+   * neutral one, "Discharge update (<Kind>)", with a warning: the message still goes (B2-I2), since its clocks,
+   * the final bill and Pharmacy's cancels hang on it. With no case it cannot be checked, so callers must keep names
+   * out. Never throws. True when the message went, or the same one went
    * within the last minute (the Coordinator drops the repeat); false, with a warning, when it was not sent.
    * `opts.dedupeKey` replaces the Coordinator's identical-payload key (R31), for a message that must go again within
    * the minute, such as a Ready regained (`discharge.ready:<orderId>:<n>`); a repeat of the same key is still dropped.
@@ -170,12 +186,14 @@ export class DischargeRegistration implements OnModuleInit {
   async send(type: string, caseId: string | null, payload: Record<string, unknown>, summary: string, opts: { dedupeKey?: string } = {}): Promise<boolean> {
     try {
       const patientName = caseId ? (await this.cases.get(caseId))?.patientName : null;
-      if (patientName && namesPatient(summary, patientName)) {
-        this.logger.warn(`${type} not sent: its summary names the patient (case ${caseId})`);
-        return false;
+      let text = summary;
+      if (patientName && namesPatient(text, patientName)) {
+        text = neutralSummary(payload, summary);
+        if (namesPatient(text, patientName)) text = 'Discharge update';
+        this.logger.warn(`${type}: its summary named the patient (case ${caseId}); sent with a neutral summary`);
       }
       await this.messages.send({
-        case: caseId, from: 'discharge', to: ['coordinator'], type, priority: 'medium', summary, payload, ...(opts?.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
+        case: caseId, from: 'discharge', to: ['coordinator'], type, priority: 'medium', summary: text, payload, ...(opts?.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
       });
       return true;
     } catch (e) {

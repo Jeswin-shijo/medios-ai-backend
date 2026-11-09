@@ -358,7 +358,7 @@ describe('DischargeRegistration', () => {
     assert.equal((await def().status()).onTimePct, 100);
   });
 
-  test('send: to the Coordinator on the case; a summary naming the patient, or a bad message, is not sent and returns false', async () => {
+  test('send: to the Coordinator on the case; a summary naming the patient goes with a neutral summary; a bad message is not sent and returns false', async () => {
     const ready = (orderId: string) => ({ orderId, bedLabel: 'GWA-12', kind: 'home' });
     assert.equal(await reg.send('discharge.ready', caseId, ready('o1'), 'GWA-12: Ready to leave (Home)'), true);
     const sent = (await m.AgentMessage.findOne({ type: 'discharge.ready', 'payload.orderId': 'o1' }).lean())!;
@@ -370,11 +370,13 @@ describe('DischargeRegistration', () => {
     assert.equal(await m.AgentMessage.countDocuments({ 'payload.orderId': 'o1' }), 1);
     assert.equal(logged.length, 0);
 
-    // The case's patient named in the summary, in any case or spacing: refused, and the warning does not repeat the name.
-    assert.equal(await reg.send('discharge.ready', caseId, ready('o3'), 'GWA-12: ravi  KUMAR is ready (Home)'), false);
-    assert.equal(await m.AgentMessage.countDocuments({ 'payload.orderId': 'o3' }), 0);
+    // B2-I2: the case's patient named in the summary, in any case or spacing: never dropped, it goes with a neutral
+    // summary naming only the kind, and the warning does not repeat the name.
+    assert.equal(await reg.send('discharge.ready', caseId, ready('o3'), 'GWA-12: ravi  KUMAR is ready (Home)'), true);
+    assert.deepEqual((await m.AgentMessage.find({ 'payload.orderId': 'o3' }).lean()).map((x) => x.summary), ['Discharge update (Home)']);
     assert.equal(logged.length, 1);
     assert.doesNotMatch(logged[0], /ravi|kumar/i);
+    assert.match(logged[0], /neutral summary/);
     // A short name inside a longer word is not the name: "Ann" in "planned".
     const ann = await m.Patient.create({ uhid: 'MHK202600907', name: 'Ann', age: 30, gender: 'Female', phone: '9100000007' });
     const annCase = String((await cases.openOrJoin({ patientId: String(ann._id), patientUhid: ann.uhid, patientName: 'Ann', kind: 'ipd', priority: 'medium', openedBy: 'bed' })).case._id);
@@ -387,6 +389,34 @@ describe('DischargeRegistration', () => {
     assert.equal(logged.length, 3);
     assert.match(logged[1], /discharge\.ready/);
     assert.match(logged[2], /discharge\.nope/);
+  });
+
+  test('B2-I2: a patient named like the ward in the bed label still gets window-opened, completed and cancelled, with neutral summaries', async () => {
+    const p = await m.Patient.create({ uhid: 'MHK202600908', name: 'Joseph', age: 51, gender: 'Male', phone: '9100000008' });
+    const onCase = String((await cases.openOrJoin({ patientId: String(p._id), patientUhid: p.uhid, patientName: 'Joseph', kind: 'ipd', priority: 'medium', openedBy: 'bed' })).case._id);
+    const bedLabel = 'JOSEPH-4';
+    const a = String(new Types.ObjectId());
+    const leaveDueAt = new Date(Date.now() + 3 * H);
+    assert.equal(await reg.send('discharge.window-opened', onCase, { ...opened(a, leaveDueAt, new Date(Date.now() + 90 * MIN)), bedLabel }, `${bedLabel}: Discharge window opened (Home)`), true);
+    assert.deepEqual((await clocksOf(a)).map((c) => [c.def, c.state]), [['discharge-leave', 'running'], ['discharge-summary', 'running']]);
+    assert.equal(await reg.send('discharge.completed', onCase, { ...completed(a), bedLabel }, `${bedLabel}: Patient left (Home)`), true);
+    assert.deepEqual((await clocksOf(a)).map((c) => c.state), ['met', 'met']);
+
+    // A cancel's payload has no kind: the kind comes from the summary's own label.
+    const b = String(new Types.ObjectId());
+    await reg.send('discharge.window-opened', onCase, { ...opened(b, leaveDueAt, new Date(Date.now() + 90 * MIN)), bedLabel, kind: 'transfer' }, `${bedLabel}: Discharge window opened (Transfer)`);
+    assert.equal(await reg.send('discharge.cancelled', onCase, { ...cancelled(b), bedLabel }, `${bedLabel}: Discharge order cancelled (Transfer)`), true);
+    assert.deepEqual((await clocksOf(b)).map((c) => c.state), ['met', 'met']);
+
+    const sent = await m.AgentMessage.find({ case: onCase, from: 'discharge' }).sort({ createdAt: 1, _id: 1 }).lean();
+    assert.deepEqual(sent.map((x) => [x.type, x.summary]), [
+      ['discharge.window-opened', 'Discharge update (Home)'],
+      ['discharge.completed', 'Discharge update (Home)'],
+      ['discharge.window-opened', 'Discharge update (Transfer)'],
+      ['discharge.cancelled', 'Discharge update (Transfer)'],
+    ]);
+    for (const x of sent) assert.doesNotMatch(x.summary, /joseph/i);
+    assert.equal(logged.length, 4, 'each one is logged');
   });
 
   test('R31: send with a dedupeKey goes again within the minute under a new key, and not under the same one', async () => {
