@@ -308,6 +308,27 @@ describe('DischargeLinesService', () => {
     assert.deepEqual([line.state, line.by, line.at.getTime(), line.detail], ['not-needed', { id: DOC.id, name: DOC.name }, NOW.getTime(), undefined]);
   });
 
+  test('B1-M3: "No take-home medicines" is 409 while a take-home medicine still waits in Pharmacy; once every one has ended it is allowed', async () => {
+    const o = await orders.order(DOC, planId, homeNone({ takeHome: { lines: [pantoprazole40] } }));
+    const id = String(o._id);
+    await orders.edit(DOC, id, { takeHome: { lines: [amoxicillin500] } });
+    const row = await stored(id);
+    const [a] = await m.PharmacyLine.find({ order: row.takeHomeOrder }).lean();
+    const [b] = await m.PharmacyLine.find({ order: row.addedTakeHomeOrders[0] }).lean();
+    const refused = (e: unknown) => e instanceof ConflictException && /Cancel them in the Pharmacy Agent first\./.test((e as Error).message);
+    await assert.rejects(lines.tick(DOC, id, 'take-home', { state: 'not-needed' }), refused);
+    // One issued, the other (in the second order) still approved: still refused.
+    await m.PharmacyLine.updateOne({ _id: a._id }, { $set: { status: 'issued' } });
+    await m.PharmacyLine.updateOne({ _id: b._id }, { $set: { status: 'approved' } });
+    await assert.rejects(lines.tick(DOC, id, 'take-home', { state: 'not-needed' }), refused);
+    assert.equal((await lineOf(id, 'take-home')).state, 'waiting');
+    assert.equal((await stored(id)).noTakeHome, false);
+    // Cancelled in the Pharmacy Agent: now the doctor may say none are needed.
+    await w.checks.cancel(DOC, String(b._id), 'He has these at home');
+    await lines.tick(DOC, id, 'take-home', { state: 'not-needed', note: 'He has these at home' });
+    assert.equal((await lineOf(id, 'take-home')).state, 'not-needed');
+  });
+
   test('take-home with no order and no choice waits, never vacuously done', async () => {
     const o = await orders.order(DOC, planId, homeNone());
     const id = String(o._id);

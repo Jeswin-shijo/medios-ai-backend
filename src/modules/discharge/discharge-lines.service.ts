@@ -42,6 +42,7 @@ const CHOICE_LINES: readonly LineKey[] = ['take-home', 'follow-up'];
 const LAB_ENDED: readonly LabLineStatus[] = ['released', 'cancelled'];
 /** A take-home medicine that is no longer waiting in Pharmacy. */
 const TAKE_HOME_ENDED: readonly PharmacyLineStatus[] = ['issued', 'stopped', 'rejected', 'cancelled'];
+const TAKE_HOME_STILL_WAITING = 'Take-home medicines are still waiting in Pharmacy. Cancel them in the Pharmacy Agent first.';
 const CHECK_WITH_BILLING = 'Check with billing';
 const OVERRIDDEN = 'No bill found: marked done by an admin';
 
@@ -235,6 +236,8 @@ export class DischargeLinesService {
    * choice, kept as `noTakeHome` / `noFollowUp`, so every later refresh keeps it). A doctor's line or a "not needed"
    * needs a doctor or an admin; a nurse's line a nurse or an admin (403). The body handover names who received the
    * body. Stored with who, when (clinic clock) and the note. A line already in that state stays as the first tick left it.
+   * "No take-home medicines" is 409 while a take-home medicine of the order still waits in Pharmacy (B1-M3): cancel it
+   * there first.
    */
   async tick(actor: Actor, orderId: string, key: LineKey, input: TickInput): Promise<DischargeOrderDocument> {
     if (!(LINE_KEYS as readonly string[]).includes(key)) throw new BadRequestException('Unknown checklist line.');
@@ -255,6 +258,13 @@ export class DischargeLinesService {
     const line = order.lines.find((l) => l.key === key);
     if (LINE_RULE[order.kind][key] === '-' || !line) throw new BadRequestException(`${LINE_LABEL(key, order.kind)} is not on this checklist.`);
     if (line.state === input.state) return order;
+    // B1-M3 (R59): "No take-home medicines" while some still wait in Pharmacy would leave them to be issued anyway.
+    if (key === 'take-home') {
+      const ids = takeHomeOrderIds(order).filter((i) => isValidObjectId(i));
+      if (ids.length && (await this.pharmacyLines.exists({ order: { $in: ids }, status: { $nin: TAKE_HOME_ENDED } }).exec())) {
+        throw new ConflictException(TAKE_HOME_STILL_WAITING);
+      }
+    }
     const set: Record<string, unknown> = { 'lines.$': entry({ key, state: input.state, by: by(actor), at: this.clock(), note }) };
     if (receiver) set.bodyReceiver = receiver;
     if (key === 'take-home') set.noTakeHome = true;
