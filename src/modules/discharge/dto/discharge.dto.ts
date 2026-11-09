@@ -114,11 +114,14 @@ export class DischargeCheckDto {
   @ApiProperty({ type: [LineDto] }) @IsArray() @ArrayMinSize(1) @ArrayMaxSize(10) @ValidateNested({ each: true }) @Type(() => LineDto) lines: LineDto[];
 }
 
+/** The queue's status filter: `due` or a shown status the queue can hold (never Left: it lists stays in progress, B2-M5). */
+const QUEUE_STATUSES = ['due', ...SHOWN_STATUSES.filter((s) => s !== 'left')];
+
 /** `GET /discharge/queue`: every filter optional. */
 export class DischargeQueueQueryDto {
   @ApiPropertyOptional({ description: "The ward's name, as the rows show it" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) ward?: string;
   @ApiPropertyOptional({ description: "The admission's doctor, as the rows show it" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) doctor?: string;
-  @ApiPropertyOptional({ enum: ['due', ...SHOWN_STATUSES] }) @IsOptional() @IsIn(['due', ...SHOWN_STATUSES]) status?: string;
+  @ApiPropertyOptional({ enum: QUEUE_STATUSES }) @IsOptional() @IsIn(QUEUE_STATUSES) status?: string;
   @ApiPropertyOptional({ description: "Part of the patient's name or UHID, or of the bed label" }) @IsOptional() @Transform(trim) @IsString() @MaxLength(100) q?: string;
 }
 

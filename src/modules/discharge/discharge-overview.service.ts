@@ -71,8 +71,11 @@ export const SHOWN_STATUS_LABEL: Record<ShownStatus, string> = {
   left: 'Left',
 };
 
-/** The Queue tab's status filter: one shown status, or `due` for Due today, Due tomorrow and Overdue together. */
-export type QueueStatusFilter = ShownStatus | 'due';
+/**
+ * The Queue tab's status filter: one shown status, or `due` for Due today, Due tomorrow and Overdue together. Never
+ * Left: the queue lists stays in progress (B2-M5).
+ */
+export type QueueStatusFilter = Exclude<ShownStatus, 'left'> | 'due';
 const DUE: readonly ShownStatus[] = ['due-today', 'due-tomorrow', 'overdue'];
 /** The queue's order for plans with no order, after the orders (open windows 0, not yet open 1): overdue first (R46). */
 const NO_ORDER_RANK: Partial<Record<ShownStatus, number>> = { overdue: 2, 'due-today': 3, 'due-tomorrow': 4, planned: 5 };

@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { DischargeCheckDto, DischargeReasonDto, EditDischargeOrderDto, OrderDischargeDto } from './discharge.dto';
+import { DischargeCheckDto, DischargeQueueQueryDto, DischargeReasonDto, EditDischargeOrderDto, OrderDischargeDto } from './discharge.dto';
 
 const errors = async (cls: new () => object, body: object) => validate(plainToInstance(cls, body));
 const ok = async (cls: new () => object, body: object) => assert.deepEqual(await errors(cls, body), [], JSON.stringify(body));
@@ -48,5 +48,11 @@ describe('the other order DTOs', () => {
     await ok(DischargeReasonDto, { reason: 'Spiked a fever again' });
     await ok(DischargeCheckDto, { planId: DOCTOR_ID, lines: [line] });
     await bad(DischargeCheckDto, { planId: 'nope', lines: [line] });
+  });
+  test('B2-M5: the queue filters by a status the queue can show; Left is never in it', async () => {
+    for (const status of ['due', 'planned', 'due-tomorrow', 'due-today', 'overdue', 'ordered', 'ready']) await ok(DischargeQueueQueryDto, { status });
+    await ok(DischargeQueueQueryDto, {});
+    await bad(DischargeQueueQueryDto, { status: 'left' });
+    await bad(DischargeQueueQueryDto, { status: 'gone' });
   });
 });
