@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, mock, test } from 'node:test';
 import { Logger } from '@nestjs/common';
+import mongoose from 'mongoose';
 import { hourOf } from '../common/utils/series';
 import { AppointmentEvents } from '../modules/appointments/appointment-events';
 import { AgentRegistry } from '../modules/coordinator/agent-registry';
@@ -47,6 +48,8 @@ const DAY = '2026-09-26';
 /** The real clock while seeding: Thursday 29 Oct 2026, 10:00 local. The clinic clock is 26 Sep 2026 at the same time. */
 const NOW = new Date(2026, 9, 29, 10, 0, 0, 0).getTime();
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
+/** The real clock, kept before the spec mocks Date. */
+const RealDate = Date;
 
 describe('seedRevenue', () => {
   const m = models();
@@ -125,6 +128,13 @@ describe('seedRevenue', () => {
 
   before(async () => {
     await connectTestDb();
+    // As in seed-discharge.spec: Mongoose's staleness check reads the real clock, but each heartbeat is stamped with the
+    // global Date, which this spec mocks to a moment before the real date; once the spec runs past about 10 s (a busy
+    // machine) the connection would look stale and every query would buffer until it timed out. So each heartbeat is
+    // stamped again with the real clock (this listener runs after mongoose's own).
+    mongoose.connection.getClient().on('serverHeartbeatSucceeded', () => {
+      (mongoose.connection as unknown as { _lastHeartbeatAt: number })._lastHeartbeatAt = RealDate.now();
+    });
     await resetTestDb();
     Logger.overrideLogger(false);
     savedClinic = process.env.CLINIC_DATE;
