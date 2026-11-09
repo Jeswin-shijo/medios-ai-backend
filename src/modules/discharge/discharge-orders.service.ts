@@ -376,9 +376,10 @@ export class DischargeOrdersService {
           .catch((e: Error) => this.logger.warn(`Discharge order ${String(order._id)}: Pharmacy's leaving time not moved (${e.message})`));
       }
       this.touchBeds();
-      // A window not open yet moves with the planned time; one opened, or started early, stays.
+      // A window not open yet moves with the planned time; one opened, or started early, stays. It starts no earlier
+      // than now (B1-M1): from the order time, an earlier leaving time would open a window already overdue.
       if (!order.windowOpenedAt && !order.startedNow) {
-        const windowAt = windowStart(order.orderedAt, planned, leaveMinutes);
+        const windowAt = windowStart(now, planned, leaveMinutes);
         const moved = await this.orders.updateOne({ _id: order._id, windowOpenedAt: null, startedNow: null }, { $set: { windowAt } }).exec();
         if (moved.matchedCount && windowAt.getTime() <= now.getTime()) await this.openWindow(order._id, now);
       }

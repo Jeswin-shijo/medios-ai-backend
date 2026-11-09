@@ -584,16 +584,16 @@ describe('DischargeOrdersService', () => {
       at(27, 12).getTime(), at(27, 10).getTime(), 'Pneumonia, resolved', 'improved', 'Home with family',
     ]);
     assert.equal(row.windowOpenedAt, undefined);
-    // Leaving at 21:00 tonight: the window starts at the order time, already past, so it opens now.
+    // Leaving at 21:00 tonight: 21:00 less the target is already past, so the window starts now (B1-M1) and opens.
     orders.clock = () => at(26, 20, 15);
     await orders.edit(DOC, id, { plannedLeaveAt: at(26, 21) });
     row = await stored(id);
-    assert.deepEqual([row.windowAt.getTime(), !!row.windowOpenedAt], [EVENING.getTime(), true]);
+    assert.deepEqual([row.windowAt.getTime(), !!row.windowOpenedAt], [at(26, 20, 15).getTime(), true]);
     assert.equal(sendsOf('discharge.window-opened').length, 1);
     // Once open, a new planned time leaves the window where it is.
     await orders.edit(DOC, id, { plannedLeaveAt: at(26, 22) });
     row = await stored(id);
-    assert.deepEqual([row.plannedLeaveAt.getTime(), row.windowAt.getTime()], [at(26, 22).getTime(), EVENING.getTime()]);
+    assert.deepEqual([row.plannedLeaveAt.getTime(), row.windowAt.getTime()], [at(26, 22).getTime(), at(26, 20, 15).getTime()]);
     assert.equal(sendsOf('discharge.window-opened').length, 1);
 
     // More medicines: a second take-home order beside the first.
@@ -621,6 +621,20 @@ describe('DischargeOrdersService', () => {
     // Bad values are 400.
     await assert.rejects(orders.edit(DOC, id, { diagnosis: '' }), BadRequestException);
     await assert.rejects(orders.edit(DOC, id, { plannedLeaveAt: at(28, 9) }), BadRequestException);
+  });
+
+  test('B1-M1: an edit to an earlier time opens the window from now, never from the order time, so nothing is overdue at once', async () => {
+    // Ordered at 08:00 for 10:00 tomorrow; at 15:00 the doctor brings it forward to 15:05 today.
+    orders.clock = () => at(26, 8);
+    const o = await orders.order(DOC, planId, tomorrow());
+    const id = String(o._id);
+    orders.clock = () => at(26, 15);
+    await orders.edit(DOC, id, { plannedLeaveAt: at(26, 15, 5) });
+    const row = await stored(id);
+    assert.deepEqual([row.windowAt.getTime(), !!row.windowOpenedAt], [at(26, 15).getTime(), true]);
+    const [opened] = sendsOf('discharge.window-opened');
+    near(opened.payload.summaryDueAt, toRealTime(at(26, 15)).getTime() + 60 * MIN, 'summaryDueAt');
+    near(opened.payload.leaveDueAt, toRealTime(at(26, 15)).getTime() + 120 * MIN, 'leaveDueAt');
   });
 
   test('R29: once the window is open, the planned time cannot move past its target', async () => {
