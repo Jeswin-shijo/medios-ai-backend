@@ -648,6 +648,46 @@ describe('DischargeRepairService', () => {
     assert.equal(await repair.repairOrdersAndPlans(start), 0);
   });
 
+  test('B1-M2: a cancel whose plan reset was lost: the plan, still ordered or ready on the cancelled order, is planned again', async () => {
+    for (const state of ['ordered', 'ready'] as const) {
+      const id = String((await orders.order(DOC, planId, homeNone()))._id);
+      await orders.cancel(DOC, id, 'Changed my mind');
+      // The cancel's plan step was lost (a crash between the two writes).
+      await m.DischargePlan.updateOne({ _id: planId }, { $set: { state, order: new Types.ObjectId(id) } });
+
+      // Within the grace, the cancel may still be finishing: left alone.
+      repair.realNow = () => Date.now();
+      assert.equal(await repair.repairOrdersAndPlans(start), 0, `${state}: within the grace`);
+      assert.equal((await planOf()).state, state);
+      repair.realNow = () => Date.now() + HOUR;
+      // Before the agent's start: left alone too.
+      assert.equal(await repair.repairOrdersAndPlans(new Date(Date.now() + 2 * HOUR)), 0, `${state}: before the start`);
+
+      assert.equal(await repair.repairOrdersAndPlans(start), 1, state);
+      const plan = await planOf();
+      assert.deepEqual([plan.state, plan.order], ['planned', undefined], state);
+      assert.equal(await repair.repairOrdersAndPlans(start), 0, `${state}: a second pass repairs nothing`);
+    }
+  });
+
+  test('B1-M2: a plan on a live order (in progress, or left) is never put back by the cancel repair', async () => {
+    const id = String((await orders.order(DOC, planId, homeNone()))._id);
+    assert.equal(await repair.repairOrdersAndPlans(start), 0);
+    assert.deepEqual([(await planOf()).state, String((await planOf()).order)], ['ordered', id]);
+    // An earlier, cancelled order on the same plan does not reset the plan the new order holds.
+    const old = await m.DischargeOrder.create({
+      plan: planId, admission: admissionId, case: caseId, patient: w.patientId, kind: 'home', state: 'cancelled', plannedLeaveAt: NOW, windowAt: NOW,
+      diagnosis: DIAGNOSIS, orderedBy: { id: DOC.id, name: DOC.name }, orderedAt: at(25, 9), cancelled: { by: { id: DOC.id, name: DOC.name }, reason: 'x', at: at(25, 10) },
+    });
+    assert.ok(old);
+    assert.equal(await repair.repairOrdersAndPlans(start), 0);
+    assert.deepEqual([(await planOf()).state, String((await planOf()).order)], ['ordered', id]);
+    // An order that left on a plan never completed is step 8's to finish, never put back to planned here.
+    await crashLeft(id, 'before-bed');
+    assert.equal(await repair.repairOrdersAndPlans(start), 0);
+    assert.deepEqual([(await planOf()).state, String((await planOf()).order)], ['ordered', id]);
+  });
+
   test('Task 8 M2: an orphan take-home order is cancelled ("Discharge order not saved"); one an order owns, or under 10 minutes old, is not', async () => {
     // A crash between placing the take-home order and saving the discharge order.
     const orphan = await w.takeHome.place(DOC, { patientId: w.patientId, caseId, plannedLeaveAt: new Date(NOW.getTime() + HOUR), lines: [pantoprazole40] });

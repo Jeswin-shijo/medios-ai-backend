@@ -159,7 +159,9 @@ export class DischargeRepairService {
 
   /**
    * Task 8 M2: an order in progress whose plan still reads `planned` (the plan step after the order failed) gets the
-   * plan pointed at it, in the order's state, and the morning reminder closed; a take-home order whose discharge order
+   * plan pointed at it, in the order's state, and the morning reminder closed; B1-M2: a cancelled order whose plan still
+   * reads `ordered` or `ready` and points at it (the cancel's plan step was lost) has the plan put back to `planned`, so
+   * the stay is reminded and can be ordered again (an order that left is step 8's); a take-home order whose discharge order
    * was never saved (an orphan, at least 10 minutes old) has its waiting lines cancelled through Pharmacy ("Discharge
    * order not saved"). Records before `start` are left alone. Returns how many it repaired.
    */
@@ -189,6 +191,24 @@ export class DischargeRepairService {
           }
           this.logger.warn(`Discharge plan ${String(o.plan)} was still planned under order ${String(o._id)}; it follows the order now`);
           await this.plansService.closeReminder(String(o.plan));
+          return true;
+        });
+      }
+    });
+    await this.walk(this.orders, { ...this.recent(start, REPAIR_GRACE_MS), state: 'cancelled' }, 'plan', async (rows) => {
+      const stuck = await this.plans
+        .find({ _id: { $in: rows.map((r) => r.plan) }, state: { $in: ['ordered', 'ready'] }, order: { $in: rows.map((r) => r._id) } })
+        .select('_id order')
+        .lean<(Row & { order: Types.ObjectId })[]>()
+        .exec();
+      for (const p of stuck) {
+        n += await this.one('cancelled plan', p._id, async () => {
+          // The cancel's own step, guarded on this order: a new order given meanwhile keeps the plan.
+          const reset = await this.plans
+            .updateOne({ _id: p._id, order: p.order, state: { $in: ['ordered', 'ready'] } }, { $set: { state: 'planned' }, $unset: { order: 1 } })
+            .exec();
+          if (!reset.modifiedCount) return false;
+          this.logger.warn(`Discharge plan ${String(p._id)} still pointed at cancelled order ${String(p.order)}; it is planned again`);
           return true;
         });
       }
