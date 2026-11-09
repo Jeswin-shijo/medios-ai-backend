@@ -192,7 +192,8 @@ describe('DischargeOverviewService', () => {
     assert.equal(o.cards.dueToday.note, '2 with no order yet');
     assert.equal(o.cards.clearing.note, 'order given, lines open');
     assert.equal(o.cards.ready.note, 'gate pass can print');
-    assert.equal(o.cards.orderToLeaving.note, 'target 2h');
+    // B2-M4: in minutes, as the card's value is.
+    assert.equal(o.cards.orderToLeaving.note, 'target 120 min');
     assert.equal(o.cards.bedsFreeingToday.note, 'leaving or left today');
     for (const c of Object.values(o.cards)) {
       assert.equal(c.total, null);
@@ -204,7 +205,7 @@ describe('DischargeOverviewService', () => {
     assert.equal(o.targetMinutes, 120);
 
     await settings.save({ id: 'a1', name: 'Admin', role: UserRole.ADMIN }, { leaveMinutes: 90 });
-    assert.equal((await overview.overview()).cards.orderToLeaving.note, 'target 1h 30m');
+    assert.equal((await overview.overview()).cards.orderToLeaving.note, 'target 90 min');
   });
 
   test('the average uses windowAt to leftAt, and is null with nobody left', async () => {
@@ -223,7 +224,7 @@ describe('DischargeOverviewService', () => {
 
   // ---------- the queue ----------
 
-  test('queue order: open windows first, then no-order due today, then tomorrow', async () => {
+  test('queue order: open windows first, then no-order overdue, then due today, then tomorrow (R46)', async () => {
     const tomorrow = await stay(TOMORROW);
     const overdue = await stay(YESTERDAY);
     const later = await stay(LATER);
@@ -234,11 +235,11 @@ describe('DischargeOverviewService', () => {
     await gone({ windowAt: at(26, 7), leftAt: at(26, 8) }); // left: never in the queue
 
     const o = await overview.overview();
-    const want = [openEarly, openLate, notOpen, dueToday, overdue, tomorrow].map((s) => String(s.plan._id));
+    const want = [openEarly, openLate, notOpen, overdue, dueToday, tomorrow].map((s) => String(s.plan._id));
     assert.deepEqual(ids(o.queue), want);
     assert.deepEqual(
       o.queue.map((r) => r.status),
-      ['ready', 'ordered', 'ordered', 'due-today', 'overdue', 'due-tomorrow'],
+      ['ready', 'ordered', 'ordered', 'overdue', 'due-today', 'due-tomorrow'],
     );
 
     const [ready, late, waiting, noOrder] = o.queue;

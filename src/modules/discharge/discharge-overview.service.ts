@@ -74,8 +74,8 @@ export const SHOWN_STATUS_LABEL: Record<ShownStatus, string> = {
 /** The Queue tab's status filter: one shown status, or `due` for Due today, Due tomorrow and Overdue together. */
 export type QueueStatusFilter = ShownStatus | 'due';
 const DUE: readonly ShownStatus[] = ['due-today', 'due-tomorrow', 'overdue'];
-/** The queue's order for plans with no order, after the orders (open windows 0, not yet open 1). */
-const NO_ORDER_RANK: Partial<Record<ShownStatus, number>> = { 'due-today': 2, overdue: 3, 'due-tomorrow': 4, planned: 5 };
+/** The queue's order for plans with no order, after the orders (open windows 0, not yet open 1): overdue first (R46). */
+const NO_ORDER_RANK: Partial<Record<ShownStatus, number>> = { overdue: 2, 'due-today': 3, 'due-tomorrow': 4, planned: 5 };
 
 /** A plan's shown status, from the plan, its order in progress (if any) and the clinic clock. */
 export function shownStatus(plan: Pick<DischargePlan, 'state' | 'targetDay'>, order: Pick<DischargeOrder, 'state'> | null, now: Date): ShownStatus {
@@ -345,13 +345,6 @@ const iso = (d: Date | string | number): string => new Date(d).toISOString();
 const actor = (a?: { id?: string; name?: string } | null) => ({ id: a?.id ?? '', name: a?.name ?? '' });
 const patientOf = (p: LeanPlan): PatientRef => ({ id: String(p.patient), name: p.patientName, uhid: p.patientUhid });
 
-/** "2h", "1h 30m", "45m". */
-function hoursAndMinutes(minutes: number): string {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h && m ? `${h}h ${m}m` : h ? `${h}h` : `${m}m`;
-}
-
 /** The clinic day of `now`: [from, to). */
 function dayOf(now: Date): { from: Date; to: Date } {
   return { from: new Date(now.getFullYear(), now.getMonth(), now.getDate()), to: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) };
@@ -482,7 +475,8 @@ export class DischargeOverviewService {
         dueToday: card(counts.dueToday, 'dueToday', `${counts.noOrder} with no order yet`),
         clearing: card(counts.clearing, 'clearing', 'order given, lines open'),
         ready: card(counts.ready, 'ready', 'gate pass can print'),
-        orderToLeaving: card(counts.avgMinutes, 'avgMinutes', `target ${hoursAndMinutes(config.leaveMinutes)}`),
+        // B2-M4: minutes, as the value beside it is.
+        orderToLeaving: card(counts.avgMinutes, 'avgMinutes', `target ${config.leaveMinutes} min`),
         bedsFreeingToday: card(counts.bedsFreeing, 'bedsFreeing', 'leaving or left today'),
       },
       queue: this.sortRows(active, now, config).filter((r) => r.status !== 'planned'),
@@ -738,7 +732,7 @@ export class DischargeOverviewService {
 
   /**
    * Rows longest waiting first: open windows by when they opened, then orders whose window has not opened (by when it
-   * will), then due today with no order, then overdue, then due tomorrow, then later target days (each by target time).
+   * will), then overdue with no order, then due today, then due tomorrow, then later target days (each by target time).
    */
   private sortRows(stays: Stay[], now: Date, config: DischargeConfig): QueueRow[] {
     const keyed = stays.map((s) => {
