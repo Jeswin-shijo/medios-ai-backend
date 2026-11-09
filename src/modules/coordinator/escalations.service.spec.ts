@@ -375,6 +375,8 @@ describe('EscalationsService', () => {
       { title: 'duty-administrator', waitMinutes: 30 },
       { title: 'medical-superintendent', waitMinutes: 0 },
     ]);
+    // B3-M9: named for who it pages, not for what is late.
+    assert.deepEqual(ladders.map((l) => [l.key, l.label]).filter(([k]) => k.startsWith('discharge')), [['discharge', 'Discharge'], ['discharge-doctor', 'Discharge doctor']]);
     assert.deepEqual(ladders.find((l) => l.key === 'discharge-doctor')!.steps, [
       { title: 'duty-doctor', waitMinutes: 15 },
       { title: 'medical-superintendent', waitMinutes: 0 },

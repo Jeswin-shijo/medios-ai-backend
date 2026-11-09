@@ -97,7 +97,7 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
   },
   {
     key: 'discharge-doctor',
-    label: 'Discharge summary',
+    label: 'Discharge doctor',
     steps: [{ title: 'duty-doctor', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
 ];

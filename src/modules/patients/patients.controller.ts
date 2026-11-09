@@ -24,7 +24,7 @@ export class PatientsController {
   @Get()
   @ApiOperation({ summary: 'Get list of patients with search and filters' })
   @ApiQuery({ name: 'search', required: false })
-  @ApiQuery({ name: 'status', required: false, enum: ['All', 'Today', 'Admitted', 'Follow-up', 'Discharged'] })
+  @ApiQuery({ name: 'status', required: false, enum: ['All', 'Today', 'Admitted', 'Follow-up', 'Discharged', 'Deceased', 'Left without discharge'] })
   @ApiQuery({ name: 'visitType', required: false, enum: ['All', 'OPD', 'IPD'] })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'skip', required: false, type: Number })
