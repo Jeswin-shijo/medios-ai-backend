@@ -70,6 +70,13 @@ describe('SettingsService', () => {
     assert.deepEqual((await settings.getSettings()).revenue, { x: 1 });
   });
 
+  test('a generic patch cannot change the discharge section', async () => {
+    await settings.updateSettings({ discharge: { x: 1 } } as any, ADMIN);
+    assert.deepEqual((await settings.getSettings()).discharge ?? {}, {});
+    await settings.setDischarge({ x: 1 });
+    assert.deepEqual((await settings.getSettings()).discharge, { x: 1 });
+  });
+
   test('an ai patch with one key keeps the other ai keys', async () => {
     await settings.updateSettings({ ai: { model: 'claude-opus-5-5', bedSuggestions: true } }, ADMIN);
 

@@ -1,16 +1,18 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { AgentDefinition, ClockDef, MessageTypeDef } from '../coordinator/coordinator-types';
-import { MessagesService } from '../coordinator/messages.service';
+import { MessagesService, MessageView } from '../coordinator/messages.service';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
+import type { CompletionKind } from '../discharge/discharge-catalogue';
 import { PharmacyLine, PharmacyLineDocument } from './schemas/pharmacy-line.schema';
 import { PharmacyOrder, PharmacyOrderDocument } from './schemas/pharmacy-order.schema';
 import { medicineLabel } from './pharmacy-rounds';
-import { PharmacyChecksService } from './pharmacy-checks.service';
+import { PharmacyChecksService, WAITING } from './pharmacy-checks.service';
 import { PharmacyOrdersService } from './pharmacy-orders.service';
 import { PharmacyProceduresService } from './pharmacy-procedures.service';
+import { DISCHARGE_AGENT_ACTOR } from './pharmacy-take-home.service';
 
 type Fields = MessageTypeDef['payload'];
 
@@ -154,9 +156,20 @@ export async function pharmacyOnTimePct(clocks: Model<ClockDocument>, since: Dat
   return Math.round((stopped.filter((c) => c.state === 'met').length / stopped.length) * 100);
 }
 
+/** The cancel reason for each way a patient leaves. */
+const LEFT_REASON: Record<CompletionKind, string> = {
+  home: 'Patient discharged',
+  transfer: 'Patient discharged',
+  'against-advice': 'Patient discharged',
+  died: 'Patient died',
+  'left-without-discharge': 'Patient left without discharge',
+};
+
 /** Tells the Coordinator what the Pharmacy agent sends, and the clocks and rule it brings. */
 @Injectable()
 export class PharmacyCoordinatorRegistration implements OnModuleInit {
+  private readonly logger = new Logger(PharmacyCoordinatorRegistration.name);
+
   constructor(
     private readonly registry: AgentRegistry,
     private readonly orders: PharmacyOrdersService,
@@ -191,6 +204,9 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
         { type: 'scheduling.procedure-cancelled', handler: (id) => this.procedures.onCancelled(id) },
         { type: 'scheduling.procedure-bumped', handler: (id) => this.procedures.onCancelled(id) },
         { type: 'scheduling.procedure-done', handler: (id) => this.procedures.onDone(id) },
+        // Leaving (A12): Pharmacy itself ends the lines still waiting. OPD counter lines are never touched.
+        { type: 'discharge.completed', handler: (id) => this.onLeft(id) },
+        { type: 'discharge.cancelled', handler: (id) => this.onDischargeCancelled(id) },
       ],
       rules: [
         {
@@ -221,6 +237,60 @@ export class PharmacyCoordinatorRegistration implements OnModuleInit {
     if (!message?.case) return;
     const w = where(message.payload ?? {});
     if (w) await this.orders.setLocation(message.case, w.area, w.ward);
+  }
+
+  /** The patient left (any kind): every waiting line of the case's ER and Ward orders, take-home included, is cancelled. */
+  private onLeft(messageId: string): Promise<void> {
+    return this.quietly('discharge.completed', messageId, async (message) => {
+      const kind = str(message.payload?.kind);
+      const reason = kind && Object.prototype.hasOwnProperty.call(LEFT_REASON, kind) ? LEFT_REASON[kind as CompletionKind] : LEFT_REASON.home;
+      await this.cancelWaitingOn(message, { setting: { $in: ['ER', 'Ward'] } }, reason);
+    });
+  }
+
+  /**
+   * A discharge order was cancelled: only the waiting lines of the case's take-home orders are cancelled. B3-M4: those
+   * take-home orders (the ones placed before the message) are then marked `takeHomeCancelledAt`, so a line already
+   * issued no longer reads as carrying a ward medicine on at home, and the patient's lines are checked again: the same
+   * medicine on the ward is a red double. Safe to run again: an order is marked once, and a recheck that changes
+   * nothing changes nothing.
+   */
+  private onDischargeCancelled(messageId: string): Promise<void> {
+    return this.quietly('discharge.cancelled', messageId, async (message) => {
+      await this.cancelWaitingOn(message, { takeHome: true }, 'Discharge cancelled');
+      const placed = { case: message.case, takeHome: true, createdAt: { $lte: new Date(message.createdAt) } };
+      const orders = await this.orderDocs.find(placed).select('patient takeHomeCancelledAt').lean<{ _id: unknown; patient: unknown; takeHomeCancelledAt?: Date }[]>().exec();
+      if (!orders.length) return;
+      await this.orderDocs.updateMany({ ...placed, takeHomeCancelledAt: null }, { $set: { takeHomeCancelledAt: new Date() } }).exec();
+      for (const patient of new Set(orders.map((o) => String(o.patient)))) await this.orders.recheckPatient(patient, 'discharge-cancelled');
+    });
+  }
+
+  /**
+   * Cancels the waiting lines of the case's orders that match, as the Discharge Agent. Only lines that existed when the
+   * message was sent: a late re-run never reaches lines ordered after it. Lines already closed are skipped, so a re-run cancels nothing twice.
+   */
+  private async cancelWaitingOn(message: MessageView, orderFilter: Record<string, unknown>, reason: string): Promise<void> {
+    const orders = await this.orderDocs.find({ case: message.case, ...orderFilter }).select('_id').lean<{ _id: unknown }[]>().exec();
+    if (!orders.length) return;
+    const waiting = await this.lines
+      .find({ order: { $in: orders.map((o) => o._id) }, status: { $in: WAITING }, createdAt: { $lte: new Date(message.createdAt) } })
+      .sort({ _id: 1 })
+      .select('_id')
+      .lean<{ _id: unknown }[]>()
+      .exec();
+    await this.checks.cancelWaiting(DISCHARGE_AGENT_ACTOR, waiting.map((l) => String(l._id)), reason);
+  }
+
+  /** Loads the message (one with no case is ignored) and runs the step; it never throws, so a failure is only logged. */
+  private async quietly(type: string, messageId: string, step: (message: MessageView & { case: string }) => Promise<void>): Promise<void> {
+    try {
+      const message = await this.messages.get(messageId);
+      if (!message?.case) return;
+      await step(message as MessageView & { case: string });
+    } catch (e) {
+      this.logger.error(`Handling ${type} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /**

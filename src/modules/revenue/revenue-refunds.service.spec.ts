@@ -58,8 +58,8 @@ describe('RefundsService', () => {
     approvals = new ApprovalsService(m.Approval, m.DutyTitle, registry, messages, events);
     const settings = new RevenueSettingsService(new SettingsService(m.HospitalSettings));
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
-    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
+    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     svc = new RefundsService(reg, settings, bills, approvals, final, m.Refund, m.TaskAlertItem);
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600983', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000083' });

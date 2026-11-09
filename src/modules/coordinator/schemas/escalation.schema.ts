@@ -3,7 +3,9 @@ import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type EscalationDocument = Escalation & Document;
 
-export type EscalationSource = { kind: 'clock' | 'failed' | 'loop' | 'manual'; id?: string };
+/** `discharge-left`: a patient who left without discharge (A16), one per plan. */
+export const ESCALATION_SOURCE_KINDS = ['clock', 'failed', 'loop', 'manual', 'discharge-left'] as const;
+export type EscalationSource = { kind: (typeof ESCALATION_SOURCE_KINDS)[number]; id?: string };
 
 /** Something late or broken, walking up a ladder of duty titles until a person acknowledges it. Real time. */
 @Schema({ timestamps: true })
@@ -12,7 +14,7 @@ export class Escalation {
   @Prop({ required: true }) ladder: string;
   @Prop({ required: true, default: 0 }) step: number;
   @Prop({ required: true }) reason: string;
-  @Prop({ required: true, type: { kind: { type: String, enum: ['clock', 'failed', 'loop', 'manual'], required: true }, id: { type: String } }, _id: false })
+  @Prop({ required: true, type: { kind: { type: String, enum: ESCALATION_SOURCE_KINDS, required: true }, id: { type: String } }, _id: false })
   source: EscalationSource;
   @Prop({ type: String, default: 'open', enum: ['open', 'acknowledged'] }) state: 'open' | 'acknowledged';
   @Prop({ type: MongooseSchema.Types.ObjectId }) alert: Types.ObjectId;

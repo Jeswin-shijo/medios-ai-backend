@@ -64,6 +64,13 @@ describe('PatientsService.update', () => {
     assert.deepEqual(seen, [id, id]);
   });
 
+  test('a patient can be set to Deceased and to Left without discharge', async () => {
+    const id = await placeholder();
+    assert.equal((await service.update(id, { status: 'Deceased' })).status, 'Deceased');
+    assert.equal((await service.update(id, { status: 'Left without discharge' })).status, 'Left without discharge');
+    assert.equal(((await m.Patient.findById(id).lean().exec()) as any).status, 'Left without discharge');
+  });
+
   test('a patient who was never a placeholder is left as is', async () => {
     const p = await m.Patient.create({ uhid: 'MHK202600902', name: 'Latha Devi', age: 33, gender: 'Female', phone: '9100000003' });
     const out = await service.update(String(p._id), { age: 34 });

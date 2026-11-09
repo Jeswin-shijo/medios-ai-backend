@@ -18,6 +18,8 @@ export type { AnswerInput } from './pharmacy-queries.service';
 export { PHARMACY_AGENT } from './pharmacy-queries.service';
 
 const lineBusy = 'This line just changed. Reload and try again.';
+/** Lines not yet issued or closed: what `cancel` can end. */
+export const WAITING = ['to-check', 'query', 'approved'] as const;
 
 /**
  * The pharmacist's checks (approve, query, reject), cancelling, the doctor's answers, and the kidney recheck.
@@ -147,7 +149,7 @@ export class PharmacyChecksService {
     if (text.length < 1 || text.length > 300) throw new BadRequestException('Give a reason of 1 to 300 characters');
     const line = await this.queries.load(lineId);
     if (line.status === 'issued') throw new ConflictException('An issued line can be stopped only by answering a query');
-    if (!['to-check', 'query', 'approved'].includes(line.status)) throw new ConflictException('This line is already closed');
+    if (!(WAITING as readonly string[]).includes(line.status)) throw new ConflictException('This line is already closed');
     // Cancelling the line answers whichever query is open now (the one read here).
     if (line.query && this.queries.hasOpenQuery(line)) return this.answer(actor, lineId, { querySeq: line.query.seq, outcome: 'cancel', reason: text });
     const done = await this.lines
@@ -159,6 +161,29 @@ export class PharmacyChecksService {
     if (!done.modifiedCount) throw new ConflictException(lineBusy);
     await this.orders.publish(String(line.order), [{ type: 'pharmacy.cancelled', lineId, extra: { querySeq: line.querySeq }, dedupeKey: `pharmacy.cancelled:${lineId}` }]);
     return this.orders.line(lineId);
+  }
+
+  /**
+   * Cancels each line that is still waiting (to-check, query or approved) through `cancel`, for an agent acting on its
+   * own. A line closed meanwhile is skipped; one that changed meanwhile is read again and tried once more. Returns how
+   * many this call cancelled.
+   */
+  async cancelWaiting(actor: Actor, lineIds: string[], reason: string): Promise<number> {
+    let count = 0;
+    for (const id of lineIds) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await this.cancel(actor, id, reason);
+          count += 1;
+          break;
+        } catch (e) {
+          if (!(e instanceof ConflictException)) throw e;
+          const now = await this.lines.findById(id).select('status').lean<{ status: string }>().exec();
+          if (!now || !(WAITING as readonly string[]).includes(now.status)) break;
+        }
+      }
+    }
+    return count;
   }
 
   // ---------- queries and answers (see pharmacy-queries.service.ts) ----------

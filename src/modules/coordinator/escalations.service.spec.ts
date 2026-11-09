@@ -279,9 +279,9 @@ describe('EscalationsService', () => {
     await service.ensureDefaults();
     await service.ensureDefaults();
     const titles = await service.titles();
-    assert.equal(titles.length, 11);
+    assert.equal(titles.length, 12);
     assert.deepEqual(titles.find((t) => t.key === 'er-consultant')!.holders, [nurse.id]);
-    assert.equal((await service.ladders()).length, 9);
+    assert.equal((await service.ladders()).length, 11);
 
     await assert.rejects(service.saveTitle(nurse, { key: 'x', label: 'x', holders: [] }), { status: 403 });
     await assert.rejects(service.saveTitle(admin, { key: 'x', label: 'x', holders: [String(new Types.ObjectId())] }), { status: 400 });
@@ -293,7 +293,7 @@ describe('EscalationsService', () => {
       { status: 400 },
     );
     await service.saveLadder(admin, { key: 'l', label: 'l', steps: [{ title: 'er-consultant', waitMinutes: 5 }, { title: 'er-consultant', waitMinutes: 0 }] });
-    assert.equal((await service.ladders()).length, 10);
+    assert.equal((await service.ladders()).length, 12);
   });
 
   test('the lab and lab-critical ladders and the two titles exist after seeding defaults', async () => {
@@ -343,12 +343,12 @@ describe('EscalationsService', () => {
 
   test('billing-in-charge and the revenue ladder are defaults', async () => {
     const titles = await service.titles();
-    assert.equal(titles.length, 11);
+    assert.equal(titles.length, 12);
     assert.equal(titles.find((t) => t.key === 'billing-in-charge')!.label, 'Billing in charge');
-    assert.equal(titles[titles.length - 1].key, 'billing-in-charge');
-    assert.equal(titles[titles.length - 2].key, 'ot-in-charge');
+    assert.equal(titles[titles.length - 1].key, 'ward-nurse-in-charge');
+    assert.equal(titles[titles.length - 2].key, 'billing-in-charge');
     const ladders = await service.ladders();
-    assert.equal(ladders.length, 9);
+    assert.equal(ladders.length, 11);
     assert.equal(ladders.find((l) => l.key === 'revenue')!.label, 'Revenue');
     assert.deepEqual(ladders.find((l) => l.key === 'revenue')!.steps, [
       { title: 'billing-in-charge', waitMinutes: 30 },
@@ -360,6 +360,32 @@ describe('EscalationsService', () => {
   test('a revenue-bill escalation cannot be acknowledged directly', async () => {
     const e = await service.raise({ ladder: 'revenue', reason: 'Bill late', source: { kind: 'clock', id: 'rv1' }, alertLink: 'revenue-bill:b1', closesOnStop: true });
     await assert.rejects(() => service.acknowledge(admin, String(e._id)), { status: 409, message: 'Finish it on the Revenue page.' });
+    assert.equal((await Escalation.findById(e._id).lean())!.state, 'open');
+  });
+
+  test('ward-nurse-in-charge and the discharge ladders are defaults', async () => {
+    const titles = await service.titles();
+    assert.equal(titles.length, 12);
+    assert.equal(titles[titles.length - 1].key, 'ward-nurse-in-charge');
+    assert.equal(titles[titles.length - 1].label, 'Ward nurse in charge');
+    const ladders = await service.ladders();
+    assert.equal(ladders.length, 11);
+    assert.deepEqual(ladders.find((l) => l.key === 'discharge')!.steps, [
+      { title: 'ward-nurse-in-charge', waitMinutes: 30 },
+      { title: 'duty-administrator', waitMinutes: 30 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
+    // B3-M9: named for who it pages, not for what is late.
+    assert.deepEqual(ladders.map((l) => [l.key, l.label]).filter(([k]) => k.startsWith('discharge')), [['discharge', 'Discharge'], ['discharge-doctor', 'Discharge doctor']]);
+    assert.deepEqual(ladders.find((l) => l.key === 'discharge-doctor')!.steps, [
+      { title: 'duty-doctor', waitMinutes: 15 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ]);
+  });
+
+  test('a discharge-order escalation cannot be acknowledged directly', async () => {
+    const e = await service.raise({ ladder: 'discharge', reason: 'Discharge late', source: { kind: 'clock', id: 'dc1' }, alertLink: 'discharge-order:o1', closesOnStop: true });
+    await assert.rejects(() => service.acknowledge(admin, String(e._id)), { status: 409, message: 'This closes on the Discharge page.' });
     assert.equal((await Escalation.findById(e._id).lean())!.state, 'open');
   });
 
@@ -405,10 +431,10 @@ describe('EscalationsService', () => {
 
   test('ot-in-charge and the consult ladder are defaults', async () => {
     const titles = await service.titles();
-    assert.equal(titles.length, 11);
+    assert.equal(titles.length, 12);
     assert.equal(titles.find((t) => t.key === 'ot-in-charge')!.label, 'OT and cath lab in charge');
     const ladders = await service.ladders();
-    assert.equal(ladders.length, 9);
+    assert.equal(ladders.length, 11);
     assert.deepEqual(ladders.find((l) => l.key === 'consult')!.steps, [{ title: 'medical-superintendent', waitMinutes: 0 }]);
   });
 

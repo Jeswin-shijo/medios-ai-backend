@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { DischargeOrder, DischargeOrderSchema } from '../discharge/schemas/discharge-order.schema';
 import { ErVisit, ErVisitSchema } from '../er/schemas/er-visit.schema';
 import { LabLine, LabLineSchema } from '../lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestSchema } from '../lab/schemas/lab-request.schema';
@@ -82,6 +83,8 @@ import { RevenueSnapshot, RevenueSnapshotSchema } from './schemas/revenue-snapsh
       { name: PharmacyOrder.name, schema: PharmacyOrderSchema },
       { name: ProcedureBooking.name, schema: ProcedureBookingSchema },
       { name: ConsultRequest.name, schema: ConsultRequestSchema },
+      // The same schema object the Bed Agent registers (one model name, one schema).
+      { name: DischargeOrder.name, schema: DischargeOrderSchema },
       // A kiosk visit's bill settles once its token is done (R30).
       { name: OpVisit.name, schema: OpVisitSchema },
       { name: QueueToken.name, schema: QueueTokenSchema },

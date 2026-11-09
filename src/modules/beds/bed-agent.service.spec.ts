@@ -69,7 +69,7 @@ async function until(check: () => Promise<boolean>, ms = 5000) {
 }
 
 describe('BedAgentService', () => {
-  const { Ward, Bed, Admission, BedSuggestion, Patient, BedRequest, TaskAlertItem, HospitalSettings } = models();
+  const { Ward, Bed, Admission, BedSuggestion, Patient, BedRequest, TaskAlertItem, HospitalSettings, DischargeOrder } = models();
   let ai: ReturnType<typeof fakeAi>;
   let events: BedEvents;
   let seen: BedRequestEvent[];
@@ -155,7 +155,7 @@ describe('BedAgentService', () => {
     seen = [];
     events.requests$.subscribe((e) => seen.push(e));
     patients = new PatientsService(Patient);
-    beds = new BedsService(Ward, Bed, Admission, patients, events);
+    beds = new BedsService(Ward, Bed, Admission, patients, events, DischargeOrder);
     requests = new BedRequestsService(BedRequest, patients, beds, new BedAlerts(TaskAlertItem), events);
     suggestions = new SuggestionsService(BedSuggestion, beds, patients, ai as unknown as AiService);
     settings = new SettingsService(HospitalSettings);
@@ -401,7 +401,7 @@ describe('BedAgentService', () => {
         return super.admitToFreeBed(...args);
       }
     }
-    const racing = new RacingBeds(Ward, Bed, Admission, patients, events);
+    const racing = new RacingBeds(Ward, Bed, Admission, patients, events, DischargeOrder);
     const [one, two] = [newAgent({ beds: racing }), newAgent({ beds: racing })];
     const [first, second] = [await ask({ patientId: await patient() }), await ask({ patientId: await patient() })];
 
@@ -525,7 +525,7 @@ describe('BedAgentService', () => {
         throw new Error('Database unavailable');
       }
     }
-    const broken = newAgent({ beds: new BrokenBeds(Ward, Bed, Admission, patients, events) });
+    const broken = newAgent({ beds: new BrokenBeds(Ward, Bed, Admission, patients, events, DischargeOrder) });
     const id = await ask({ patientId: await patient() });
 
     Logger.overrideLogger(false);
@@ -651,7 +651,7 @@ describe('BedAgentService', () => {
     assert.deepEqual([(await load(discharged)).state, (await load(moved)).state], ['waiting', 'waiting']);
 
     // One is discharged, the other moved by hand without the request.
-    await beds.discharge(bed('HDU-2'), NURSE, String(leaving._id));
+    await beds.discharge(bed('HDU-2'), NURSE, String(leaving._id), { viaDischarge: true });
     await beds.transferToFreeBed(bed('HDU-4'), bed('TWN-2'), DOCTOR);
     const logs = await BedSuggestion.countDocuments();
     await agent.retryWaiting();
@@ -708,7 +708,7 @@ describe('BedAgentService', () => {
     assert.equal(kept.state, 'attention');
     assert.equal(kept.lockedUntil, undefined);
 
-    await beds.discharge(bed('HDU-2'), NURSE, String(admission._id));
+    await beds.discharge(bed('HDU-2'), NURSE, String(admission._id), { viaDischarge: true });
     const logs = await BedSuggestion.countDocuments();
     await agent.recover();
     await agent.idle();
@@ -769,7 +769,7 @@ describe('BedAgentService', () => {
     });
 
     // The AI's first pick is taken meanwhile; its second pick is assigned.
-    const taken = new TakenFirst(Ward, Bed, Admission, patients, events);
+    const taken = new TakenFirst(Ward, Bed, Admission, patients, events, DischargeOrder);
     const id = await ask({ patientId: await patient() });
     ai.result = answer([
       { ref: 'b2', reason: 'Quiet end of the ward.' },
@@ -787,7 +787,7 @@ describe('BedAgentService', () => {
     assert.equal(req.decision.sample, false);
 
     // The AI's only pick is taken: the rules' best bed is assigned, under the rules' reason.
-    const takenAgain = new TakenFirst(Ward, Bed, Admission, patients, events);
+    const takenAgain = new TakenFirst(Ward, Bed, Admission, patients, events, DischargeOrder);
     const other = await ask({ patientId: await patient() });
     ai.result = answer([{ ref: 'b2', reason: 'Quiet end of the ward.' }]);
     await newAgent({ beds: takenAgain }).process(other);

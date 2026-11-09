@@ -57,10 +57,10 @@ describe('RevenueKioskService', () => {
     const registry = new AgentRegistry();
     const messages = new MessagesService(m.AgentMessage, registry, new CoordinatorEvents());
     const reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     const settings = new RevenueSettingsService(new SettingsService(m.HospitalSettings));
-    const final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    const final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     const pay = new PaymentsService(reg, settings, bills, final, m.Payment);
     opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     svc = new RevenueKioskService(opd, bills, pay, m.Patient, m.ChargeLine, m.Payment, final, new QueueEvents());
@@ -131,6 +131,31 @@ describe('RevenueKioskService', () => {
     ]);
     // The appointment's own fee is still due; the visit's consultation is paid.
     assert.equal((await m.Bill.findById(opdBill._id).lean())!.totals.balance, 300);
+  });
+
+  test("a visit by a patient still admitted after the stay's bill settled is an OPD visit: no continuation bill, the stay untouched", async () => {
+    // Discharge design 4.5: a case-linked late charge for this stay would open a continuation bill. A kiosk visit carries no
+    // case and is not a stay's charge, so it keeps to the day's walk-in bill and the appointment's own OPD bill.
+    const adm = await m.Admission.create({
+      patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3,
+      status: 'active', admittedAt: new Date(Date.now() - 3 * 86_400_000), admittedBy: 'Nurse',
+    });
+    const settled = await m.Bill.create({
+      number: 'BL-0900', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, kind: 'admission', state: 'settled', case: new Types.ObjectId(),
+      admission: adm._id, openedAt: new Date(Date.now() - 3 * 86_400_000), finalAt: new Date(), settledAt: new Date(), payer: 'self',
+      totals: { charges: 9000, discounts: 0, payments: 9000, refunds: 0, balance: 0 },
+    });
+    const untouched = await m.Bill.findById(settled._id).lean();
+
+    const walkIn = (await m.Bill.findById((await svc.record(visit())).billId).lean())!;
+    assert.equal(walkIn.kind, 'walk-in');
+    const a = await appt();
+    const onAppointment = (await m.Bill.findById((await svc.record(visit({ appointmentId: String(a._id) }))).billId).lean())!;
+    assert.deepEqual([onAppointment.kind, String(onAppointment.appointment)], ['opd', String(a._id)]);
+
+    assert.equal(await m.Bill.countDocuments({ kind: 'admission' }), 1, 'no continuation bill');
+    assert.equal(await m.Bill.countDocuments({ continuationOf: { $ne: null } } as any), 0);
+    assert.deepEqual(await m.Bill.findById(settled._id).lean(), untouched, 'the settled stay bill is untouched');
   });
 
   test('the bill of an earlier day: routing uses the day of the visit', async () => {

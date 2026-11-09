@@ -67,6 +67,11 @@ import { Payment, PaymentDocument, PaymentSchema } from '../modules/revenue/sche
 import { Refund, RefundDocument, RefundSchema } from '../modules/revenue/schemas/refund.schema';
 import { Correction, CorrectionDocument, CorrectionSchema } from '../modules/revenue/schemas/correction.schema';
 import { RevenueSnapshot, RevenueSnapshotDocument, RevenueSnapshotSchema } from '../modules/revenue/schemas/revenue-snapshot.schema';
+import { ClinicalDocument, ClinicalDocumentDocument, ClinicalDocumentSchema } from '../modules/documents/schemas/document.schema';
+import { DischargePlan, DischargePlanDocument, DischargePlanSchema } from '../modules/discharge/schemas/discharge-plan.schema';
+import { DischargeOrder, DischargeOrderDocument, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
+import { DischargeSummary, DischargeSummaryDocument, DischargeSummarySchema } from '../modules/discharge/schemas/discharge-summary.schema';
+import { DischargeSnapshot, DischargeSnapshotDocument, DischargeSnapshotSchema } from '../modules/discharge/schemas/discharge-snapshot.schema';
 import { QueueDisplay, QueueDisplayDocument, QueueDisplaySchema } from '../modules/queue/schemas/queue-display.schema';
 import { BillInvoice, BillInvoiceDocument, BillInvoiceSchema } from '../modules/billing/schemas/bill.schema';
 import { ReceptionSession, ReceptionSessionDocument, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
@@ -165,6 +170,11 @@ export function models() {
     Refund: model(Refund, RefundSchema) as Model<RefundDocument>,
     Correction: model(Correction, CorrectionSchema) as Model<CorrectionDocument>,
     RevenueSnapshot: model(RevenueSnapshot, RevenueSnapshotSchema) as Model<RevenueSnapshotDocument>,
+    ClinicalDocument: model(ClinicalDocument, ClinicalDocumentSchema) as Model<ClinicalDocumentDocument>,
+    DischargePlan: model(DischargePlan, DischargePlanSchema) as Model<DischargePlanDocument>,
+    DischargeOrder: model(DischargeOrder, DischargeOrderSchema) as Model<DischargeOrderDocument>,
+    DischargeSummary: model(DischargeSummary, DischargeSummarySchema) as Model<DischargeSummaryDocument>,
+    DischargeSnapshot: model(DischargeSnapshot, DischargeSnapshotSchema) as Model<DischargeSnapshotDocument>,
     QueueDisplay: model(QueueDisplay, QueueDisplaySchema) as Model<QueueDisplayDocument>,
     BillInvoice: model(BillInvoice, BillInvoiceSchema) as Model<BillInvoiceDocument>,
     ReceptionSession: model(ReceptionSession, ReceptionSessionSchema) as Model<ReceptionSessionDocument>,

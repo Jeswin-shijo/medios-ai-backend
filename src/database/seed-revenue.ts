@@ -22,6 +22,7 @@ import { CoordinatorCounter, CoordinatorCounterSchema } from '../modules/coordin
 import { DutyTitle, DutyTitleSchema } from '../modules/coordinator/schemas/duty-title.schema';
 import { Escalation, EscalationSchema } from '../modules/coordinator/schemas/escalation.schema';
 import { Ladder, LadderSchema } from '../modules/coordinator/schemas/ladder.schema';
+import { DischargeOrder, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
 import { ErVisit, ErVisitSchema } from '../modules/er/schemas/er-visit.schema';
 import { LabLine, LabLineSchema } from '../modules/lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestSchema } from '../modules/lab/schemas/lab-request.schema';
@@ -166,6 +167,7 @@ function wire() {
   const bills = new RevenueBillsService(
     model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, model(Payment, PaymentSchema) as never, model(Refund, RefundSchema) as never,
     model(Correction, CorrectionSchema) as never, model(Estimate, EstimateSchema) as never, model(CoordinatorCounter, CoordinatorCounterSchema) as never, model(Patient, PatientSchema) as never,
+    undefined, model(Admission, AdmissionSchema) as never,
   );
   const prices = new PriceListService(model(PriceItem, PriceItemSchema) as never, model(Ward, WardSchema) as never, model(OpDoctor, OpDoctorSchema) as never);
   const capture = new RevenueCaptureService(
@@ -176,7 +178,7 @@ function wire() {
   const final = new FinalBillService(
     messages, registration, settings, bills, model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, model(TaskAlertItem, TaskAlertItemSchema) as never,
     model(PharmacyOrder, PharmacyOrderSchema) as never, model(PharmacyLine, PharmacyLineSchema) as never, model(LabRequest, LabRequestSchema) as never, model(LabLine, LabLineSchema) as never,
-    model(Admission, AdmissionSchema) as never, model(Appointment, AppointmentSchema) as never,
+    model(Admission, AdmissionSchema) as never, model(Appointment, AppointmentSchema) as never, model(DischargeOrder, DischargeOrderSchema) as never,
   );
   const payments = new PaymentsService(registration, settings, bills, final, model(Payment, PaymentSchema) as never);
   const opd = new RevenueOpdService(
@@ -192,7 +194,7 @@ function wire() {
   );
   const bedDays = new RevenueBedDaysService(
     messages, prices, bills, registration, model(Admission, AdmissionSchema) as never, model(Bed, BedSchema) as never, model(Case, CaseSchema) as never,
-    model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, estimates, deposits, final,
+    model(Bill, BillSchema) as never, model(ChargeLine, ChargeLineSchema) as never, estimates, deposits, final, settings, model(DischargeOrder, DischargeOrderSchema) as never,
   );
   const refunds = new RefundsService(registration, settings, bills, approvals, final, model(Refund, RefundSchema) as never, model(TaskAlertItem, TaskAlertItemSchema) as never);
   const corrections = new CorrectionsService(registration, bills, approvals, final, prices, capture, model(Correction, CorrectionSchema) as never, model(ChargeLine, ChargeLineSchema) as never);
@@ -351,25 +353,32 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
     await afterMoney(billId);
     return p;
   };
+  /** The tests collected and the medicines issued on a case, charged as the capture handlers charge them (lab.collected, pharmacy.issued). */
+  const chargeCaseCare = async (caseRef: unknown) => {
+    const caseId = String(caseRef);
+    for (const request of await labRequests.find({ case: caseRef }).sort({ _id: 1 }).lean<any[]>()) {
+      const lines = await labLines.find({ request: request._id, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>();
+      if (lines.length) await w.capture.replay('lab.collected', { case: caseId, payload: { requestId: String(request._id), tests: lines.map((l) => l.test) } });
+    }
+    const orderIds = (await pharmacyOrders.find({ case: caseRef }).select('_id').lean<any[]>()).map((o) => o._id);
+    for (const line of await pharmacyLines.find({ order: { $in: orderIds }, status: 'issued' }).sort({ _id: 1 }).lean<any[]>()) {
+      await w.capture.replay('pharmacy.issued', { case: caseId, payload: { lineId: String(line._id), quantity: line.issued?.quantity ?? 1 } });
+    }
+  };
   /** The charges the other agents recorded on a visit's case: the ER fees, the collected tests and the issued medicines, as the capture handlers charge them. */
   const chargeCase = async (visit: any) => {
     const caseId = String(visit.case);
     await w.capture.replay('er.arrived', { case: caseId, payload: { visitId: String(visit._id) } });
     if (visit.doctorSeenAt) await w.capture.replay('er.doctor-seen', { case: caseId, payload: { visitId: String(visit._id) } });
-    for (const request of await labRequests.find({ case: visit.case }).sort({ _id: 1 }).lean<any[]>()) {
-      const lines = await labLines.find({ request: request._id, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>();
-      if (lines.length) await w.capture.replay('lab.collected', { case: caseId, payload: { requestId: String(request._id), tests: lines.map((l) => l.test) } });
-    }
-    const orderIds = (await pharmacyOrders.find({ case: visit.case }).select('_id').lean<any[]>()).map((o) => o._id);
-    for (const line of await pharmacyLines.find({ order: { $in: orderIds }, status: 'issued' }).sort({ _id: 1 }).lean<any[]>()) {
-      await w.capture.replay('pharmacy.issued', { case: caseId, payload: { lineId: String(line._id), quantity: line.issued?.quantity ?? 1 } });
-    }
+    await chargeCaseCare(visit.case);
     return (await billModel.findOne({ kind: 'er', erVisit: visit._id }).lean<any>()) ?? null;
   };
   /**
    * The assignment of a bed: the admission bill, the bed days so far, the estimate and the deposit task. First the patient's
    * case is opened or joined (lifted to ipd) with the admission on it, as the Bed Agent does on bed.assigned, so the bill, its
    * messages and its clocks carry the case from the start (a clock is matched on its case and could not be stopped otherwise).
+   * Then the care already on the case (collected tests, issued medicines) is charged, as the capture handlers would have done
+   * (B3-I1), before any deposit or final-bill maths reads the totals.
    */
   const admit = async (admission: any) => {
     const { case: c } = await w.cases.openOrJoin({
@@ -382,6 +391,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
     });
     await w.cases.addRefs(String(c._id), { admissionId: String(admission._id) });
     await (w.bedDays as any).onAssigned({ case: String(c._id), payload: { admissionId: String(admission._id) } });
+    await chargeCaseCare(c._id);
     const bill = await billModel.findOne({ kind: 'admission', admission: admission._id }).lean<any>();
     if (!bill) throw new Error(`Revenue seed: no admission bill for ${admission.patientName}`);
     return bill;

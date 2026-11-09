@@ -6,7 +6,7 @@ import { SettingsService } from '../settings/settings.service';
 import { AGENT_ACTOR, Actor, REQUEST_ROLES } from './actor';
 import { autoAssignable, nearestOptionText, splitExtraNeeds } from './agent-policy';
 import { BedEvents } from './bed-events';
-import { BedRequestsService } from './bed-requests.service';
+import { BedRequestsService, ruleInput } from './bed-requests.service';
 import { AdmissionRequestInput, BedInfo, Need, WardInfo } from './bed-types';
 import { BedsService } from './beds.service';
 import {
@@ -68,20 +68,6 @@ const confirmText = (pending: NeedEvidence, patientName: string) =>
 /** "Added oxygen: notes mention “SpO₂”." */
 const addedText = (added: NeedEvidence[]) =>
   `Added ${listed(added.map((a) => NEED_LABEL[a.need]))}: notes mention ${listed(added.map((a) => quote(a.evidence)))}.`;
-
-/** The request as the rules see it. A transfer leaves the patient's current bed out. */
-function ruleInput(req: BedRequestDocument): AdmissionRequestInput {
-  return {
-    age: req.patientAge,
-    gender: req.patientGender,
-    roomClass: req.roomClass,
-    needs: [...req.needs],
-    department: req.department,
-    expectedStayDays: req.expectedStayDays,
-    notes: req.notes,
-    currentBedId: req.type === 'transfer' && req.fromBed ? String(req.fromBed) : undefined,
-  };
-}
 
 function suggestInput(req: BedRequestDocument): SuggestInput {
   const { roomClass, needs, department, expectedStayDays, notes, currentBedId } = ruleInput(req);

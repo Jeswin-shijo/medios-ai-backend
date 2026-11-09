@@ -5,6 +5,7 @@ import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { AppointmentEvents } from '../appointments/appointment-events';
 import { BED_MESSAGE_TYPES } from '../beds/bed-coordinator.bridge';
+import { DISCHARGE_MESSAGE_TYPES } from '../discharge/discharge-coordinator.registration';
 import { AgentRegistry } from '../coordinator/agent-registry';
 import { CasesService } from '../coordinator/cases.service';
 import { ClocksService } from '../coordinator/clocks.service';
@@ -85,6 +86,7 @@ describe('FinalBillService', () => {
     messages = new MessagesService(m.AgentMessage, registry, events);
     stub('er', ER_MESSAGE_TYPES);
     stub('bed', BED_MESSAGE_TYPES);
+    stub('discharge', DISCHARGE_MESSAGE_TYPES);
     const escalations = new EscalationsService(m.Escalation, m.DutyTitle, m.Ladder, m.TaskAlertItem, m.User, messages, events);
     await escalations.ensureDefaults();
     new ClocksService(m.Clock, registry, messages, escalations);
@@ -93,15 +95,15 @@ describe('FinalBillService', () => {
     const rules = new RulesService(registry, settingsService, events);
     cases = new CasesService(m.Case, m.CoordinatorCounter, messages, registry, new TimelineService(m.TimelineEvent));
     const reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
-    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     payments = new PaymentsService(reg, settings, bills, final, m.Payment);
     opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     const estimates = new RevenueEstimatesService(reg, settings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
     const deposits = new RevenueDepositsService(messages, reg, rules, settings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
-    bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final);
+    bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final, settings, m.DischargeOrder);
     bedDays.clock = () => T0;
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600991', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000091' });
@@ -315,6 +317,7 @@ describe('FinalBillService', () => {
     const [task] = await finalTask(id);
     assert.equal(task.status, 'Pending');
     assert.equal(task.type, 'System');
+    assert.equal(task.subtitle, 'The ER visit has ended');
     assert.ok(!/Ravi/.test(task.title), 'no name in the alert title');
     const [clock] = await running('revenue-final');
     assert.equal(String(clock.ref), id);
@@ -359,11 +362,93 @@ describe('FinalBillService', () => {
     assert.equal(await m.ChargeLine.countDocuments({ 'source.type': 'bed-day' }), 2, 'the last part day is charged first');
     const [req] = await sent('revenue.final-requested');
     assert.equal(String((req.payload as any).billId), String(b._id));
+    assert.equal((await finalTask(b._id))[0].subtitle, 'The patient has been discharged');
     await deliver('bed', 'bed.discharged', payload);
     await quiet();
     assert.equal((await sent('revenue.final-requested')).length, 1);
     assert.equal((await finalTask(b._id)).length, 1);
     assert.equal((await running('revenue-final')).length, 1);
+  });
+
+  const admitted = () =>
+    m.Admission.create({ patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'active', admittedAt: T0, admittedBy: 'Nurse' });
+  const order = (admission: unknown, extra: Record<string, unknown> = {}) =>
+    m.DischargeOrder.create({
+      plan: new Types.ObjectId(), admission, patient: patient._id, kind: 'home', state: 'ordered', plannedLeaveAt: new Date(2026, 8, 26, 16, 5), windowAt: T0,
+      diagnosis: 'Community-acquired pneumonia', orderedBy: { name: 'Dr Arun' }, orderedAt: T0, ...extra,
+    });
+
+  test('window-opened requests the final bill once, with the leaving subtitle', async () => {
+    const adm = await admitted();
+    // The stay's first bill was settled; the active one continues it. The request is for the active one.
+    const old = await m.Bill.create({
+      number: 'BL-0900', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, kind: 'admission', state: 'settled', case: caseDoc._id,
+      admission: adm._id, openedAt: T0, finalAt: T0, settledAt: T0, payer: 'self',
+    });
+    const b = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(adm._id) });
+    const payload = {
+      orderId: String(new Types.ObjectId()), admissionId: String(adm._id), bedLabel: 'GA-01', kind: 'home',
+      plannedLeaveAt: new Date(2026, 8, 26, 14, 30), leaveDueAt: new Date(Date.now() + 2 * H), summaryDueAt: new Date(Date.now() + H), summarySigned: false,
+    };
+    await deliver('discharge', 'discharge.window-opened', payload);
+    await until(async () => (await finalTask(b._id)).length === 1 && (await running('revenue-final')).length === 1, 'the final request');
+    const [task] = await finalTask(b._id);
+    assert.deepEqual([task.title, task.subtitle, task.status], [`Prepare final bill: ${b.number}`, 'Discharge ordered: leaving ~02:30 PM', 'Pending']);
+    assert.ok(!/Ravi/.test(task.title + task.subtitle), 'no name in the task title or subtitle');
+    const [req] = await sent('revenue.final-requested');
+    assert.equal(String((req.payload as any).billId), String(b._id));
+    assert.equal((await finalTask(old._id)).length, 0, 'never the settled bill');
+
+    // A replay asks for nothing new.
+    await deliver('discharge', 'discharge.window-opened', payload);
+    await quiet();
+    assert.equal((await sent('revenue.final-requested')).length, 1);
+    assert.equal((await finalTask(b._id)).length, 1);
+
+    // A stay with no active bill: nothing is asked for, and nothing throws (deliver checks the message was delivered).
+    await deliver('discharge', 'discharge.window-opened', { ...payload, orderId: String(new Types.ObjectId()), admissionId: String(new Types.ObjectId()) });
+    await quiet();
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: /:final$/ }), 1);
+
+    // The reconcile pass restores a lost task with the same subtitle while the order is open.
+    await order(adm._id, { plannedLeaveAt: new Date(2026, 8, 26, 14, 30) });
+    await m.TaskAlertItem.deleteMany({ link: /:final$/ });
+    assert.equal(await final.ensureFinalTask(String(b._id)), true);
+    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~02:30 PM');
+  });
+
+  test('the desk route while an order is open gets the leaving subtitle', async () => {
+    const adm = await admitted();
+    const b = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(adm._id) });
+    await order(adm._id);
+    // POST /revenue/bills/:id/final/request calls request(actor, id) with no options.
+    assert.equal(await final.request(DESK, String(b._id)), true);
+    assert.equal((await finalTask(b._id))[0].subtitle, 'Discharge ordered: leaving ~04:05 PM');
+
+    // Once the patient has left, the stay's bill says so, even if the order was not yet marked as left.
+    const gone = await m.Admission.create({ patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'discharged', admittedAt: T0, dischargedAt: new Date(), admittedBy: 'Nurse' });
+    const left = await bills.open({ kind: 'admission', patientId: String(patient._id), admissionId: String(gone._id) });
+    await order(gone._id, { state: 'ready' });
+    assert.equal(await final.request(DESK, String(left._id)), true);
+    assert.equal((await finalTask(left._id))[0].subtitle, 'The patient has been discharged');
+  });
+
+  test('the still-admitted warning reads Discharge ordered while an order is active', async () => {
+    const adm = await admitted();
+    const b = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId: String(caseDoc._id), admissionId: String(adm._id) });
+    const warning = async () => (await final.prepare(DESK, String(b._id))).warnings.find((w) => w.kind === 'admission')?.text;
+    assert.equal(await warning(), 'The patient is still admitted');
+    const o = await order(adm._id);
+    assert.equal(await warning(), 'Discharge ordered, leaving ~04:05 PM');
+    await m.DischargeOrder.updateOne({ _id: o._id }, { $set: { state: 'ready', plannedLeaveAt: new Date(2026, 8, 27, 9, 0) } });
+    assert.equal(await warning(), 'Discharge ordered, leaving ~09:00 AM');
+    await m.DischargeOrder.updateOne({ _id: o._id }, { $set: { state: 'cancelled', cancelled: { by: { name: 'Dr Arun' }, reason: 'Fever again', at: T0 } } });
+    assert.equal(await warning(), 'The patient is still admitted', 'a cancelled order is not active');
+    await order(new Types.ObjectId());
+    assert.equal(await warning(), 'The patient is still admitted', "another stay's order does not count");
+    await order(adm._id, { state: 'left', leftAt: new Date() });
+    await m.Admission.updateOne({ _id: adm._id }, { $set: { status: 'discharged', dischargedAt: new Date() } });
+    assert.equal(await warning(), undefined, 'no admission warning once the patient has left');
   });
 
   test('settling sends bill-settled, the case close check passes and the case closes', async () => {

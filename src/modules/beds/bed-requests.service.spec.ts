@@ -1,6 +1,8 @@
 import * as assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { Types } from 'mongoose';
+import { clinicNow } from '../../common/utils/clinic-time';
 import { closeTestDb, connectTestDb, models, resetTestDb } from '../../test/test-db';
 import { PatientsService } from '../patients/patients.service';
 import { UserRole } from '../users/schemas/user.schema';
@@ -13,7 +15,7 @@ import { BedsService } from './beds.service';
 const DOCTOR: Actor = { id: 'user-d', name: 'Dr. Shajin', role: UserRole.DOCTOR };
 
 describe('BedRequestsService', () => {
-  const { Ward, Bed, Admission, Patient, BedRequest, TaskAlertItem } = models();
+  const { Ward, Bed, Admission, Patient, BedRequest, TaskAlertItem, DischargeOrder } = models();
   let service: BedRequestsService;
   let events: BedEvents;
   let seen: BedRequestEvent[];
@@ -46,7 +48,7 @@ describe('BedRequestsService', () => {
     seen = [];
     events.requests$.subscribe((e) => seen.push(e));
     const patients = new PatientsService(Patient);
-    const beds = new BedsService(Ward, Bed, Admission, patients, events);
+    const beds = new BedsService(Ward, Bed, Admission, patients, events, DischargeOrder);
     service = new BedRequestsService(BedRequest, patients, beds, new BedAlerts(TaskAlertItem), events);
   });
 
@@ -252,5 +254,52 @@ describe('BedRequestsService', () => {
       await service.checkHandAssign(tid, { patientId: other, type: 'transfer', fromBedId: icuBedId });
       await assert.rejects(service.checkHandAssign(tid, { patientId: other, type: 'transfer', fromBedId: '6ae0b6c6c1d50aee80a67731' }), wrong);
     });
+  });
+
+  test('leaving-soon lists an occupied leaving bed that passes the rules, never a wrong-gender ward, and nothing for a non-waiting request', async () => {
+    const now = clinicNow();
+    const inHours = (h: number) => new Date(now.getTime() + h * 3_600_000);
+    const ward = (code: string, name: string, shortName: string, gender: string, sortOrder: number) =>
+      Ward.create({ code, name, shortName, floor: 1, type: 'general', gender, ratePerDay: 800, nearDepartments: [], sortOrder });
+    const men = await ward('GWA', 'General ward A (men)', 'Ward A', 'male', 1);
+    const women = await ward('GWB', 'General ward B (women)', 'Ward B', 'female', 2);
+    /** An occupied bed with a real stay; `order` gives the stay a discharge order. */
+    const occupied = async (w: { _id: unknown; shortName: string }, n: number, gender: string, order?: { state: string; hours: number }) => {
+      const bed = await Bed.create({ ward: w._id, label: `${w.shortName} • Bed ${n}`, number: n, features: [], state: 'occupied', occupantGender: gender });
+      const admission = await Admission.create({
+        patient: new Types.ObjectId(), patientUhid: `U${n}`, patientName: `In ${n}`, bed: bed._id, roomClass: 'general', expectedStayDays: 3,
+        admittedAt: now, admittedBy: 'x',
+      });
+      await Bed.updateOne({ _id: bed._id }, { admission: admission._id }).exec();
+      if (order) {
+        await DischargeOrder.create({
+          plan: new Types.ObjectId(), admission: admission._id, patient: admission.patient, kind: 'home', state: order.state,
+          plannedLeaveAt: inHours(order.hours), windowAt: now, diagnosis: 'x', orderedBy: { id: 'u', name: 'Dr. X' }, orderedAt: now,
+        });
+      }
+      return String(bed._id);
+    };
+    await occupied(men, 1, 'Male', { state: 'ordered', hours: 1 }); // the soonest, but a men's ward
+    const later = await occupied(women, 1, 'Female', { state: 'ordered', hours: 3 });
+    const sooner = await occupied(women, 2, 'Female', { state: 'ready', hours: 2 });
+    await occupied(women, 3, 'Female'); // no order: staying
+    await occupied(women, 4, 'Female', { state: 'cancelled', hours: 1 }); // order cancelled: staying
+    await occupied(women, 5, 'Female', { state: 'left', hours: 1 });
+
+    const id = String((await service.create(DOCTOR, input()))._id); // a woman, general ward
+    assert.deepEqual(await service.leavingSoon(id), []); // still searching
+    await service.toState(id, 'waiting', 'No general bed is free.');
+    const wardB = 'General ward B (women)';
+    assert.deepEqual(await service.leavingSoon(id), [
+      { bedId: sooner, bedLabel: 'Ward B • Bed 2', wardName: wardB, plannedAt: inHours(2).toISOString() },
+      { bedId: later, bedLabel: 'Ward B • Bed 1', wardName: wardB, plannedAt: inHours(3).toISOString() },
+    ]);
+    // Never held: every bed is as it was.
+    assert.equal(await Bed.countDocuments({ state: 'occupied' }), 7);
+    assert.equal(await Bed.countDocuments({ holdBy: { $exists: true } }), 0);
+
+    await service.toState(id, 'attention', 'Confirm isolation.');
+    assert.deepEqual(await service.leavingSoon(id), []);
+    await assert.rejects(service.leavingSoon(new Types.ObjectId().toString()), (e: any) => e instanceof NotFoundException);
   });
 });

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, mock, test } from 'node:test';
 import { Logger } from '@nestjs/common';
+import mongoose from 'mongoose';
 import { hourOf } from '../common/utils/series';
 import { AppointmentEvents } from '../modules/appointments/appointment-events';
 import { AgentRegistry } from '../modules/coordinator/agent-registry';
@@ -47,6 +48,8 @@ const DAY = '2026-09-26';
 /** The real clock while seeding: Thursday 29 Oct 2026, 10:00 local. The clinic clock is 26 Sep 2026 at the same time. */
 const NOW = new Date(2026, 9, 29, 10, 0, 0, 0).getTime();
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, 'seed-data', `${name}.json`), 'utf8'));
+/** The real clock, kept before the spec mocks Date. */
+const RealDate = Date;
 
 describe('seedRevenue', () => {
   const m = models();
@@ -84,22 +87,22 @@ describe('seedRevenue', () => {
     const settings = new RevenueSettingsService(settingsService);
     const rules = new RulesService(registry, settingsService, events);
     const reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    const bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    const bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     const capture = new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
-    const final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    const final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     const payments = new PaymentsService(reg, settings, bills, final, m.Payment);
     const opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     const estimates = new RevenueEstimatesService(reg, settings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
     const deposits = new RevenueDepositsService(messages, reg, rules, settings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
-    const bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final);
+    const bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final, settings, m.DischargeOrder);
     const refunds = new RefundsService(reg, settings, bills, approvals, final, m.Refund, m.TaskAlertItem);
     new CorrectionsService(reg, bills, approvals, final, prices, capture, m.Correction, m.ChargeLine);
     reg.onModuleInit();
     const reconcile = new RevenueReconcileService(
       reg, bills, final, payments, estimates, deposits, refunds, capture, bedDays, opd,
       m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.TaskAlertItem, m.Clock,
-      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission,
+      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission, m.DischargeOrder,
     );
     return { reconcile, bedDays, registry };
   };
@@ -125,6 +128,13 @@ describe('seedRevenue', () => {
 
   before(async () => {
     await connectTestDb();
+    // As in seed-discharge.spec: Mongoose's staleness check reads the real clock, but each heartbeat is stamped with the
+    // global Date, which this spec mocks to a moment before the real date; once the spec runs past about 10 s (a busy
+    // machine) the connection would look stale and every query would buffer until it timed out. So each heartbeat is
+    // stamped again with the real clock (this listener runs after mongoose's own).
+    mongoose.connection.getClient().on('serverHeartbeatSucceeded', () => {
+      (mongoose.connection as unknown as { _lastHeartbeatAt: number })._lastHeartbeatAt = RealDate.now();
+    });
     await resetTestDb();
     Logger.overrideLogger(false);
     savedClinic = process.env.CLINIC_DATE;
@@ -280,6 +290,30 @@ describe('seedRevenue', () => {
     assert.equal(await m.AgentMessage.countDocuments({ type: 'revenue.final-requested', 'payload.billId': String(bill._id) }).exec(), 1);
     const clock = (await m.Clock.findOne({ def: 'revenue-final', ref: String(bill._id) }).lean<any>().exec())!;
     assert.equal(clock?.state, 'running');
+  });
+
+  test("every collected test and issued medicine on a real stay's case is charged (B3-I1)", async () => {
+    const admissions = await m.Admission.find({ status: 'active', sample: { $ne: true } }).lean<any[]>().exec();
+    assert.ok(admissions.length >= 2, `${admissions.length} real stays`);
+    let labs = 0;
+    let meds = 0;
+    for (const a of admissions) {
+      const bill = await m.Bill.findOne({ kind: 'admission', admission: a._id }).lean<any>().exec();
+      if (!bill?.case) continue;
+      const requests = await m.LabRequest.find({ case: bill.case }).lean<any[]>().exec();
+      const collected = await m.LabLine.find({ request: { $in: requests.map((r) => r._id) }, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>().exec();
+      for (const l of collected) {
+        labs++;
+        assert.ok(await m.ChargeLine.exists({ 'source.type': 'lab', 'source.ref': `${l.request}:${l.test}` }).exec(), `${bill.number}: ${l.test} is charged`);
+      }
+      const orders = await m.PharmacyOrder.find({ case: bill.case }).select('_id').lean<any[]>().exec();
+      for (const l of await m.PharmacyLine.find({ order: { $in: orders.map((o) => o._id) }, status: 'issued' }).lean<any[]>().exec()) {
+        meds++;
+        assert.ok(await m.ChargeLine.exists({ 'source.type': 'pharmacy.issued', 'source.ref': String(l._id) }).exec(), `${bill.number}: ${l.medicine} is charged`);
+      }
+    }
+    // David Raj's stay has LR-0016's two received tests on it, so the check is not empty.
+    assert.ok(labs >= 2, `${labs} collected tests, ${meds} issued medicines`);
   });
 
   test('both admission bills carry the patient\'s ipd case, as a bed assignment gives them, and its Bill settled check fails while money is due', async () => {

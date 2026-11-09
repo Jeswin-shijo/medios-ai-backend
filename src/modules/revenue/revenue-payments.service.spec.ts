@@ -60,8 +60,8 @@ describe('PaymentsService', () => {
     const settingsService = new SettingsService(m.HospitalSettings);
     const settings = new RevenueSettingsService(settingsService);
     const reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
-    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
+    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder);
     svc = new PaymentsService(reg, settings, bills, final, m.Payment);
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600981', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000081' });
@@ -146,7 +146,7 @@ describe('PaymentsService', () => {
 
   test('I7: an ER placeholder filled in later shows the real name on the bill view, the list and its search, the receipt and the final bill', async () => {
     const events = new PatientEvents();
-    const listening = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, events);
+    const listening = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, events, m.Admission);
     listening.onModuleInit();
     const patients = new PatientsService(m.Patient, events);
     const unknown = await m.Patient.create({ uhid: 'MHK202600990', name: 'Unknown male, ER-0012', age: 40, gender: 'Male', phone: '', detailsPending: true });

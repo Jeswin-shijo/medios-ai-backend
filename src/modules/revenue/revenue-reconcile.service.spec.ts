@@ -96,21 +96,21 @@ describe('RevenueReconcileService', () => {
     const settings = new RevenueSettingsService(settingsService);
     const rules = new RulesService(registry, settingsService, events);
     reg = new RevenueCoordinatorRegistration(registry, m.Bill, m.Refund, m.TaskAlertItem, messages);
-    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    bills = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     const prices = new PriceListService(m.PriceItem, m.Ward, m.OpDoctor);
     capture = new RevenueCaptureService(messages, prices, bills, reg, m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.ChargeLine);
-    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.OpVisit, m.QueueToken);
+    final = new FinalBillService(messages, reg, settings, bills, m.Bill, m.ChargeLine, m.TaskAlertItem, m.PharmacyOrder, m.PharmacyLine, m.LabRequest, m.LabLine, m.Admission, m.Appointment, m.DischargeOrder, m.OpVisit, m.QueueToken);
     payments = new PaymentsService(reg, settings, bills, final, m.Payment);
     const opd = new RevenueOpdService(new AppointmentEvents(), prices, bills, m.Appointment, m.Patient, m.ChargeLine, final);
     const estimates = new RevenueEstimatesService(reg, settings, prices, m.Bill, m.Estimate, m.ProcedureBooking, m.Admission, m.Bed);
     deposits = new RevenueDepositsService(messages, reg, rules, settings, prices, bills, estimates, m.Bill, m.TaskAlertItem, m.ProcedureBooking, m.Admission, m.Bed, m.Ward, m.Case);
-    const bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final);
+    const bedDays = new RevenueBedDaysService(messages, prices, bills, reg, m.Admission, m.Bed, m.Case, m.Bill, m.ChargeLine, estimates, deposits, final, settings, m.DischargeOrder);
     const refunds = new RefundsService(reg, settings, bills, approvals, final, m.Refund, m.TaskAlertItem);
     corrections = new CorrectionsService(reg, bills, approvals, final, prices, capture, m.Correction, m.ChargeLine);
     reconcile = new RevenueReconcileService(
       reg, bills, final, payments, estimates, deposits, refunds, capture, bedDays, opd,
       m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.TaskAlertItem, m.Clock,
-      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission,
+      m.ErVisit, m.LabRequest, m.LabLine, m.PharmacyLine, m.PharmacyOrder, m.ProcedureBooking, m.ConsultRequest, m.Admission, m.DischargeOrder,
     );
     reg.onModuleInit();
     patient = await m.Patient.create({ uhid: 'MHK202600995', name: 'Ravi Kumar', age: 62, gender: 'Male', phone: '9100000095' });
@@ -356,6 +356,53 @@ describe('RevenueReconcileService', () => {
     await age(m.Admission, adm._id);
     await reconcile.reconcile();
     assert.ok(await m.TaskAlertItem.exists({ link: `revenue-bill:${bill._id}:final` }));
+  });
+
+  const admittedStay = (who = patient) =>
+    m.Admission.create({ patient: who._id, patientUhid: who.uhid, patientName: who.name, bed: new Types.ObjectId(), roomClass: 'general', expectedStayDays: 3, status: 'active', admittedAt: new Date(Date.now() - 86_400_000), admittedBy: 'Nurse' } as any);
+  /** A discharge order in progress; `windowOpenedAt` is set once its window opened (the Discharge Agent sent window-opened). */
+  const openOrder = (adm: any, extra: Record<string, unknown> = {}) =>
+    m.DischargeOrder.create({
+      plan: new Types.ObjectId(), admission: adm._id, patient: adm.patient, kind: 'home', state: 'ordered', plannedLeaveAt: new Date(2026, 8, 26, 14, 30), windowAt: new Date(),
+      diagnosis: 'Community-acquired pneumonia', orderedBy: { name: 'Dr Arun' }, orderedAt: new Date(), ...extra,
+    });
+
+  test('a lost window request is re-requested by reconcile with the leaving subtitle', async () => {
+    const adm = await admittedStay();
+    const bill = await bills.open({ kind: 'admission', patientId: String(patient._id), caseId, admissionId: String(adm._id) });
+    await openOrder(adm, { windowOpenedAt: new Date() });
+    // Another stay whose order's window has not opened yet is not asked for.
+    const other = await m.Patient.create({ uhid: 'MHK202600997', name: 'Asha', age: 30, gender: 'Female', phone: '9100000097' });
+    const later = await admittedStay(other);
+    const waiting = await bills.open({ kind: 'admission', patientId: String(other._id), admissionId: String(later._id) });
+    await openOrder(later);
+    await age(m.Bill, bill._id);
+    await age(m.Bill, waiting._id);
+    await reconcile.reconcile();
+    const [task] = await m.TaskAlertItem.find({ link: `revenue-bill:${bill._id}:final` }).lean();
+    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~02:30 PM');
+    assert.equal((await sent('revenue.final-requested')).length, 1);
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${waiting._id}:final` }), 0, 'no window yet: not asked for');
+    await age(m.Bill, bill._id);
+    await reconcile.reconcile();
+    assert.equal((await sent('revenue.final-requested')).length, 1, 'asked once');
+  });
+
+  test('a continuation bill opened after the window opened is requested by reconcile', async () => {
+    const adm = await admittedStay();
+    const settled = await m.Bill.create({
+      number: 'BL-0900', patient: patient._id, patientUhid: patient.uhid, patientName: patient.name, kind: 'admission', state: 'settled', case: new Types.ObjectId(caseId),
+      admission: adm._id, openedAt: new Date(), finalAt: new Date(), settledAt: new Date(), payer: 'self',
+    });
+    await openOrder(adm, { windowOpenedAt: new Date(Date.now() - 3_600_000) });
+    // A late charge after the settlement opens the continuation bill; the window's own request went to the settled bill.
+    const continuation = await bills.forCharge({ patientId: String(patient._id), caseId });
+    assert.equal(String(continuation.continuationOf), String(settled._id));
+    await age(m.Bill, continuation._id);
+    await reconcile.reconcile();
+    const [task] = await m.TaskAlertItem.find({ link: `revenue-bill:${continuation._id}:final` }).lean();
+    assert.equal(task?.subtitle, 'Discharge ordered: leaving ~02:30 PM');
+    assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${settled._id}:final` }), 0);
   });
 
   test('R30: a miss newer than 300 charged rows is still charged in one pass', async () => {

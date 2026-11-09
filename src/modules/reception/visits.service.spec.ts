@@ -70,10 +70,10 @@ describe('OpVisitsService', () => {
     const registry = new AgentRegistry();
     const messages = new MessagesService(m().AgentMessage, registry, new CoordinatorEvents());
     const reg = new RevenueCoordinatorRegistration(registry, m().Bill, m().Refund, m().TaskAlertItem, messages);
-    const bills = (revenueBills = new RevenueBillsService(m().Bill, m().ChargeLine, m().Payment, m().Refund, m().Correction, m().Estimate, m().CoordinatorCounter, m().Patient));
+    const bills = (revenueBills = new RevenueBillsService(m().Bill, m().ChargeLine, m().Payment, m().Refund, m().Correction, m().Estimate, m().CoordinatorCounter, m().Patient, undefined, m().Admission));
     const prices = new PriceListService(m().PriceItem, m().Ward, m().OpDoctor);
     const revenueSettings = new RevenueSettingsService(settings);
-    const final = new FinalBillService(messages, reg, revenueSettings, bills, m().Bill, m().ChargeLine, m().TaskAlertItem, m().PharmacyOrder, m().PharmacyLine, m().LabRequest, m().LabLine, m().Admission, m().Appointment, m().OpVisit, m().QueueToken);
+    const final = new FinalBillService(messages, reg, revenueSettings, bills, m().Bill, m().ChargeLine, m().TaskAlertItem, m().PharmacyOrder, m().PharmacyLine, m().LabRequest, m().LabLine, m().Admission, m().Appointment, m().DischargeOrder, m().OpVisit, m().QueueToken);
     const payments = new PaymentsService(reg, revenueSettings, bills, final, m().Payment);
     revenueOpd = new RevenueOpdService(appointmentEvents, prices, bills, m().Appointment, m().Patient, m().ChargeLine, final);
     reg.onModuleInit();

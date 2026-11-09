@@ -199,8 +199,11 @@ export class BedsController {
   @Post(':bedId/discharge')
   @Roles(...ADMIT_ROLES)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Discharge the admission named (none for a sample occupant); the bed goes to cleaning' })
+  @ApiOperation({
+    summary: 'Release a sample occupant; the bed goes to cleaning. A real admission gets 409: it ends through the discharge order',
+  })
   async discharge(@CurrentUser() user: any, @Param('bedId') bedId: string, @Body() dto: DischargeBedDto) {
+    // No `viaDischarge`: only the Discharge Agent ends a real admission.
     await this.beds.discharge(bedId, actorOf(user), dto.admissionId ?? null);
     return OK;
   }

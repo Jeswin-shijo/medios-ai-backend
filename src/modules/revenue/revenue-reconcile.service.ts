@@ -4,6 +4,7 @@ import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
 import { Clock, ClockDocument } from '../coordinator/schemas/clock.schema';
 import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
+import { DischargeOrder, DischargeOrderDocument, OPEN_ORDER_STATES } from '../discharge/schemas/discharge-order.schema';
 import { ErVisit, ErVisitDocument } from '../er/schemas/er-visit.schema';
 import { LabLine, LabLineDocument } from '../lab/schemas/lab-line.schema';
 import { LabRequest, LabRequestDocument } from '../lab/schemas/lab-request.schema';
@@ -84,6 +85,8 @@ export class RevenueReconcileService implements OnModuleInit {
     @InjectModel(ProcedureBooking.name) private readonly procedures: Model<ProcedureBookingDocument>,
     @InjectModel(ConsultRequest.name) private readonly consults: Model<ConsultRequestDocument>,
     @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
+    /** Read-only: a stay whose discharge window has opened is owed its final-bill request. */
+    @InjectModel(DischargeOrder.name) private readonly dischargeOrders: Model<DischargeOrderDocument>,
   ) {}
 
   /** R32: remember when the Revenue Agent first ran, so the first pass never looks before it. */
@@ -248,7 +251,8 @@ export class RevenueReconcileService implements OnModuleInit {
 
   /**
    * The final bill is asked for (R29) when an open ER bill's visit has left for any reason but admission, or an open admission
-   * bill's admission is discharged, and no `:final` task exists. request() itself refuses a bill that already has one.
+   * bill's admission is discharged or has a discharge order in progress whose window has opened (a lost window request, or a
+   * continuation bill opened after it), and no `:final` task exists. request() itself refuses a bill that already has one.
    */
   private async requestFinals(old: Date, since: Date): Promise<number> {
     let n = 0;
@@ -259,9 +263,15 @@ export class RevenueReconcileService implements OnModuleInit {
       for (const b of bills) if (gone.has(String(b.erVisit)) && (await this.final.request('agent', String(b._id)))) n++;
     });
     await this.walk(this.billModel, { ...window, kind: 'admission', admission: { $exists: true } }, async (bills) => {
-      const done = await this.admissions.find({ _id: { $in: bills.map((b) => b.admission) }, status: 'discharged' }).select('_id').lean().exec();
-      const gone = new Set(this.ids(done));
-      for (const b of bills) if (gone.has(String(b.admission)) && (await this.final.request('agent', String(b._id)))) n++;
+      const stays = bills.map((b) => b.admission);
+      const done = await this.admissions.find({ _id: { $in: stays }, status: 'discharged' }).select('_id').lean().exec();
+      const leaving = await this.dischargeOrders
+        .find({ admission: { $in: stays }, state: { $in: OPEN_ORDER_STATES }, windowOpenedAt: { $ne: null } })
+        .select('admission')
+        .lean()
+        .exec();
+      const due = new Set([...this.ids(done), ...leaving.map((o) => String(o.admission))]);
+      for (const b of bills) if (due.has(String(b.admission)) && (await this.final.request('agent', String(b._id)))) n++;
     });
     return n;
   }

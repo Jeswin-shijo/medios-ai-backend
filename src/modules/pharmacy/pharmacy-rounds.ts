@@ -78,6 +78,11 @@ export const startKey = (type: 'pharmacy.to-check' | 'pharmacy.to-issue', line: 
   `${type}:${String(line._id)}:${new Date((type === 'pharmacy.to-check' ? line.enteredCheckAt : line.issueFrom) ?? 0).getTime()}`;
 
 const earliest = (dates: Date[]): Date | null => (dates.length ? new Date(Math.min(...dates.map((d) => d.getTime()))) : null);
+/** B3-I2: a take-home order's due times are never before its `dueFrom` (the discharge window); other orders' are as computed. */
+const notBefore = (order: { takeHome?: boolean; dueFrom?: Date }) => (due: Date | null): Date | null => {
+  const from = order.takeHome && order.dueFrom ? new Date(order.dueFrom).getTime() : NaN;
+  return due && !isNaN(from) && due.getTime() < from ? new Date(from) : due;
+};
 const same = (a?: Date | null, b?: Date | null) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
 
 type Clock = 'check' | 'issue';
@@ -111,11 +116,12 @@ export class PharmacyRounds {
         .lean<{ status: string; enteredCheckAt?: Date; issueFrom?: Date; waitingForStock?: boolean }[]>()
         .exec();
       const created = order.createdAt ?? new Date();
-      const checkDue = earliest(waiting.filter((l) => l.status === 'to-check').map((l) => new Date(new Date(l.enteredCheckAt ?? created).getTime() + targets.check[order!.priority] * MIN_MS)));
+      const floor = notBefore(order);
+      const checkDue = floor(earliest(waiting.filter((l) => l.status === 'to-check').map((l) => new Date(new Date(l.enteredCheckAt ?? created).getTime() + targets.check[order!.priority] * MIN_MS))));
       const issueDue =
         order.setting === 'OPD'
           ? null
-          : earliest(waiting.filter((l) => l.status === 'approved' && !l.waitingForStock).map((l) => new Date(new Date(l.issueFrom ?? created).getTime() + targets.issue[order!.priority] * MIN_MS)));
+          : floor(earliest(waiting.filter((l) => l.status === 'approved' && !l.waitingForStock).map((l) => new Date(new Date(l.issueFrom ?? created).getTime() + targets.issue[order!.priority] * MIN_MS))));
       const a = await this.step(order, 'check', checkDue, closed);
       const b = await this.step(order, 'issue', issueDue, closed);
       order = (await this.orders.findById(order._id).exec()) ?? order;
@@ -225,8 +231,11 @@ export class PharmacyRounds {
     });
   }
 
-  /** Re-sends the start message of the earliest waiting line, with that line's own dedupe key. False when nothing waits. */
-  async resendStart(orderId: string, clock: Clock): Promise<boolean> {
+  /**
+   * Re-sends the start message of the earliest waiting line, with that line's own dedupe key (with `keySuffix` appended
+   * when given, for a send that must go again within the minute, such as a moved due time). False when nothing waits.
+   */
+  async resendStart(orderId: string, clock: Clock, keySuffix?: string): Promise<boolean> {
     const order = isValidObjectId(orderId) ? await this.orders.findById(orderId).exec() : null;
     if (!order) throw new NotFoundException('Pharmacy order not found');
     if (clock === 'issue' && order.setting === 'OPD') return false;
@@ -236,7 +245,7 @@ export class PharmacyRounds {
         : await this.lines.findOne({ order: order._id, status: 'approved', waitingForStock: { $ne: true } }).sort({ issueFrom: 1, _id: 1 }).exec();
     if (!line) return false;
     const type = clock === 'check' ? 'pharmacy.to-check' : 'pharmacy.to-issue';
-    await this.publish(orderId, [{ type, lineId: String(line._id), dedupeKey: startKey(type, line) }]);
+    await this.publish(orderId, [{ type, lineId: String(line._id), dedupeKey: `${startKey(type, line)}${keySuffix ? `:${keySuffix}` : ''}` }]);
     return true;
   }
 

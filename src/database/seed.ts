@@ -36,6 +36,7 @@ import { formatTokenLabel, newSecret } from '../modules/reception/format';
 import { seedBeds } from './seed-beds';
 import { DEMO_CARDS, seedDemoCards } from './seed-cards';
 import { seedCoordinator } from './seed-coordinator';
+import { seedDischarge } from './seed-discharge';
 import { seedEr } from './seed-er';
 import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
 import { seedPharmacy } from './seed-pharmacy';
@@ -43,7 +44,7 @@ import { seedRevenue } from './seed-revenue';
 import { seedScheduling } from './seed-scheduling';
 import { resolveDemoPassword } from './seed-password';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
-import { buildCounters, buildDepartments, buildDoctors } from './seed-opd';
+import { DEMO_CARDS, buildCounters, buildDepartments, buildDoctors } from './seed-opd';
 
 // Seeds the demo hospital. The fixtures in ./seed-data are the records the web app
 // was designed around (Dr. Shajin's clinic on 26 Sep 2026, with Arun Kumar as the
@@ -281,8 +282,11 @@ async function seed() {
   // The scheduling day: doctor logins, staff and a week's roster, appointments by doctor (one doctor on leave), procedures with Mohan Raj's
   // cath-lab story, consults, conflicts and snapshots, on the cases above.
   await seedScheduling(process.env.CLINIC_DATE ?? DEMO_DAY);
-  // The revenue day: the price list and about 20 bills in every state, on the visits, stays, tests, medicines and appointments above (last: it starts billing from now).
+  // The revenue day: the price list and about 20 bills in every state, on the visits, stays, tests, medicines and appointments above (it starts billing from now).
   await seedRevenue(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // The discharge day: David Raj's discharge and ten more stays in every checklist state, billed by Revenue's own services, and snapshots.
+  // Last: it sets both the Discharge and the Revenue start stamps after its records, so neither minute pass back-bills or repairs them.
+  await seedDischarge(process.env.CLINIC_DATE ?? DEMO_DAY);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; ${process.env.SEED_DEMO_PASSWORD ? 'password from SEED_DEMO_PASSWORD' : `password ${DEMO_PASSWORD}`}`,

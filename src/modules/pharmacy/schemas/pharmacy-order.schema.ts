@@ -24,6 +24,21 @@ export class PharmacyOrder {
   @Prop({ default: 0 }) prescriptionRev: number;
   /** Real time: a prescription sync in progress holds this until it ends. */
   @Prop({ type: Date }) syncingUntil?: Date;
+  /** The medicines a patient leaves with, placed by the Discharge Agent (always a Ward order). */
+  @Prop({ default: false }) takeHome: boolean;
+  /** Clinic clock: when the patient is planned to leave (take-home orders only). */
+  @Prop({ type: Date }) plannedLeaveAt?: Date;
+  /**
+   * Real time, take-home orders only: no check or issue is due before it. The Discharge Agent sets it to the start of
+   * the discharge window (the planned leaving time less its target), so an evening order for tomorrow pages nobody
+   * overnight (B3-I2).
+   */
+  @Prop({ type: Date }) dueFrom?: Date;
+  /**
+   * Real time, take-home orders only: the discharge it was for was cancelled (B3-M4). Its lines no longer carry a ward
+   * medicine on at home, so the checks treat them as ward lines: the same medicine on the ward is a red double again.
+   */
+  @Prop({ type: Date }) takeHomeCancelledAt?: Date;
   /** Clinic clock. */
   @Prop({ required: true, type: Date }) orderedAt: Date;
   /** Real time: set after pharmacy.ordered went out. */

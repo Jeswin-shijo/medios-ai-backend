@@ -4,7 +4,7 @@ import { clinicNow, displayDateTime } from '../../common/utils/clinic-time';
 import type { Actor } from '../beds/actor';
 import { TaskAlertDocument } from '../tasks-alerts/schemas/task-alert.schema';
 import { productByKey } from './pharmacy-catalogue';
-import { LineEvent, LineInput, LineSpec, PharmacyLineView, PharmacyOrdersService, RecheckResult } from './pharmacy-orders.service';
+import { LineEvent, LineInput, LineSpec, PharmacyLineView, PharmacyOrdersService, RecheckResult, orderContext } from './pharmacy-orders.service';
 import { medicineLabel, startKey } from './pharmacy-rounds';
 import { Flag, needsDoctor, needsReason, needsReview } from './pharmacy-rules';
 import { PharmacySettingsService } from './pharmacy-settings.service';
@@ -305,7 +305,8 @@ export class PharmacyQueries {
       const confirm = confirmOf(c.confirm);
       if (confirm) spec.confirm = confirm;
       // The same red-allergy gate as ordering: a doctor's reason on the new line, or it is refused (before anything changes).
-      const [drafts] = await this.orders.draftSpecFlags(String(line.patient), [spec], [lineId]);
+      // Checked where the line sits, so a changed take-home line still reads as continuing a ward medicine.
+      const [drafts] = await this.orders.draftSpecFlags(String(line.patient), [spec], [lineId], orderContext(await this.orderOf(line)));
       const red = drafts.find((f) => f.kind === 'allergy' && f.severity === 'red');
       if (red && !confirm) throw new BadRequestException(`Confirm the allergy for ${medicineLabel(spec.medicine)} with a reason, or choose another`);
       if (outcome === 'change' && !issued) {

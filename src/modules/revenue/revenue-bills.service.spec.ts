@@ -24,7 +24,7 @@ describe('RevenueBillsService', () => {
   beforeEach(async () => {
     delete process.env.CLINIC_DATE;
     await resetTestDb();
-    svc = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient);
+    svc = new RevenueBillsService(m.Bill, m.ChargeLine, m.Payment, m.Refund, m.Correction, m.Estimate, m.CoordinatorCounter, m.Patient, undefined, m.Admission);
     patient = await m.Patient.create({ uhid: 'MHK202600971', name: 'Mohan Raj', age: 58, gender: 'Male', phone: '9100000071' });
   });
 

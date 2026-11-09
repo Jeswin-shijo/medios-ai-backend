@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Subscription } from 'rxjs';
 import { clinicNow, isoDate } from '../../common/utils/clinic-time';
+import { Admission, AdmissionDocument } from '../beds/schemas/admission.schema';
 import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { PatientEvents } from '../patients/patient-events';
 import { Patient, PatientDocument } from '../patients/schemas/patient.schema';
@@ -25,6 +26,8 @@ export interface OpenBillInput {
   appointmentId?: string | null;
   /** YYYY-MM-DD; defaults to the clinic day. Used by opd and walk-in bills. */
   day?: string;
+  /** An admission bill that continues this settled bill of the same stay. */
+  continuationOf?: string | null;
 }
 
 export interface ChargeInput {
@@ -82,7 +85,9 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
     @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>,
     @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
     /** Absent only where the service is built by hand (seeds, specs). */
-    private readonly patientEvents?: PatientEvents,
+    private readonly patientEvents: PatientEvents | undefined,
+    /** Read-only: whether a stay whose bill is settled is still admitted (continuation bills). */
+    @InjectModel(Admission.name) private readonly admissions: Model<AdmissionDocument>,
   ) {}
 
   onModuleInit() {
@@ -166,6 +171,7 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
         case: input.caseId ? oid(input.caseId, 'caseId') : undefined,
         erVisit: input.erVisitId ? oid(input.erVisitId, 'erVisitId') : undefined,
         admission: input.admissionId ? oid(input.admissionId, 'admissionId') : undefined,
+        continuationOf: input.continuationOf ? oid(input.continuationOf, 'continuationOf') : undefined,
         appointment: input.appointmentId ? oid(input.appointmentId, 'appointmentId') : undefined,
         day: input.kind === 'opd' || input.kind === 'walk-in' ? day : undefined,
         payer: 'self',
@@ -180,20 +186,61 @@ export class RevenueBillsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Which bill a charge goes on (spec 4.1). `day` (YYYY-MM-DD, default the clinic day) picks the OPD or walk-in bill. */
-  async forCharge(input: { patientId: string; caseId?: string | null; day?: string }): Promise<BillDocument> {
+  /**
+   * Which bill a charge goes on (spec 4.1; the continuation step is Discharge design 4.5). `day` (YYYY-MM-DD, default the
+   * clinic day) picks the OPD or walk-in bill. `openContinuation: false` is for a caller that charges nothing (a procedure
+   * booking): it never opens a continuation bill, so it joins the case's active bill or falls through to the day's OPD or
+   * walk-in bill, as before continuation bills. A charge with no case (a kiosk visit) never reaches the stay's bills.
+   */
+  async forCharge(
+    input: { patientId: string; caseId?: string | null; day?: string },
+    opts: { openContinuation?: boolean } = {},
+  ): Promise<BillDocument> {
     const patient = oid(input.patientId, 'patientId');
     if (input.caseId && isValidObjectId(input.caseId)) {
+      const caseId = new Types.ObjectId(input.caseId);
       const onCase = await this.bills
-        .findOne({ case: new Types.ObjectId(input.caseId), kind: { $in: ['er', 'admission'] }, state: { $in: ACTIVE_BILL_STATES } })
+        .findOne({ case: caseId, kind: { $in: ['er', 'admission'] }, state: { $in: ACTIVE_BILL_STATES } })
         .sort({ openedAt: -1, _id: -1 })
         .exec();
       if (onCase) return onCase;
+      // The stay's bill was settled but the patient is still admitted: the charge belongs to the stay, not to the day.
+      if (opts.openContinuation !== false) {
+        const continuation = await this.continuation({ case: caseId });
+        if (continuation) return continuation;
+      }
     }
     const day = input.day ?? isoDate(clinicNow());
     const opd = await this.bills.findOne({ patient, kind: 'opd', day, state: { $in: ACTIVE_BILL_STATES } }).sort({ openedAt: -1 }).exec();
     if (opd) return opd;
     return this.open({ kind: 'walk-in', patientId: input.patientId, day });
+  }
+
+  /**
+   * Where a late charge for a settled stay goes while the patient is still admitted: the stay's active admission bill, else a
+   * new continuation bill (the same patient, case and admission, `continuationOf` = the newest settled bill). Null when `where`
+   * has no settled admission bill whose admission is still active. The settled bill is never touched, and two charges at once
+   * open one bill (the active-only unique index on admission bills).
+   */
+  async continuation(where: { case: Types.ObjectId } | { admission: Types.ObjectId }): Promise<BillDocument | null> {
+    const settled = await this.bills
+      .find({ kind: 'admission', state: 'settled', admission: { $exists: true }, ...where })
+      .sort({ settledAt: -1, _id: -1 })
+      .select('patient case admission')
+      .lean()
+      .exec();
+    if (!settled.length) return null;
+    const admitted = await this.admissions.find({ _id: { $in: settled.map((b) => b.admission) }, status: 'active' }).select('_id').lean().exec();
+    const active = new Set(admitted.map((a) => String(a._id)));
+    const last = settled.find((b) => active.has(String(b.admission)));
+    if (!last) return null;
+    return this.open({
+      kind: 'admission',
+      patientId: String(last.patient),
+      caseId: last.case ? String(last.case) : null,
+      admissionId: String(last.admission),
+      continuationOf: String(last._id),
+    });
   }
 
   /**

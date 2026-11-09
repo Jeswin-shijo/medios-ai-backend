@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { clinicNow } from '../../common/utils/clinic-time';
@@ -72,7 +72,7 @@ export interface LineSpec {
 export interface RecheckResult {
   line: PharmacyLineDocument;
   newRed: Flag[];
-  reason: 'order' | 'prescription' | 'kidney' | 'procedure';
+  reason: 'order' | 'prescription' | 'kidney' | 'procedure' | 'discharge-cancelled';
 }
 
 export interface CreateOrderInput {
@@ -85,6 +85,42 @@ export interface CreateOrderInput {
   prescriptionRev?: number;
   /** A prescription order is always OPD; a direct order takes the patient's current location. */
   setting?: PharmacySetting;
+  /** The case the order must land on (it must be this patient's open case); without it the order opens or joins one. */
+  caseId?: string;
+  takeHome?: boolean;
+  /** Clinic clock; take-home orders only. */
+  plannedLeaveAt?: Date;
+  /** Real time; take-home orders only: no check or issue is due before it. */
+  dueFrom?: Date;
+}
+
+/** Internal options of `order` (the public route passes none): the Discharge Agent's take-home order uses them. */
+export interface OrderOptions {
+  setting?: PharmacySetting;
+  takeHome?: boolean;
+  plannedLeaveAt?: Date;
+  /** Real time; take-home only: no check or issue is due before it (see the order schema). */
+  dueFrom?: Date;
+  caseId?: string;
+}
+
+/** Where lines sit, for the take-home continuation rule (see `continues` in pharmacy-rules.ts). */
+export type LineContext = Pick<CheckLine, 'caseId' | 'takeHome' | 'setting'>;
+
+/** The context of an order's lines. */
+export const orderContext = (o: { case: unknown; setting: PharmacySetting; takeHome?: boolean; takeHomeCancelledAt?: Date | null }): LineContext => ({
+  caseId: String(o.case),
+  setting: o.setting,
+  // B3-M4: a take-home order whose discharge was cancelled no longer continues anything.
+  takeHome: !!o.takeHome && !o.takeHomeCancelledAt,
+});
+/** The order fields `orderContext` reads. */
+const CONTEXT_FIELDS = 'case setting takeHome takeHomeCancelledAt';
+type ContextFields = { case: Types.ObjectId; setting: PharmacySetting; takeHome?: boolean; takeHomeCancelledAt?: Date };
+
+export interface PreviewResult {
+  patient: PatientFactsView;
+  lines: { flags: FlagView[]; quantity: number | null }[];
 }
 
 export interface OrderListQuery {
@@ -141,8 +177,8 @@ export class PharmacyOrdersService {
   sendDone(orderId: string, clock: 'check' | 'issue', round: number): Promise<void> {
     return this.rounds.sendDone(orderId, clock, round);
   }
-  resendStart(orderId: string, clock: 'check' | 'issue'): Promise<boolean> {
-    return this.rounds.resendStart(orderId, clock);
+  resendStart(orderId: string, clock: 'check' | 'issue', keySuffix?: string): Promise<boolean> {
+    return this.rounds.resendStart(orderId, clock, keySuffix);
   }
   announceOrdered(order: PharmacyOrderDocument): Promise<boolean> {
     return this.rounds.announceOrdered(order);
@@ -150,32 +186,43 @@ export class PharmacyOrdersService {
 
   // ---------- ordering ----------
 
-  /** Checks a doctor's lines against the patient and their active medicines, without saving anything. */
-  async preview(input: { patientId: string; lines: LineInput[]; replacingLineId?: string }): Promise<{ patient: PatientFactsView; lines: { flags: FlagView[]; quantity: number | null }[] }> {
+  /**
+   * Checks a doctor's lines against the patient and their active medicines, without saving anything. `ctx` says where
+   * the lines will sit (a take-home order passes its own). Without it: where the replaced line sits, for an answer;
+   * else where a direct order would, on the patient's open case (the one the order joins) at its location.
+   */
+  async preview(input: { patientId: string; lines: LineInput[]; replacingLineId?: string }, ctx?: LineContext): Promise<PreviewResult> {
     const patient = await this.patients.findOne(String(input.patientId));
     const specs = this.validate(input.lines);
     const facts = await this.facts.facts(String(patient._id));
-    // A line being replaced by an answer (Change, Switch) is left out of the comparison, as the answer's own check does.
+    // A line being replaced by an answer (Change, Switch) is left out of the comparison and checked where it sits, as the answer's own check does.
     const exclude: string[] = [];
+    let where = ctx;
     if (input.replacingLineId !== undefined) {
-      const own = isValidObjectId(input.replacingLineId) ? await this.lines.findOne({ _id: input.replacingLineId, patient: patient._id }).select('_id').lean().exec() : null;
+      const own = isValidObjectId(input.replacingLineId) ? await this.lines.findOne({ _id: input.replacingLineId, patient: patient._id }).select('_id order').lean().exec() : null;
       if (!own) throw new BadRequestException('replacingLineId must be a medicine line of this patient');
       exclude.push(String(own._id));
+      const order = await this.orders.findById(own.order).select(CONTEXT_FIELDS).lean<ContextFields>().exec();
+      where ??= order ? orderContext(order) : undefined;
     }
-    const drafts = await this.draftFlags(String(patient._id), facts, specs, exclude);
+    const drafts = await this.draftFlags(String(patient._id), facts, specs, exclude, where ?? (await this.directContext(String(patient._id))));
     return {
       patient: facts,
       lines: specs.map((s, i) => ({ flags: drafts[i].map((d) => flagView({ ...d, version: 1 })), quantity: s.quantity })),
     };
   }
 
-  /** A doctor orders medicines: 1 to 10 lines at one priority. */
-  async order(actor: Actor, input: { patientId: string; priority: Priority; note?: string; lines: LineInput[] }): Promise<PharmacyOrderView> {
+  /**
+   * A doctor orders medicines: 1 to 10 lines at one priority. `opts` is internal (the public route passes none):
+   * the Discharge Agent's take-home order sets its setting, the take-home mark, the leaving time and its case.
+   */
+  async order(actor: Actor, input: { patientId: string; priority: Priority; note?: string; lines: LineInput[] }, opts: OrderOptions = {}): Promise<PharmacyOrderView> {
     if (!(PHARMACY_PRIORITIES as readonly string[]).includes(input.priority)) throw new BadRequestException('Priority must be stat, urgent or routine');
     const patient = await this.patients.findOne(String(input.patientId));
     const specs = this.validate(input.lines);
     const confirm = input.lines.map((l) => (l?.confirm && text(l.confirm.reason) ? { by: { id: actor.id, name: actor.name }, reason: text(l.confirm.reason) } : undefined));
     const facts = await this.facts.facts(String(patient._id));
+    // Only the allergy flags are read here, and they do not depend on where the lines sit: addLines saves the full checks.
     const drafts = await this.draftFlags(String(patient._id), facts, specs);
     // A red allergy needs the doctor's reason on that line, or the line goes.
     drafts.forEach((d, i) => {
@@ -185,7 +232,10 @@ export class PharmacyOrdersService {
     });
     specs.forEach((s, i) => (s.confirm = confirm[i]));
 
-    const order = await this.createOrder({ patient, priority: input.priority, orderedBy: { id: actor.id, name: actor.name }, note: input.note, source: 'order' });
+    const order = await this.createOrder({
+      patient, priority: input.priority, orderedBy: { id: actor.id, name: actor.name }, note: input.note, source: 'order',
+      setting: opts.setting, caseId: opts.caseId, takeHome: opts.takeHome, plannedLeaveAt: opts.plannedLeaveAt, dueFrom: opts.dueFrom,
+    });
     let added: PharmacyLineDocument[];
     try {
       added = await this.addLines(order, specs);
@@ -208,15 +258,7 @@ export class PharmacyOrdersService {
    */
   async createOrder(input: CreateOrderInput): Promise<PharmacyOrderDocument> {
     const patientId = String(input.patient._id);
-    const { case: theCase } = await this.cases.openOrJoin({
-      patientId,
-      patientUhid: input.patient.uhid,
-      patientName: input.patient.name,
-      kind: 'opd',
-      priority: CASE_PRIORITY[input.priority],
-      openedBy: 'pharmacy',
-    });
-    const caseId = String(theCase._id);
+    const caseId = input.caseId !== undefined ? await this.joinGiven(patientId, input.caseId) : await this.openOrJoin(input);
     const where = input.setting ? { area: input.setting, ward: undefined as string | undefined } : await this.location(caseId);
     return this.orders.create({
       number: await this.nextNumber(),
@@ -231,8 +273,40 @@ export class PharmacyOrdersService {
       note: text(input.note),
       source: input.source,
       ...(input.prescription ? { prescription: input.prescription, prescriptionRev: input.prescriptionRev ?? 0 } : {}),
+      ...(input.takeHome ? { takeHome: true } : {}),
+      ...(input.plannedLeaveAt ? { plannedLeaveAt: input.plannedLeaveAt } : {}),
+      ...(input.takeHome && input.dueFrom ? { dueFrom: input.dueFrom } : {}),
       orderedAt: clinicNow(),
     });
+  }
+
+  private async openOrJoin(input: CreateOrderInput): Promise<string> {
+    const { case: theCase } = await this.cases.openOrJoin({
+      patientId: String(input.patient._id),
+      patientUhid: input.patient.uhid,
+      patientName: input.patient.name,
+      kind: 'opd',
+      priority: CASE_PRIORITY[input.priority],
+      openedBy: 'pharmacy',
+    });
+    return String(theCase._id);
+  }
+
+  /** The given case, which must be this patient's open case; Pharmacy joins it as an agent. */
+  private async joinGiven(patientId: string, caseId: string): Promise<string> {
+    const c = await this.cases.get(caseId);
+    if (!c || String(c.patient) !== patientId) throw new BadRequestException('caseId must be a case of this patient');
+    if (c.state !== 'open') throw new ConflictException("The patient's case is closed");
+    await this.cases.addAgent(caseId, 'pharmacy');
+    return String(c._id);
+  }
+
+  /** Where a direct order's lines would sit: the patient's open case (which the order joins) at its location; none without one. */
+  private async directContext(patientId: string): Promise<LineContext> {
+    const c = await this.cases.forPatient(patientId);
+    if (!c || c.state !== 'open') return {};
+    const caseId = String(c._id);
+    return { caseId, setting: (await this.location(caseId)).area, takeHome: false };
   }
 
   /** Checks the doctor's input against the list and turns it into line specs (with quantity). */
@@ -271,27 +345,39 @@ export class PharmacyOrdersService {
     });
   }
 
-  /** The rule flags of specs for a patient, leaving out the lines in `exclude` (a line being changed must not clash with itself). */
-  async draftSpecFlags(patientId: string, specs: LineSpec[], exclude: string[] = []): Promise<FlagDraft[][]> {
-    return this.draftFlags(patientId, await this.facts.facts(patientId), specs, exclude);
+  /**
+   * The rule flags of specs for a patient, leaving out the lines in `exclude` (a line being changed must not clash with itself).
+   * `ctx`: where the specs sit (a changed line passes its own order's context).
+   */
+  async draftSpecFlags(patientId: string, specs: LineSpec[], exclude: string[] = [], ctx: LineContext = {}): Promise<FlagDraft[][]> {
+    return this.draftFlags(patientId, await this.facts.facts(patientId), specs, exclude, ctx);
   }
 
-  /** The rule flags of each spec, checked against the patient's active lines and the other specs. */
-  private async draftFlags(patientId: string, facts: PatientFactsView, specs: LineSpec[], exclude: string[] = []): Promise<FlagDraft[][]> {
-    const active = (await this.activeLines(patientId)).filter((l) => !exclude.includes(String(l._id))).map(asCheckLine);
-    const mine = specs.map(asCheckLine);
+  /** The rule flags of each spec (all sitting at `ctx`), checked against the patient's active lines and the other specs. */
+  private async draftFlags(patientId: string, facts: PatientFactsView, specs: LineSpec[], exclude: string[] = [], ctx: LineContext = {}): Promise<FlagDraft[][]> {
+    const active = (await this.activeLines(patientId)).filter((l) => !exclude.includes(String(l.doc._id))).map((l) => l.check);
+    const mine = specs.map((s) => ({ ...asCheckLine(s), ...ctx }));
     return specs.map((_, i) => checkLine(mine[i], facts, [...active, ...mine.filter((__, j) => j !== i)]));
   }
 
-  /** What the checks compare against: to-check, query and approved lines, and lines issued in the last 24 hours (real time). */
-  private activeLines(patientId: string): Promise<PharmacyLineDocument[]> {
-    return this.lines
+  /**
+   * What the checks compare against: to-check, query and approved lines, and lines issued in the last 24 hours (real time),
+   * each with its order's context (case, setting, take-home).
+   */
+  private async activeLines(patientId: string): Promise<{ doc: PharmacyLineDocument; check: CheckLine }[]> {
+    const docs = await this.lines
       .find({
         patient: patientId,
         $or: [{ status: { $in: ['to-check', 'query', 'approved'] } }, { status: 'issued', 'issued.realAt': { $gte: new Date(Date.now() - ACTIVE_ISSUED_MS) } }],
       })
       .sort({ _id: 1 })
       .exec();
+    const ids = [...new Set(docs.map((l) => String(l.order)))];
+    const orders = ids.length
+      ? await this.orders.find({ _id: { $in: ids } }).select(CONTEXT_FIELDS).lean<(ContextFields & { _id: Types.ObjectId })[]>().exec()
+      : [];
+    const where = new Map(orders.map((o) => [String(o._id), orderContext(o)] as [string, LineContext]));
+    return docs.map((doc) => ({ doc, check: { ...asCheckLine(doc), ...where.get(String(doc.order)) } }));
   }
 
   /**
@@ -301,7 +387,7 @@ export class PharmacyOrdersService {
   async addLines(order: PharmacyOrderDocument, specs: LineSpec[]): Promise<PharmacyLineDocument[]> {
     const patientId = String(order.patient);
     const facts = await this.facts.facts(patientId);
-    const drafts = await this.draftFlags(patientId, facts, specs);
+    const drafts = await this.draftFlags(patientId, facts, specs, [], orderContext(order));
     const out: PharmacyLineDocument[] = [];
     const now = clinicNow();
     for (let i = 0; i < specs.length; i++) {
@@ -370,16 +456,16 @@ export class PharmacyOrdersService {
     const active = await this.activeLines(patientId);
     const skip = new Set(opts.skip ?? []);
     const results: RecheckResult[] = [];
-    for (const line of active) {
+    for (const { doc: line, check } of active) {
       if (skip.has(String(line._id))) continue;
-      const others = active.filter((o) => String(o._id) !== String(line._id)).map(asCheckLine);
+      const others = active.filter((o) => String(o.doc._id) !== String(line._id)).map((o) => o.check);
       const sig = (fs: Flag[]) => JSON.stringify([...fs].sort((a, b) => a.key.localeCompare(b.key)));
       // The write is guarded on the version and on the flags it read, so a confirmation saved meanwhile is never overwritten:
-      // on a lost write the line is read again and the merge re-run once.
+      // on a lost write the line is read again and the merge re-run once (its order, and so its context, never changes).
       let cur: PharmacyLineDocument = line;
       for (let attempt = 0; attempt < 2; attempt++) {
         const before = (cur.flags ?? []) as Flag[];
-        const after = mergeFlags(before, checkLine(asCheckLine(cur), facts, others), cur.version, opts.kinds);
+        const after = mergeFlags(before, checkLine({ ...check, ...asCheckLine(cur) }, facts, others), cur.version, opts.kinds);
         if (sig(before) === sig(after)) break;
         const saved = await this.lines.updateOne({ _id: cur._id, version: cur.version, flags: cur.flags }, { $set: { flags: after } }).exec();
         if (saved.modifiedCount) {

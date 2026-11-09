@@ -25,6 +25,7 @@ export const DEFAULT_TITLES: { key: string; label: string }[] = [
   { key: 'chief-pharmacist', label: 'Chief pharmacist' },
   { key: 'ot-in-charge', label: 'OT and cath lab in charge' },
   { key: 'billing-in-charge', label: 'Billing in charge' },
+  { key: 'ward-nurse-in-charge', label: 'Ward nurse in charge' },
 ];
 
 export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] }[] = [
@@ -84,6 +85,20 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
       { title: 'duty-administrator', waitMinutes: 30 },
       { title: 'medical-superintendent', waitMinutes: 0 },
     ],
+  },
+  {
+    key: 'discharge',
+    label: 'Discharge',
+    steps: [
+      { title: 'ward-nurse-in-charge', waitMinutes: 30 },
+      { title: 'duty-administrator', waitMinutes: 30 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'discharge-doctor',
+    label: 'Discharge doctor',
+    steps: [{ title: 'duty-doctor', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
 ];
 
@@ -312,7 +327,9 @@ export class EscalationsService {
           ? 'Answer the query on the Pharmacy Agent page; this alert closes when it is answered.'
           : e.alertLink?.startsWith('revenue-')
             ? 'Finish it on the Revenue page.'
-            : 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+            : e.alertLink?.startsWith('discharge-')
+              ? 'This closes on the Discharge page.'
+              : 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
       );
     }
     if (actor.role !== UserRole.ADMIN) {
