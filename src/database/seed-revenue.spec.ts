@@ -282,6 +282,30 @@ describe('seedRevenue', () => {
     assert.equal(clock?.state, 'running');
   });
 
+  test("every collected test and issued medicine on a real stay's case is charged (B3-I1)", async () => {
+    const admissions = await m.Admission.find({ status: 'active', sample: { $ne: true } }).lean<any[]>().exec();
+    assert.ok(admissions.length >= 2, `${admissions.length} real stays`);
+    let labs = 0;
+    let meds = 0;
+    for (const a of admissions) {
+      const bill = await m.Bill.findOne({ kind: 'admission', admission: a._id }).lean<any>().exec();
+      if (!bill?.case) continue;
+      const requests = await m.LabRequest.find({ case: bill.case }).lean<any[]>().exec();
+      const collected = await m.LabLine.find({ request: { $in: requests.map((r) => r._id) }, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>().exec();
+      for (const l of collected) {
+        labs++;
+        assert.ok(await m.ChargeLine.exists({ 'source.type': 'lab', 'source.ref': `${l.request}:${l.test}` }).exec(), `${bill.number}: ${l.test} is charged`);
+      }
+      const orders = await m.PharmacyOrder.find({ case: bill.case }).select('_id').lean<any[]>().exec();
+      for (const l of await m.PharmacyLine.find({ order: { $in: orders.map((o) => o._id) }, status: 'issued' }).lean<any[]>().exec()) {
+        meds++;
+        assert.ok(await m.ChargeLine.exists({ 'source.type': 'pharmacy.issued', 'source.ref': String(l._id) }).exec(), `${bill.number}: ${l.medicine} is charged`);
+      }
+    }
+    // David Raj's stay has LR-0016's two received tests on it, so the check is not empty.
+    assert.ok(labs >= 2, `${labs} collected tests, ${meds} issued medicines`);
+  });
+
   test('both admission bills carry the patient\'s ipd case, as a bed assignment gives them, and its Bill settled check fails while money is due', async () => {
     const { registry } = await reconcileWorld();
     const check = registry.closeChecks().find((c) => c.agent === 'revenue' && c.label === 'Bill settled')!;

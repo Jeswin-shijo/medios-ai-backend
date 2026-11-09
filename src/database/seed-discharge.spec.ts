@@ -289,6 +289,16 @@ describe('seedDischarge', () => {
     assert.equal(await m.ChargeLine.countDocuments({ bill: bill._id, needsPrice: true }).exec(), 1);
     assert.match(lineOf(order, 'bill').detail, /1 line needs a price/);
     assert.equal(await m.TaskAlertItem.countDocuments({ link: `revenue-bill:${bill._id}:final` }).exec(), 1);
+    // B3-I1: the care on his stay is on the bill, so preparing the final bill warns of no uncharged test (LR-0016 is charged).
+    for (const l of await m.LabLine.find({ request: lr16._id }).lean<any[]>().exec()) {
+      const charge = (await m.ChargeLine.findOne({ 'source.type': 'lab', 'source.ref': `${lr16._id}:${l.test}` }).lean<any>().exec())!;
+      assert.ok(charge, `${l.test} is charged`);
+      assert.equal(String(charge.bill), String(bill._id), `${l.test} is on his admission bill`);
+    }
+    const warnings: { kind: string; text: string }[] = await (w.final as any).warningsFor(bill);
+    assert.ok(!warnings.some((x) => /Collected with no charge/.test(x.text)), JSON.stringify(warnings));
+    // Still in credit with those charges on it (the README's story: the desk refunds the rest at the final bill).
+    assert.ok(bill.totals.balance < 0, `balance ${bill.totals.balance}`);
     // His paged consult stays as seeded.
     assert.equal((await m.ConsultRequest.findOne({ number: 'CO-0003' }).lean<any>().exec())!.status, 'paged');
 

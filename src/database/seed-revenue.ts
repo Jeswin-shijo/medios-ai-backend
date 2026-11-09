@@ -353,25 +353,32 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
     await afterMoney(billId);
     return p;
   };
+  /** The tests collected and the medicines issued on a case, charged as the capture handlers charge them (lab.collected, pharmacy.issued). */
+  const chargeCaseCare = async (caseRef: unknown) => {
+    const caseId = String(caseRef);
+    for (const request of await labRequests.find({ case: caseRef }).sort({ _id: 1 }).lean<any[]>()) {
+      const lines = await labLines.find({ request: request._id, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>();
+      if (lines.length) await w.capture.replay('lab.collected', { case: caseId, payload: { requestId: String(request._id), tests: lines.map((l) => l.test) } });
+    }
+    const orderIds = (await pharmacyOrders.find({ case: caseRef }).select('_id').lean<any[]>()).map((o) => o._id);
+    for (const line of await pharmacyLines.find({ order: { $in: orderIds }, status: 'issued' }).sort({ _id: 1 }).lean<any[]>()) {
+      await w.capture.replay('pharmacy.issued', { case: caseId, payload: { lineId: String(line._id), quantity: line.issued?.quantity ?? 1 } });
+    }
+  };
   /** The charges the other agents recorded on a visit's case: the ER fees, the collected tests and the issued medicines, as the capture handlers charge them. */
   const chargeCase = async (visit: any) => {
     const caseId = String(visit.case);
     await w.capture.replay('er.arrived', { case: caseId, payload: { visitId: String(visit._id) } });
     if (visit.doctorSeenAt) await w.capture.replay('er.doctor-seen', { case: caseId, payload: { visitId: String(visit._id) } });
-    for (const request of await labRequests.find({ case: visit.case }).sort({ _id: 1 }).lean<any[]>()) {
-      const lines = await labLines.find({ request: request._id, status: { $in: ['collected', 'received', 'awaiting-validation', 'released'] } }).lean<any[]>();
-      if (lines.length) await w.capture.replay('lab.collected', { case: caseId, payload: { requestId: String(request._id), tests: lines.map((l) => l.test) } });
-    }
-    const orderIds = (await pharmacyOrders.find({ case: visit.case }).select('_id').lean<any[]>()).map((o) => o._id);
-    for (const line of await pharmacyLines.find({ order: { $in: orderIds }, status: 'issued' }).sort({ _id: 1 }).lean<any[]>()) {
-      await w.capture.replay('pharmacy.issued', { case: caseId, payload: { lineId: String(line._id), quantity: line.issued?.quantity ?? 1 } });
-    }
+    await chargeCaseCare(visit.case);
     return (await billModel.findOne({ kind: 'er', erVisit: visit._id }).lean<any>()) ?? null;
   };
   /**
    * The assignment of a bed: the admission bill, the bed days so far, the estimate and the deposit task. First the patient's
    * case is opened or joined (lifted to ipd) with the admission on it, as the Bed Agent does on bed.assigned, so the bill, its
    * messages and its clocks carry the case from the start (a clock is matched on its case and could not be stopped otherwise).
+   * Then the care already on the case (collected tests, issued medicines) is charged, as the capture handlers would have done
+   * (B3-I1), before any deposit or final-bill maths reads the totals.
    */
   const admit = async (admission: any) => {
     const { case: c } = await w.cases.openOrJoin({
@@ -384,6 +391,7 @@ async function run(clinicDay: string, nowMs: number): Promise<void> {
     });
     await w.cases.addRefs(String(c._id), { admissionId: String(admission._id) });
     await (w.bedDays as any).onAssigned({ case: String(c._id), payload: { admissionId: String(admission._id) } });
+    await chargeCaseCare(c._id);
     const bill = await billModel.findOne({ kind: 'admission', admission: admission._id }).lean<any>();
     if (!bill) throw new Error(`Revenue seed: no admission bill for ${admission.patientName}`);
     return bill;
