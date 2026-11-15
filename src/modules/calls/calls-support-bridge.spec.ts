@@ -224,7 +224,11 @@ describe('Calls and the support bridge', () => {
       const ctx = { callerNumber: NUM.rekha, providerCallId: 'c2' };
       const ref = await verify(inbound, ctx);
       const r = await inbound.run('request_callback', { caller_ref: ref, reason: 'Question about the discharge summary', urgent: true }, ctx);
-      assert.deepEqual(r, { ok: true, message: "I've asked the Front desk to call you back. Your reference is SP-0001." });
+      // Urgent may be clinical: the emergency hint stays.
+      assert.deepEqual(r, {
+        ok: true,
+        message: "I've asked the Front desk to call you back. Your reference is SP-0001. If it is an emergency, tell them to call 108 now."
+      });
       assert.deepEqual(seen.opened, [
         {
           phone: e164(NUM.rekha),
@@ -252,7 +256,7 @@ describe('Calls and the support bridge', () => {
         { callerNumber: NUM.other, providerCallId: 'c3' }
       );
       assert.equal(seen.opened[0].topic, 'billing');
-      assert.equal(billing.message, "I've asked the Billing in charge to call you back. Your reference is SP-0001.");
+      assert.equal(billing.message, "I've asked the Billing in charge to call you back. Your reference is SP-0001.", 'a normal call-back has no 108 hint');
 
       const unknown = await inbound.run(
         'request_callback',

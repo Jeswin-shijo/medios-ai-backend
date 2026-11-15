@@ -57,6 +57,8 @@ const NO_MATCH =
 const LOCKED_NOW = 'Those details do not match our records. Do not share anything. Tell the caller the front desk will call them back, then end politely.';
 const LOCKED = 'Too many unsuccessful checks for this number. Do not share any details. Tell the caller the front desk will call them back, then end politely.';
 const NO_SESSION = 'Verify the caller first with find_patient, then pass the caller_ref it returns.';
+/** Added to every urgent call-back reply: an urgent call-back may be an emergency. */
+const EMERGENCY_HINT = 'If it is an emergency, tell them to call 108 now.';
 /** Our side failed, or cannot help: the agent apologises and offers a call back. */
 const OFFER_CALLBACK = 'Something went wrong on our side. Apologise and offer a call back from the front desk (request_callback).';
 /** Codes avoid look-alike characters (0/O, 1/I) so they survive being read aloud. */
@@ -581,7 +583,8 @@ export class InboundService {
             `Call back requested${urgent ? ' (urgent)' : ''}, ticket ${ticket.number}: ${reason}`,
             urgent ? { urgent: true } : undefined,
           );
-        return { ok: true, message: `I've asked the ${ticket.ownerLabel} to call you back. Your reference is ${ticket.number}.` };
+        const reference = `I've asked the ${ticket.ownerLabel} to call you back. Your reference is ${ticket.number}.`;
+        return { ok: true, message: urgent ? `${reference} ${EMERGENCY_HINT}` : reference };
       } catch (err) {
         // Never lose a call-back: the front desk gets today's task instead.
         this.logger.error(`Could not open a call-back ticket, so a task is written: ${(err as Error).message}`);
@@ -593,7 +596,7 @@ export class InboundService {
     return {
       ok: true,
       message: urgent
-        ? 'Staff have been alerted to call back urgently. If it is an emergency, tell them to call 108 now.'
+        ? `Staff have been alerted to call back urgently. ${EMERGENCY_HINT}`
         : 'The front desk will call back. Tell the caller, then end politely.',
     };
   }
