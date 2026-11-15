@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import type { Actor } from '../beds/actor';
@@ -159,7 +159,7 @@ export class SupportTextsService {
       .findOneAndUpdate({ key }, { $set: { ...set, updatedByName: actor.name, updatedAt: new Date() } }, { new: true })
       .lean()
       .exec();
-    if (!doc) throw new BadRequestException('Unknown template');
+    if (!doc) throw new NotFoundException('Unknown template');
     return this.view<SupportTemplateView>(doc, ['key', 'trigger', 'en', 'ta', 'approved', 'taChecked', 'updatedByName', 'updatedAt']);
   }
 
@@ -170,7 +170,7 @@ export class SupportTextsService {
       .findOneAndUpdate({ topic }, { $set: { ...set, updatedByName: actor.name, updatedAt: new Date() } }, { new: true })
       .lean()
       .exec();
-    if (!doc) throw new BadRequestException('Unknown topic');
+    if (!doc) throw new NotFoundException('Unknown topic');
     return this.view<SupportFaqView>(doc, ['topic', 'title', 'keywords', 'en', 'ta', 'approved', 'taChecked', 'updatedByName', 'updatedAt']);
   }
 
@@ -229,12 +229,12 @@ export class SupportTextsService {
     return { found: true, topic: hit.topic, text: text.replace(/ {2,}/g, ' ').trim() };
   }
 
-  /** The desk's search: a topic, a keyword or a word of the title; approved or not. */
+  /** The desk's search: a topic, a keyword or a word of the title; approved facts only, since staff read these out. */
   async searchFaqs(q: string): Promise<SupportFaqView[]> {
     const needle = String(q ?? '')
       .trim()
       .toLowerCase();
-    const all = await this.faqs();
+    const all = (await this.faqs()).filter((f) => f.approved);
     if (!needle) return all;
     const words = needle.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
     return all.filter((f) => f.topic.includes(needle) || f.title.toLowerCase().includes(needle) || f.keywords.some((k) => words.includes(k.toLowerCase())));

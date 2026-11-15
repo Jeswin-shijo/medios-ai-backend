@@ -104,6 +104,9 @@ describe('SupportTextsService', () => {
     await svc.saveFaq(ADMIN, 'parking', { approved: false });
     assert.equal((await svc.findFaq('parking', 'en')).found, false);
     assert.equal((await svc.searchFaqs('visit')).length, 1);
+    await svc.saveFaq(ADMIN, 'visiting-hours', { approved: false });
+    assert.equal((await svc.searchFaqs('visit')).length, 0);
+    assert.equal((await svc.faqs()).length, DEFAULT_FAQS.length);
   });
 
   test('a nurse cannot save a template', async () => {
@@ -111,6 +114,8 @@ describe('SupportTextsService', () => {
     await assert.rejects(() => svc.saveFaq(NURSE, 'parking', { en: 'x' }), status(403));
     await assert.rejects(() => svc.addFaq(NURSE, { topic: 'lifts', title: 'Lifts', en: 'x' }), status(403));
     await assert.rejects(() => svc.saveTemplate(ADMIN, 'procedure-done', { en: 'x'.repeat(1001) }), status(400));
+    await assert.rejects(() => svc.saveTemplate(ADMIN, 'no-such-key', { en: 'x' }), status(404));
+    await assert.rejects(() => svc.saveFaq(ADMIN, 'no-such-topic', { en: 'x' }), status(404));
     await assert.rejects(() => svc.addFaq(ADMIN, { topic: 'Bad Topic', title: 'T', en: 'x' }), status(400));
     await svc.addFaq(ADMIN, { topic: 'lifts', title: 'Lifts', keywords: ['lift'], en: 'Lifts are near the entrance.' });
     assert.equal((await svc.findFaq('lift', 'en')).topic, 'lifts');
