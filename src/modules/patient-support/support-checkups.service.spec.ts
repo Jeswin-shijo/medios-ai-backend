@@ -426,6 +426,23 @@ describe('SupportCheckupsService', () => {
     );
   });
 
+  test('the caller can switch a general check-up to the cardiac list and record the blood-thinner answer', async () => {
+    await holder();
+    const id = await makeOne();
+    assert.equal((await rowOf(id)).group, 'general');
+    const d = await svc.submit(DESK, id, { group: 'cardiac', answers: { ...CARDIAC_FINE, antiplatelets: 'no' } });
+    assert.deepEqual([d.group, d.result, d.worrying, d.answers.antiplatelets], ['cardiac', 'needs-doctor', ['antiplatelets'], 'no']);
+    assert.equal((await rowOf(id)).group, 'cardiac', 'the chosen list is stored');
+    const a: any = await alertOf(`support-checkup:${id}:doctor`);
+    assert.equal(a.subtitle, 'Not taking both blood thinners · Duty doctor: Dr Duty');
+    assert.equal(((await m.Clock.findOne({ def: 'support-checkup-doctor', ref: id }).lean()) as any).state, 'running');
+    // The agent keeps the list the call was placed with.
+    const id2 = await makeOne();
+    await assert.rejects(svc.submit(SUPPORT_ACTOR, id2, { group: 'cardiac', answers: CARDIAC_FINE }), /other list/);
+    await assert.rejects(svc.submit(DESK, id2, { group: 'paediatric' as any, answers: FINE }), BadRequestException);
+    assert.deepEqual([(await rowOf(id2)).state, (await rowOf(id2)).group], ['due', 'general']);
+  });
+
   test('a fine result is recorded with its timeline line and no alert', async () => {
     const id = await makeOne();
     const d = await svc.submit(DESK, id, { group: 'general', answers: { ...FINE, rating: '5' } });
@@ -604,7 +621,8 @@ describe('SupportCheckupsService', () => {
     await assert.rejects(svc.submit(NURSE, id, { group: 'general', answers: { ...FINE, extra: 'x' } }), BadRequestException);
     await assert.rejects(svc.submit(NURSE, id, { group: 'general', answers: { ...FINE, question: 'yes' } }), /question/);
     await assert.rejects(svc.submit(NURSE, id, { group: 'general', answers: FINE, rating: 6 }), /rating/);
-    await assert.rejects(svc.submit(NURSE, id, { group: 'cardiac', answers: FINE }), BadRequestException);
+    // The cardiac list needs its own two answers too.
+    await assert.rejects(svc.submit(NURSE, id, { group: 'cardiac', answers: FINE }), /blood thinners/);
     await assert.rejects(svc.submit({ id: 'l', name: 'Lab', role: UserRole.LAB }, id, { group: 'general', answers: FINE }), ForbiddenException);
     assert.equal((await rowOf(id)).state, 'due');
     await svc.submit(NURSE, id, { group: 'general', answers: FINE });

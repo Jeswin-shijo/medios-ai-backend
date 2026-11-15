@@ -18,7 +18,7 @@ import { SchedulingRosterService } from '../scheduling/scheduling-roster.service
 import { SupportBridge, CheckupCallResult } from '../support-bridge/support-bridge';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { CheckupCall, CheckupCallDocument } from './schemas/checkup-call.schema';
-import { CareGroup, CheckupQuestion, questionsFor, SUPPORT_ACTOR } from './support-catalogue';
+import { CARE_GROUPS, CareGroup, CheckupQuestion, questionsFor, SUPPORT_ACTOR } from './support-catalogue';
 import { SupportRegistration } from './support-coordinator.registration';
 import { SupportFactsService } from './support-facts.service';
 import { SupportFeedbackService } from './support-feedback.service';
@@ -448,8 +448,12 @@ export class SupportCheckupsService implements OnModuleInit {
     if (!OPEN_STATES.includes(c.state)) throw new ConflictException(WAITING);
     if (c.state === 'calling' && actor !== SUPPORT_ACTOR) throw new ConflictException(ON_CALL);
     if (await this.facts.isDeceased(String(c.patient))) throw new ConflictException(DIED);
-    if (input?.group && input.group !== c.group) throw new BadRequestException('This check-up uses the other list of questions.');
-    const group = c.group as CareGroup;
+    // A person may switch the question list before starting (design 4.5), so a missed cardiac patient still gets the
+    // blood-thinner question; the agent keeps the list its call was placed with.
+    if (input?.group !== undefined && !(CARE_GROUPS as readonly string[]).includes(input.group))
+      throw new BadRequestException('Choose the general or the cardiac list.');
+    if (actor === SUPPORT_ACTOR && input?.group && input.group !== c.group) throw new BadRequestException('This check-up uses the other list of questions.');
+    const group = (actor !== SUPPORT_ACTOR && input?.group ? input.group : c.group) as CareGroup;
     const comment = typeof input.comment === 'string' ? input.comment.trim() : '';
     if (comment.length > 500) throw new BadRequestException('Keep the comment under 500 characters.');
     const read = this.readAnswers(group, input.answers, input);
@@ -462,6 +466,7 @@ export class SupportCheckupsService implements OnModuleInit {
         {
           $set: {
             state: 'completed',
+            group,
             result,
             answers: read.answers,
             worrying: read.worrying,
