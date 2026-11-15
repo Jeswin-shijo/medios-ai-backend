@@ -42,6 +42,8 @@ const TRIGGER_OF_MESSAGE: Record<string, Trigger> = {
 };
 
 const STALE_TRIGGERS: Trigger[] = ['admitted', 'procedure-booked'];
+/** These say "tomorrow": they go only while the event is still on the next clinic day. */
+const REMINDER_TRIGGERS: Trigger[] = ['procedure-reminder', 'followup-reminder'];
 const CLAIM_MS = 5 * 60_000;
 const NO_FOLLOW_UP = 'as written on your discharge summary';
 const DEFAULT_LIST_LIMIT = 100;
@@ -466,6 +468,7 @@ export class SupportUpdatesService implements OnModuleInit {
     const trigger = u.trigger as Trigger;
     if (STALE_TRIGGERS.includes(trigger) && now.getTime() - new Date(u.createdAt).getTime() > cfg.staleHours * 3600_000) return this.skip(u, 'stale');
     if (await this.superseded(u)) return this.skip(u, 'superseded');
+    if (await this.pastReminderDay(u, now)) return this.skip(u, 'stale');
     if (!cfg.triggers[trigger]) return this.skip(u, 'trigger-off');
     if (await this.facts.isDeceased(String(u.patient))) {
       await this.cancelForDeath(String(u.patient));
@@ -550,6 +553,29 @@ export class SupportUpdatesService implements OnModuleInit {
     return false;
   }
 
+  /**
+   * A reminder says "tomorrow", so it is too late once its event's clinic day is no longer the day after the clinic day
+   * of `now` (held overnight by quiet hours, or by the automatic switch until the day itself).
+   */
+  private async pastReminderDay(u: any, now: Date): Promise<boolean> {
+    if (!REMINDER_TRIGGERS.includes(u.trigger as Trigger)) return false;
+    const today = parseIsoDay(isoDate(clinicNow(now)));
+    const tomorrow = isoDate(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
+    return (await this.eventDay(u)) !== tomorrow;
+  }
+
+  /** The clinic day of a reminder's event: the procedure start in its key, or the appointment's day. */
+  private async eventDay(u: any): Promise<string | null> {
+    if (u.trigger === 'procedure-reminder') {
+      const m = /^[a-z-]+:[0-9a-f]{24}:(.+)$/.exec(String(u.dedupeKey));
+      const start = m ? new Date(m[1]) : null;
+      return start && !isNaN(start.getTime()) ? isoDate(start) : null;
+    }
+    const id = String(u.dedupeKey).split(':')[1];
+    const apt: any = isValidObjectId(id) ? await this.appointments.findById(id).select('date').lean().exec() : null;
+    return isDay(apt?.date) ? apt.date : null;
+  }
+
   /** Writes `skipped` with its reason, and tells the Coordinator once. False when the row was no longer waiting or held. */
   private async skip(u: any, reason: string, from: string[] = ['waiting']): Promise<boolean> {
     const saved: any = await this.updates
@@ -592,6 +618,11 @@ export class SupportUpdatesService implements OnModuleInit {
   async sendNow(actor: Actor, updateId: string): Promise<PatientUpdateView> {
     const u = await this.held(actor, updateId);
     if (u.status !== 'held' || u.reason !== 'auto-off') throw new ConflictException('Only an update held by the automatic switch can be sent now.');
+    // A reminder held until the event's own day would say "tomorrow": it is skipped as too old instead.
+    if (await this.pastReminderDay(u, this.clock())) {
+      if (!(await this.skip(u, 'stale', ['held']))) throw new ConflictException('This update was already handled.');
+      return this.view((await this.updates.findById(u._id).lean().exec()) as any, actor);
+    }
     const patient: any = await this.patients.findById(u.patient).lean().exec();
     const fresh = await this.refill(u, patient);
     const rendered = fresh.rendered;

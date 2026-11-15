@@ -203,8 +203,12 @@ export class SupportTicketsService {
     return t.case ? String(t.case) : null;
   }
 
-  private nameOf(t: { patientName?: string; callerName?: string }): string {
-    return t.patientName || t.callerName || '';
+  /**
+   * The name the registration checks a summary against (R4): a linked patient's only. Summaries are fixed words and
+   * numbers, so a caller typed as "Doctor" or "Billing" would only refuse real messages and leave a round without a clock.
+   */
+  private nameOf(t: { patientName?: string }): string {
+    return t.patientName || '';
   }
 
   /** Opens a ticket, or returns the one already opened for the same provider call id. */

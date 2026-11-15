@@ -333,6 +333,29 @@ describe('SupportTicketsService', () => {
     ]);
   });
 
+  test('a caller named like a summary word ("Doctor") with no patient still gets its messages and clocks, also after a hand-on to Clinical', async () => {
+    const t = await svc.open(frontDesk, input({ patientId: undefined, callerName: 'Doctor', ticketType: 'other', question: 'A referral question' }));
+    assert.deepEqual(
+      (await clocksOf(`${t.id}:1`)).map((c) => [c.def, c.state]),
+      [['support-response', 'running']]
+    );
+    await svc.handOn(frontDesk, t.id, 'clinical');
+    assert.deepEqual(
+      (await sent('support.ticket-opened')).map((x) => x.summary),
+      ['SP-0001 opened: Other', 'SP-0001 handed on to Duty doctor']
+    );
+    assert.deepEqual(
+      (await clocksOf(`${t.id}:2`)).map((c) => [c.def, c.state]),
+      [['support-response-clinical', 'running']]
+    );
+    for (const callerName of ['Patient', 'Billing', 'Nurse']) {
+      const x = await svc.open(frontDesk, input({ patientId: undefined, callerName, ticketType: callerName === 'Billing' ? 'billing' : 'other' }));
+      assert.equal((await clocksOf(`${x.id}:1`)).length, 1, callerName);
+    }
+    // A linked patient's name in a summary is still refused (R4); the fixed summaries never hold it.
+    assert.equal((await m.SupportTicket.findById(t.id).lean())!.announced.length, 3);
+  });
+
   test('no name in any support message summary', async () => {
     const t = await svc.open(frontDesk, input({ urgent: true }));
     await svc.note(frontDesk, t.id, 'ok');

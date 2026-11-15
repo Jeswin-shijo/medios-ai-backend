@@ -702,6 +702,76 @@ describe('SupportUpdatesService', () => {
     assert.equal((await one()).reason, 'superseded');
   });
 
+  test("a reminder held until the event's own day is skipped stale, never sent saying tomorrow (also on Send now)", async () => {
+    // The clinic day moves on with the clock here, as it does live.
+    delete process.env.CLINIC_DATE;
+    try {
+      await booking({ start: at(8, 30, 27), end: at(10, 0, 27) });
+      const apt = await raw(m.Appointment, {
+        uhid: 'MHK1',
+        patientName: 'Asha K',
+        date: '2026-09-27',
+        time: '11:00 AM',
+        doctorName: 'Dr. Rajesh Pillai',
+        status: 'Scheduled'
+      });
+      await raw(m.FollowUpItem, {
+        uhid: 'MHK1',
+        patientName: 'Asha K',
+        age: 40,
+        gender: 'Female',
+        followUpDate: '27 Sep 2026',
+        followUpTime: '11:00 AM',
+        followUpType: 'Follow-up',
+        status: 'Scheduled',
+        assignedTo: 'Dr. Rajesh Pillai',
+        appointmentId: apt._id
+      });
+      const states = async () => (await updates()).map((u: any) => `${u.trigger}:${u.status}/${u.reason ?? ''}`).sort();
+
+      // Made the evening before and sent then: both go.
+      now = at(18, 30);
+      assert.equal(await svc.remindDue(now), 2);
+      assert.equal(await svc.sendDue(at(18, 31)), 2);
+      assert.deepEqual(await states(), ['followup-reminder:sample/', 'procedure-reminder:sample/']);
+      assert.equal(calls.length, 2);
+
+      // Made at 22:00, inside quiet hours: they wait for 07:00, which is the event's day, so both are skipped as too old.
+      await m.PatientUpdate.deleteMany({});
+      calls.length = 0;
+      now = at(22, 0);
+      assert.equal(await svc.remindDue(now), 2);
+      assert.deepEqual(
+        (await updates()).map((u: any) => u.sendAt.getTime()),
+        [at(7, 0, 27).getTime(), at(7, 0, 27).getTime()]
+      );
+      assert.equal(await svc.sendDue(at(7, 0, 27)), 2);
+      assert.deepEqual(await states(), ['followup-reminder:skipped/stale', 'procedure-reminder:skipped/stale']);
+      assert.equal(calls.length, 0, 'no "tomorrow" text on the day itself');
+
+      // Held by the automatic switch: Send now on the event's day skips it as too old.
+      await m.PatientUpdate.deleteMany({});
+      await rules.set(ADMIN, 'support-auto-updates', false);
+      now = at(18, 30);
+      await svc.remindDue(now);
+      const held: any = (await updates()).find((u: any) => u.trigger === 'procedure-reminder');
+      assert.equal([held.status, held.reason].join('/'), 'held/auto-off');
+      now = at(8, 0, 27);
+      const view = await svc.sendNow(DESK, String(held._id));
+      assert.equal([view.status, view.reason].join('/'), 'skipped/stale');
+      await svc.sendDue(now);
+      assert.equal(calls.length, 0);
+      // The evening before, Send now still sends it.
+      const other: any = (await updates()).find((u: any) => u.trigger === 'followup-reminder');
+      now = at(19, 0);
+      assert.equal((await svc.sendNow(DESK, String(other._id))).status, 'waiting');
+      assert.equal(await svc.sendDue(now), 1);
+      assert.equal(calls.length, 1);
+    } finally {
+      process.env.CLINIC_DATE = '2026-09-26';
+    }
+  });
+
   /** Spreads the stored messages one second apart, oldest first, so the cursor can tell them apart. */
   const spread = async () => {
     const all = await m.AgentMessage.find().sort({ _id: 1 }).lean();
