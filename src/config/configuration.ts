@@ -65,6 +65,8 @@ export default () => ({
       bookingAgentId: process.env.SNAPSERVE_BOOKING_AGENT_ID || '',
       // The agent answering the hospital's number (inbound calls); optional.
       inboundAgentId: process.env.SNAPSERVE_INBOUND_AGENT_ID || '',
+      // The agent making day-2 check-up calls (Patient Support); optional.
+      checkupAgentId: process.env.SNAPSERVE_CHECKUP_AGENT_ID || '',
       // When set, post-call webhooks must carry a valid X-SnapServe-Signature.
       signingSecret: process.env.SNAPSERVE_SIGNING_SECRET || '',
     },
@@ -82,6 +84,10 @@ export default () => ({
     paymentProvider: (process.env.PAYMENT_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
     // Public web address for patient tracking links, when Settings does not give one.
     publicWebUrl: (process.env.PUBLIC_WEB_URL || '').trim().replace(/\/+$/, ''),
+  },
+  support: {
+    // Family updates: 'sample' (nothing is sent; screens say SAMPLE) or 'none'.
+    messageProvider: (process.env.MESSAGE_PROVIDER || (isProduction ? 'none' : 'sample')).toLowerCase(),
   },
   swagger: {
     enabled: process.env.SWAGGER_ENABLED ? process.env.SWAGGER_ENABLED === 'true' : !isProduction,

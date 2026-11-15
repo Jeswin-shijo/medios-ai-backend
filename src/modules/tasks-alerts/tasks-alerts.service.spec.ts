@@ -53,6 +53,16 @@ describe('TasksAlertsService', () => {
     }
   });
 
+  test('a support- alert cannot be toggled', async () => {
+    for (const link of ['support-ticket:abc', 'support-checkup:abc']) {
+      const r = await m.TaskAlertItem.create({ title: 'Support', type: 'System', category: 'System', priority: 'High', link });
+      const refusal = { status: 409, message: 'This closes on the Patient Support page.' };
+      await assert.rejects(() => service.toggleStatus(String(r._id)), refusal);
+      await assert.rejects(() => service.updateStatus(String(r._id), 'Completed'), refusal);
+      assert.equal(((await m.TaskAlertItem.findById(r._id).lean()) as any).status, 'Pending');
+    }
+  });
+
   test('a scheduling-consult alert cannot be toggled', async () => {
     const c = await m.TaskAlertItem.create({ title: 'Consult requested', type: 'System', category: 'Critical', priority: 'High', link: 'scheduling-consult:abc' });
     const refusal = { status: 409, message: 'Accept or complete this consult on the Scheduling page.' };

@@ -24,6 +24,7 @@ export const DEFAULT_TITLES: { key: string; label: string }[] = [
   { key: 'duty-doctor', label: 'Duty doctor' },
   { key: 'chief-pharmacist', label: 'Chief pharmacist' },
   { key: 'ot-in-charge', label: 'OT and cath lab in charge' },
+  { key: 'patient-relations', label: 'Patient relations officer' },
   { key: 'billing-in-charge', label: 'Billing in charge' },
   { key: 'ward-nurse-in-charge', label: 'Ward nurse in charge' },
 ];
@@ -98,6 +99,40 @@ export const DEFAULT_LADDERS: { key: string; label: string; steps: LadderStep[] 
   {
     key: 'discharge-doctor',
     label: 'Discharge doctor',
+    steps: [{ title: 'duty-doctor', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
+  },
+  {
+    key: 'patient-support',
+    label: 'Patient Support',
+    steps: [
+      { title: 'patient-relations', waitMinutes: 30 },
+      { title: 'duty-administrator', waitMinutes: 30 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'support-billing',
+    label: 'Patient Support: billing',
+    steps: [
+      { title: 'billing-in-charge', waitMinutes: 30 },
+      { title: 'patient-relations', waitMinutes: 30 },
+      { title: 'duty-administrator', waitMinutes: 30 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'support-ward',
+    label: 'Patient Support: ward',
+    steps: [
+      { title: 'ward-nurse-in-charge', waitMinutes: 30 },
+      { title: 'patient-relations', waitMinutes: 30 },
+      { title: 'duty-administrator', waitMinutes: 30 },
+      { title: 'medical-superintendent', waitMinutes: 0 },
+    ],
+  },
+  {
+    key: 'support-clinical',
+    label: 'Patient Support: clinical',
     steps: [{ title: 'duty-doctor', waitMinutes: 15 }, { title: 'medical-superintendent', waitMinutes: 0 }],
   },
 ];
@@ -329,7 +364,9 @@ export class EscalationsService {
             ? 'Finish it on the Revenue page.'
             : e.alertLink?.startsWith('discharge-')
               ? 'This closes on the Discharge page.'
-              : 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
+              : e.alertLink?.startsWith('support-')
+                ? 'This closes on the Patient Support page.'
+                : 'Acknowledge the result on the Lab page; this alert closes when it is acknowledged.',
       );
     }
     if (actor.role !== UserRole.ADMIN) {

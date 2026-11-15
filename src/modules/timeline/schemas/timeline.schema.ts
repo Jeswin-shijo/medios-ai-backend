@@ -16,7 +16,7 @@ export class TimelineEvent {
 
   @Prop({
     required: true,
-    enum: ['Consultation', 'Lab', 'Imaging', 'Prescription', 'Vitals', 'Emergency', 'Admission', 'Outpatient'],
+    enum: ['Consultation', 'Lab', 'Imaging', 'Prescription', 'Vitals', 'Emergency', 'Admission', 'Outpatient', 'Communication'],
   })
   category: string;
 

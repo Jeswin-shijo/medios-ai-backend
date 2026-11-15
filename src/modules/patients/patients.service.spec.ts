@@ -24,6 +24,24 @@ describe('PatientsService.update', () => {
     service = new PatientsService(m.Patient);
   });
 
+  test('PatientsService.update ignores consent, contacts, updatesTo and preferredLanguage', async () => {
+    const id = await placeholder();
+    await service.update(id, {
+      age: 41,
+      preferredLanguage: 'ta',
+      updatesTo: 'abc',
+      contacts: [{ name: 'X', relation: 'son', phone: '9100000002' }],
+      consent: { messages: true, calls: true }
+    } as any);
+    const p = (await m.Patient.findById(id).lean().exec()) as any;
+    assert.equal(p.age, 41);
+    assert.equal(p.preferredLanguage, 'en');
+    assert.equal(p.updatesTo, 'self');
+    assert.deepEqual(p.contacts, []);
+    assert.equal(p.consent.messages, false);
+    assert.equal(p.consent.calls, false);
+  });
+
   test('a real name and a phone clear details pending', async () => {
     const id = await placeholder();
     const out = await service.update(id, { name: 'Ravi Kumar', phone: '9100000001' });

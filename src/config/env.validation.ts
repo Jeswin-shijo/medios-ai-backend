@@ -68,7 +68,7 @@ export function validateEnv(config: Record<string, unknown>) {
   if (toolsSecret !== undefined && toolsSecret !== '' && String(toolsSecret).length < 24) {
     errors.push('CALL_TOOLS_SECRET must be 24+ random characters; it authenticates the inbound agent\'s mid-call tools.');
   }
-  for (const name of ['SMS_PROVIDER', 'PAYMENT_PROVIDER']) {
+  for (const name of ['SMS_PROVIDER', 'PAYMENT_PROVIDER', 'MESSAGE_PROVIDER']) {
     const value = String(config[name] ?? (production ? 'none' : 'sample')).toLowerCase();
     if (!['none', 'sample'].includes(value)) errors.push(`${name} must be none or sample.`);
   }

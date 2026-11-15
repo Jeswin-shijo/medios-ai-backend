@@ -267,6 +267,7 @@ describe('seedScheduling', () => {
       'ot-in-charge': [ids.nurse],
       'chief-pharmacist': [ids.pharmacist],
       'ward-nurse-in-charge': [ids.nurse],
+      'patient-relations': [ids.desk],
     };
     for (const t of DEFAULT_TITLES) {
       const now = (await w.escalations.holders(t.key)).ids.sort();

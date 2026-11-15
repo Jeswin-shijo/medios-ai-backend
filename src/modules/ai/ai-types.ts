@@ -1,5 +1,5 @@
 export type AiProviderName = 'none' | 'sample' | 'claude';
-export type AiFeature = 'bedSuggestions' | 'coordinatorChat' | 'erAssist' | 'labSummary' | 'pharmacyExplain' | 'schedulingSummary' | 'revenueExplain' | 'revenueSummary' | 'dischargeCourse' | 'dischargeSummary';
+export type AiFeature = 'bedSuggestions' | 'coordinatorChat' | 'erAssist' | 'labSummary' | 'pharmacyExplain' | 'schedulingSummary' | 'revenueExplain' | 'revenueSummary' | 'dischargeCourse' | 'dischargeSummary' | 'supportSummary';
 export type AiFailure = 'off' | 'timeout' | 'invalid' | 'provider_error';
 
 /** One structured question for the AI; each feature builds its own. */

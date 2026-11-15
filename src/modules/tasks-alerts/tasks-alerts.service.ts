@@ -49,6 +49,8 @@ export class TasksAlertsService {
     if (task.link?.startsWith('revenue-bill:') || task.link?.startsWith('revenue-refund:')) throw new ConflictException('This closes on the Revenue page.');
     // A discharge order or its reminder closes on the Discharge page.
     if (task.link?.startsWith('discharge-')) throw new ConflictException('This closes on the Discharge page.');
+    // A support ticket closes on the Patient Support page.
+    if (task.link?.startsWith('support-')) throw new ConflictException('This closes on the Patient Support page.');
     if (task.escalation) throw new ConflictException('Use Acknowledge for escalation alerts.');
   }
 

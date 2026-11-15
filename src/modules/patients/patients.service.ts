@@ -105,7 +105,9 @@ export class PatientsService {
   async update(idOrUhid: string, updates: Partial<Patient>): Promise<PatientDocument> {
     const patient = await this.findOne(idOrUhid);
     const before = { name: patient.name, uhid: patient.uhid };
-    Object.assign(patient, updates);
+    // Consent, contacts, who gets updates and the language change only through the Patient Support route (A9).
+    const { preferredLanguage: _l, contacts: _c, updatesTo: _u, consent: _k, ...safe } = (updates ?? {}) as Record<string, unknown>;
+    Object.assign(patient, safe);
     // An unknown ER patient stops being a placeholder once it has a real name and a phone,
     // unless the update says otherwise.
     if (patient.detailsPending && updates.detailsPending === undefined && hasRealDetails(patient)) patient.detailsPending = false;

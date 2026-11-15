@@ -71,6 +71,10 @@ export class HospitalSettings {
   /** Discharge: leave and summary targets, reminder time, warning signs (see the Discharge settings service). */
   @Prop({ type: Object, default: {} })
   discharge: Record<string, unknown>;
+
+  /** Patient Support: targets, switches and quiet hours (see the Patient Support settings service). */
+  @Prop({ type: Object, default: {} })
+  support: Record<string, unknown>;
 }
 
 export const HospitalSettingsSchema = SchemaFactory.createForClass(HospitalSettings);

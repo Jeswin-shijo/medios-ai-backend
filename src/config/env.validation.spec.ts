@@ -4,6 +4,14 @@ import { validateEnv } from './env.validation';
 
 const base = { JWT_SECRET: 'x'.repeat(40), MONGODB_URI: 'mongodb://localhost:27018/medios_test' };
 
+describe('validateEnv (Patient Support)', () => {
+  test('MESSAGE_PROVIDER must be none or sample', () => {
+    assert.throws(() => validateEnv({ ...base, MESSAGE_PROVIDER: 'whatsapp' }), /MESSAGE_PROVIDER must be none or sample/);
+    assert.doesNotThrow(() => validateEnv({ ...base, MESSAGE_PROVIDER: 'sample' }));
+    assert.doesNotThrow(() => validateEnv({ ...base, MESSAGE_PROVIDER: 'none' }));
+  });
+});
+
 describe('validateEnv (AI)', () => {
   test('the base config passes', () => {
     assert.doesNotThrow(() => validateEnv({ ...base }));

@@ -66,5 +66,7 @@ services:
         value: sample
       - key: SMS_PROVIDER
         value: sample
+      - key: MESSAGE_PROVIDER
+        value: sample
       - key: PUBLIC_WEB_URL
         value: https://medi-os-ai.vercel.app

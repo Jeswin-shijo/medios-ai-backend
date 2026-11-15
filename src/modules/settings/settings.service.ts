@@ -80,6 +80,7 @@ const DEFAULT_SETTINGS = {
   scheduling: {} as Record<string, unknown>,
   revenue: {} as Record<string, unknown>,
   discharge: {} as Record<string, unknown>,
+  support: {} as Record<string, unknown>,
 };
 
 const SECTIONS = Object.keys(DEFAULT_SETTINGS) as (keyof typeof DEFAULT_SETTINGS)[];
@@ -177,6 +178,11 @@ export class SettingsService {
       const { discharge: _ignored, ...rest } = updates as Record<string, unknown>;
       updates = rest as Partial<HospitalSettings>;
     }
+    // The support section changes only through its own settings service, the same way.
+    if (updates && typeof updates === 'object' && 'support' in updates) {
+      const { support: _ignored, ...rest } = updates as Record<string, unknown>;
+      updates = rest as Partial<HospitalSettings>;
+    }
     for (const section of SECTIONS) {
       const patch = (updates as any)?.[section];
       if (patch && typeof patch === 'object') {
@@ -225,6 +231,13 @@ export class SettingsService {
   async setDischarge(section: Record<string, unknown>): Promise<void> {
     const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
     settings.set('discharge', section);
+    await settings.save();
+  }
+
+  /** Saves the support section. Only the Patient Support settings service calls this. */
+  async setSupport(section: Record<string, unknown>): Promise<void> {
+    const settings = (await this.settingsModel.findOne().exec()) ?? new this.settingsModel(DEFAULT_SETTINGS);
+    settings.set('support', section);
     await settings.save();
   }
 }

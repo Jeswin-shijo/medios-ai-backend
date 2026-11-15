@@ -37,6 +37,7 @@ import { ErVisit, ErVisitSchema } from './schemas/er-visit.schema';
     SettingsModule,
   ],
   controllers: [ErController],
+  exports: [ErVisitsService],
   providers: [ErVisitsService, ErTriageService, ErBaysService, ErTargetsService, ErOverviewService, ErAiService, ErCoordinatorRegistration, ErScheduler],
 })
 export class ErModule {}

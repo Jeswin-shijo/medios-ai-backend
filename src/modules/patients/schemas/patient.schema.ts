@@ -6,6 +6,41 @@ export type PatientDocument = Patient & Document;
 // Clinical facts (vitals, blood group, insurance, AI summary) have no defaults:
 // an unrecorded value must stay absent rather than look like a real reading.
 
+@Schema()
+export class PatientContact {
+  @Prop({ required: true, maxlength: 80 })
+  name: string;
+
+  @Prop({ required: true, maxlength: 40 })
+  relation: string;
+
+  @Prop({ required: true, maxlength: 20 })
+  phone: string;
+}
+export const PatientContactSchema = SchemaFactory.createForClass(PatientContact);
+
+@Schema({ _id: false })
+export class PatientConsent {
+  @Prop({ default: false })
+  messages: boolean;
+
+  @Prop({ default: false })
+  calls: boolean;
+
+  @Prop()
+  recordedAt?: Date;
+
+  @Prop()
+  recordedBy?: string;
+
+  @Prop()
+  recordedByName?: string;
+
+  @Prop({ type: String, enum: ['desk', 'ward', 'kiosk'] })
+  via?: 'desk' | 'ward' | 'kiosk';
+}
+export const PatientConsentSchema = SchemaFactory.createForClass(PatientConsent);
+
 @Schema({ _id: false })
 export class InsuranceInfo {
   @Prop()
@@ -155,6 +190,22 @@ export class Patient {
   /** Set when the record was not made at the front desk, e.g. "Registered at kiosk Front kiosk". */
   @Prop()
   registeredVia?: string;
+
+  /** Language for family texts and check-up calls. Written only by the Patient Support route. */
+  @Prop({ type: String, enum: ['en', 'ta'], default: 'en' })
+  preferredLanguage: 'en' | 'ta';
+
+  /** Family contacts (at most 5). */
+  @Prop({ type: [PatientContactSchema], default: [], validate: [(v: unknown[]) => v.length <= 5, 'At most 5 contacts.'] })
+  contacts: PatientContact[];
+
+  /** Who gets family updates: 'self' or a contact's _id. */
+  @Prop({ type: String, default: 'self' })
+  updatesTo: string;
+
+  /** Consent to messages and calls, with who recorded it and where. */
+  @Prop({ type: PatientConsentSchema, default: () => ({ messages: false, calls: false }) })
+  consent: PatientConsent;
 }
 
 export const PatientSchema = SchemaFactory.createForClass(Patient);
