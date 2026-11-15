@@ -614,6 +614,94 @@ describe('SupportUpdatesService', () => {
     assert.equal(await svc.catchUp(new Date(Date.now() + 60_000)), 0);
   });
 
+  test('a template un-approved while the update waits for 07:00 holds it (no-template) and sends nothing', async () => {
+    now = at(22, 30);
+    await assigned();
+    await m.SupportTemplate.updateOne({ key: 'admitted' }, { $set: { approved: false } });
+    assert.equal(await svc.sendDue(at(7, 0, 27)), 1);
+    const u = await one();
+    assert.equal([u.status, u.reason].join('/'), 'held/no-template');
+    assert.equal(calls.length, 0);
+    assert.equal((await supportMessages('support.update-sent')).length, 0);
+  });
+
+  test('a fresh text is made at send time: an edited template and a withdrawn prep text both show', async () => {
+    now = at(22, 30);
+    await svc.fromMessage(String((await bookedMessage(await booking()))!._id));
+    await m.SupportTemplate.updateOne({ key: 'prep:coronary-angiography' }, { $set: { approved: false } });
+    assert.equal(await svc.sendDue(at(7, 0, 27)), 1);
+    const u = await one();
+    assert.equal(u.status, 'sample');
+    assert.ok(!u.text.includes('do not eat'), 'the withdrawn instructions are not sent');
+    assert.match(u.note, /^No approved instructions for /);
+  });
+
+  test('a procedure update waiting for 07:00 is skipped superseded when the booking is cancelled overnight', async () => {
+    now = at(22, 30);
+    const b = await booking();
+    await bookedMessage(b);
+    await m.ProcedureBooking.updateOne({ _id: b._id }, { $set: { status: 'cancelled' } });
+    assert.equal(await svc.sendDue(at(7, 0, 27)), 1);
+    const u = await one();
+    assert.equal([u.status, u.reason].join('/'), 'skipped/superseded');
+    assert.equal(calls.length, 0);
+    assert.equal((await supportMessages('support.update-skipped'))[0].summary, 'MHK1: Procedure booked update skipped (superseded)');
+  });
+
+  test("a procedure update is skipped superseded when the booking moves to a new time; the new time's own update is made once", async () => {
+    now = at(22, 30);
+    const b = await booking();
+    await bookedMessage(b);
+    await m.ProcedureBooking.updateOne({ _id: b._id }, { $set: { start: at(9, 0, 28) } });
+    const moved = await bookedMessage({ ...b, start: at(9, 0, 28) });
+    await svc.fromMessage(String(moved!._id));
+    assert.equal(await m.PatientUpdate.countDocuments(), 2);
+    assert.equal(await svc.sendDue(at(7, 0, 27)), 2);
+    const all = await updates();
+    assert.deepEqual(
+      all.map((u: any) => [u.status, u.reason ?? ''].join('/')),
+      ['skipped/superseded', 'sample/']
+    );
+    assert.match(all[1].text, /at 09:00 AM/);
+    assert.equal(calls.length, 1);
+  });
+
+  test('a follow-up reminder is skipped superseded when the appointment is cancelled', async () => {
+    const apt = await raw(m.Appointment, {
+      uhid: 'MHK1',
+      patientName: 'Asha K',
+      date: '2026-09-27',
+      time: '11:00 AM',
+      doctorName: 'Dr. Rajesh Pillai',
+      status: 'Scheduled'
+    });
+    await raw(m.FollowUpItem, {
+      uhid: 'MHK1',
+      patientName: 'Asha K',
+      age: 40,
+      gender: 'Female',
+      followUpDate: '27 Sep 2026',
+      followUpTime: '11:00 AM',
+      followUpType: 'Follow-up',
+      status: 'Scheduled',
+      assignedTo: 'Dr. Rajesh Pillai',
+      appointmentId: apt._id
+    });
+    assert.equal(await svc.remindDue(at(18, 30)), 1);
+    await m.Appointment.updateOne({ _id: apt._id }, { $set: { status: 'Canceled' } });
+    assert.equal(await svc.sendDue(at(18, 31)), 1);
+    const u = await one();
+    assert.equal([u.status, u.reason].join('/'), 'skipped/superseded');
+    assert.equal(calls.length, 0);
+    // Moved rather than cancelled: also superseded.
+    await m.PatientUpdate.deleteMany({});
+    await m.Appointment.updateOne({ _id: apt._id }, { $set: { status: 'Scheduled' } });
+    await svc.remindDue(at(18, 40));
+    await m.Appointment.updateOne({ _id: apt._id }, { $set: { time: '12:00 PM' } });
+    await svc.sendDue(at(18, 41));
+    assert.equal((await one()).reason, 'superseded');
+  });
+
   /** Spreads the stored messages one second apart, oldest first, so the cursor can tell them apart. */
   const spread = async () => {
     const all = await m.AgentMessage.find().sort({ _id: 1 }).lean();

@@ -101,6 +101,8 @@ const dayAtNoon = (iso: string): Date => {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d, 12, 0, 0, 0);
 };
+/** The booking id inside a procedure update's dedupe key (`<trigger>:<bookingId>[:<start>]`). */
+const bookingIdOf = (dedupeKey: unknown): string => String(dedupeKey).split(':')[1] ?? '';
 const isDay = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
 /**
@@ -360,7 +362,7 @@ export class SupportUpdatesService implements OnModuleInit {
   }
 
   /** Renders the template, with the approved nested texts (preparation, warning signs) filled in the patient's language. */
-  private async fill(trigger: Trigger, src: Source, language: 'en' | 'ta') {
+  private async fill(trigger: Trigger, src: Pick<Source, 'values' | 'procedure' | 'signsGroup'>, language: 'en' | 'ta') {
     const values = { ...src.values };
     let note: string | undefined;
     if (src.procedure) {
@@ -463,6 +465,7 @@ export class SupportUpdatesService implements OnModuleInit {
 
     const trigger = u.trigger as Trigger;
     if (STALE_TRIGGERS.includes(trigger) && now.getTime() - new Date(u.createdAt).getTime() > cfg.staleHours * 3600_000) return this.skip(u, 'stale');
+    if (await this.superseded(u)) return this.skip(u, 'superseded');
     if (!cfg.triggers[trigger]) return this.skip(u, 'trigger-off');
     if (await this.facts.isDeceased(String(u.patient))) {
       await this.cancelForDeath(String(u.patient));
@@ -475,6 +478,24 @@ export class SupportUpdatesService implements OnModuleInit {
     const recipient = this.facts.recipientOf(patient);
     if (!recipient.to) return this.skip(u, 'no-phone');
     if (!this.sender) return this.skip(u, 'messaging-off');
+
+    // The template must still be approved now: the text is made again, with fresh nested texts, in the patient's current language.
+    const fresh = await this.refill(u, patient);
+    if (!fresh.rendered || fresh.rendered.missing.length) {
+      const reason = fresh.rendered ? 'missing-detail' : 'no-template';
+      const note = fresh.rendered ? [fresh.note, `Missing: ${fresh.rendered.missing.join(', ')}`].filter(Boolean).join('. ') : fresh.note;
+      await this.updates
+        .updateOne({ _id: u._id, status: 'waiting' }, { $set: { status: 'held', reason, ...(note ? { note } : {}) }, $unset: { sendAt: '' } })
+        .exec();
+      return true;
+    }
+    u.text = fresh.rendered.text;
+    await this.updates
+      .updateOne(
+        { _id: u._id, status: 'waiting' },
+        { $set: { text: fresh.rendered.text, language: fresh.rendered.language, values: fresh.values, ...(fresh.note ? { note: fresh.note } : {}) } }
+      )
+      .exec();
 
     let ok = false;
     try {
@@ -496,6 +517,37 @@ export class SupportUpdatesService implements OnModuleInit {
     if (status === 'sent') await this.facts.timeline(saved, `Update sent to ${recipient.label}: ${TRIGGER_LABEL[trigger]}`, saved.text);
     if (status !== 'failed') await this.announce(saved, 'sent');
     return true;
+  }
+
+  /** Makes the text again from the stored values: fresh preparation or warning-signs text, the patient's current language. */
+  private async refill(u: any, patient: any) {
+    const language = patient?.preferredLanguage === 'ta' ? 'ta' : 'en';
+    const src: Pick<Source, 'values' | 'procedure' | 'signsGroup'> = { values: { ...(u.values ?? {}) } };
+    const trigger = u.trigger as Trigger;
+    if (trigger === 'procedure-booked' || trigger === 'procedure-reminder' || trigger === 'procedure-done') {
+      const booking: any = isValidObjectId(bookingIdOf(u.dedupeKey)) ? await this.bookings.findById(bookingIdOf(u.dedupeKey)).lean().exec() : null;
+      if (booking) src.procedure = { key: booking.procedure, name: procedureByKey(booking.procedure)?.name ?? booking.procedure };
+    }
+    if (trigger === 'discharge-pack') src.signsGroup = await this.facts.careGroup(String(u.patient), u.case ? String(u.case) : null);
+    return { ...(await this.fill(trigger, src, language)), language };
+  }
+
+  /** True when the record an update was made from has moved on: a booking no longer booked or moved, an appointment cancelled or moved. */
+  private async superseded(u: any): Promise<boolean> {
+    const trigger = u.trigger as Trigger;
+    if (trigger === 'procedure-booked' || trigger === 'procedure-reminder') {
+      const m = /^[a-z-]+:[0-9a-f]{24}:(.+)$/.exec(String(u.dedupeKey));
+      const id = bookingIdOf(u.dedupeKey);
+      const booking: any = isValidObjectId(id) ? await this.bookings.findById(id).lean().exec() : null;
+      return !booking || booking.status !== 'booked' || !booking.start || !m || new Date(booking.start).toISOString() !== m[1];
+    }
+    if (trigger === 'followup-booked' || trigger === 'followup-reminder') {
+      const id = String(u.dedupeKey).split(':')[1];
+      const apt: any = isValidObjectId(id) ? await this.appointments.findById(id).lean().exec() : null;
+      if (!apt || apt.status === 'Canceled' || apt.status === 'No Show') return true;
+      return !isDay(apt.date) || spokenDay(dayAtNoon(apt.date)) !== u.values?.date || apt.time !== u.values?.time;
+    }
+    return false;
   }
 
   /** Writes `skipped` with its reason, and tells the Coordinator once. False when the row was no longer waiting or held. */
@@ -541,13 +593,13 @@ export class SupportUpdatesService implements OnModuleInit {
     const u = await this.held(actor, updateId);
     if (u.status !== 'held' || u.reason !== 'auto-off') throw new ConflictException('Only an update held by the automatic switch can be sent now.');
     const patient: any = await this.patients.findById(u.patient).lean().exec();
-    const language = patient?.preferredLanguage === 'ta' ? 'ta' : 'en';
-    const rendered = await this.texts.render(u.template, language, u.values ?? {}, ['instructions', 'followUp']);
+    const fresh = await this.refill(u, patient);
+    const rendered = fresh.rendered;
     if (!rendered || rendered.missing.length) throw new ConflictException('This update has no approved text to send.');
     const saved: any = await this.updates
       .findOneAndUpdate(
         { _id: u._id, status: 'held', reason: 'auto-off' },
-        { $set: { status: 'waiting', sendAt: this.clock(), text: rendered.text, language: rendered.language }, $unset: { reason: '' } },
+        { $set: { status: 'waiting', sendAt: this.clock(), text: rendered.text, language: rendered.language, values: fresh.values }, $unset: { reason: '' } },
         { new: true }
       )
       .lean()

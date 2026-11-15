@@ -142,8 +142,29 @@ export const TRIGGER_LABEL: Record<Trigger, string> = {
 
 export const UPDATE_STATUSES = ['waiting', 'held', 'sample', 'sent', 'failed', 'skipped'] as const;
 export type UpdateStatus = (typeof UPDATE_STATUSES)[number];
-export const SKIP_REASONS = ['no-consent', 'no-phone', 'do-not-contact', 'deceased', 'messaging-off', 'trigger-off', 'stale', 'dismissed'] as const;
+export const SKIP_REASONS = [
+  'no-consent',
+  'no-phone',
+  'do-not-contact',
+  'deceased',
+  'messaging-off',
+  'trigger-off',
+  'stale',
+  'superseded',
+  'dismissed'
+] as const;
 export type SkipReason = (typeof SKIP_REASONS)[number];
+export const SKIP_REASON_LABEL: Record<SkipReason, string> = {
+  'no-consent': 'No consent',
+  'no-phone': 'No phone number',
+  'do-not-contact': 'Do not contact',
+  deceased: 'Deceased',
+  'messaging-off': 'Messaging is off',
+  'trigger-off': 'Switched off',
+  stale: 'Too old',
+  superseded: 'No longer current',
+  dismissed: 'Dismissed'
+};
 export const HOLD_REASONS = ['missing-detail', 'no-template', 'auto-off'] as const;
 export type HoldReason = (typeof HOLD_REASONS)[number];
 
