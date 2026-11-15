@@ -18,7 +18,7 @@ import { SchedulingRosterService } from '../scheduling/scheduling-roster.service
 import { SupportBridge, CheckupCallResult } from '../support-bridge/support-bridge';
 import { TaskAlertDocument, TaskAlertItem } from '../tasks-alerts/schemas/task-alert.schema';
 import { CheckupCall, CheckupCallDocument } from './schemas/checkup-call.schema';
-import { CARE_GROUPS, CareGroup, CheckupQuestion, questionsFor, SUPPORT_ACTOR } from './support-catalogue';
+import { CARE_GROUPS, CareGroup, CHECKUP_QUESTIONS, CheckupQuestion, questionsFor, SUPPORT_ACTOR } from './support-catalogue';
 import { SupportRegistration } from './support-coordinator.registration';
 import { SupportFactsService } from './support-facts.service';
 import { SupportFeedbackService } from './support-feedback.service';
@@ -39,6 +39,10 @@ const REPAIR_GRACE_MINUTES = 2;
 const ON_CALL = 'The agent is on this call now.';
 const DIED = 'This patient has died.';
 const OPEN_STATES = ['due', 'calling'];
+/** A person may record a check-up that waits for its next try, or after the last try, when the patient rings back. */
+const PERSON_STATES = ['due', 'scheduled', 'not-reached'];
+/** Keys of the agent's answers read at most. */
+const MAX_AGENT_ANSWERS = 20;
 const TERMINAL_CALL = ['completed', 'failed', 'canceled'];
 const QUESTION_FALLBACK = 'The patient has a question for the doctor (see the call transcript).';
 
@@ -390,49 +394,93 @@ export class SupportCheckupsService implements OnModuleInit {
     if (!actor || (actor !== SUPPORT_ACTOR && !SUP_READ.includes(actor.role))) throw new ForbiddenException(FORBIDDEN);
   }
 
-  /** Checks the answers against the group's questions. The form stops at the first emergency answer. */
+  /** The agent's answers, read leniently: known keys only (trimmed, lower-cased, capped), values as trimmed lower-case text. */
+  private agentAnswers(given: unknown, known: Set<string>): { source: Record<string, string>; offList: string[] } {
+    const source: Record<string, string> = {};
+    const offList: string[] = [];
+    if (!given || typeof given !== 'object' || Array.isArray(given)) return { source, offList };
+    for (const [k, v] of Object.entries(given).slice(0, MAX_AGENT_ANSWERS)) {
+      const key = String(k).trim().toLowerCase().slice(0, 40);
+      const value = typeof v === 'string' || typeof v === 'number' ? String(v).trim().toLowerCase().slice(0, 40) : '';
+      if (known.has(key)) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) source[key] = value;
+      } else if (CHECKUP_QUESTIONS.some((q) => q.key === key && q.choices.some((c) => c.key === value && c.level === 'emergency'))) {
+        offList.push(key);
+      }
+    }
+    return { source, offList };
+  }
+
+  /**
+   * Checks the answers against the group's questions, in asking order. The first emergency answer ends the list (R22):
+   * questions before it may be unanswered (recorded as not asked) and those after it are left out. A person's form is
+   * strict. The agent's result is lenient, so one garbled answer never costs an emergency: unknown keys are ignored, a
+   * value that is no choice is dropped (listed in `dropped`) and a rating that is not a whole number from 1 to 5 is
+   * ignored; without an emergency a missing answer still refuses the result, which Calls keeps for a person to review.
+   */
   private readAnswers(
     group: CareGroup,
     given: Record<string, string>,
-    input: SubmitCheckupInput
-  ): { answers: Record<string, string>; worrying: string[]; emergency: string[]; rating?: number; questionText?: string } {
-    if (!given || typeof given !== 'object' || Array.isArray(given)) throw new BadRequestException('Answer the check-up questions.');
+    input: SubmitCheckupInput,
+    agent: boolean
+  ): { answers: Record<string, string>; worrying: string[]; emergency: string[]; rating?: number; questionText?: string; dropped: string[] } {
     const questions = questionsFor(group);
     const known = new Set(questions.map((q) => q.key));
-    for (const k of Object.keys(given)) if (!known.has(k)) throw new BadRequestException('One of the answers is not a question on this list.');
+    let source: Record<string, unknown>;
+    if (agent) {
+      const read = this.agentAnswers(given, known);
+      source = read.source;
+      // An emergency answered on the other list must not be ignored quietly: refusing keeps it on the call for review.
+      if (read.offList.length && !questions.some((q) => q.choices.some((c) => c.key === read.source[q.key] && c.level === 'emergency')))
+        throw new BadRequestException(`An emergency answer came for a question not on this list: ${read.offList.join(', ')}.`);
+    } else {
+      if (!given || typeof given !== 'object' || Array.isArray(given)) throw new BadRequestException('Answer the check-up questions.');
+      for (const k of Object.keys(given)) if (!known.has(k)) throw new BadRequestException('One of the answers is not a question on this list.');
+      source = given;
+    }
+    const blank = (v: unknown) => v === undefined || v === null || v === '';
+    const choiceOf = (q: CheckupQuestion) => q.choices.find((c) => c.key === source[q.key]);
+    const stopAt = questions.findIndex((q) => q.key !== 'rating' && choiceOf(q)?.level === 'emergency');
     const answers: Record<string, string> = {};
     const worrying: string[] = [];
     const emergency: string[] = [];
+    const dropped: string[] = [];
     let rating: number | undefined;
     let questionText: string | undefined;
-    let stopped = false;
-    for (const q of questions) {
+    for (const [i, q] of questions.entries()) {
       if (q.key === 'rating') {
-        const raw = input.rating ?? (given.rating !== undefined && given.rating !== '' ? Number(given.rating) : undefined);
-        if (raw !== undefined) {
-          if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > 5) throw new BadRequestException('Give a rating from 1 to 5.');
-          rating = raw;
-          answers.rating = String(raw);
+        if (agent) {
+          const raw = input.rating ?? source.rating;
+          const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[1-5]$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+          if (Number.isInteger(n) && n >= 1 && n <= 5) rating = n;
+        } else {
+          const raw = input.rating ?? (!blank(source.rating) ? Number(source.rating) : undefined);
+          if (raw !== undefined) {
+            if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > 5) throw new BadRequestException('Give a rating from 1 to 5.');
+            rating = raw;
+          }
         }
+        if (rating !== undefined) answers.rating = String(rating);
         continue;
       }
-      if (stopped) continue;
-      const key = given[q.key];
-      const choice = q.choices.find((c) => c.key === key);
-      if (!choice) throw new BadRequestException(`Choose an answer for: ${q.en}`);
+      if (stopAt >= 0 && i > stopAt) continue;
+      const choice = choiceOf(q);
+      if (!choice) {
+        if (agent && !blank(source[q.key])) dropped.push(`${q.key} "${String(source[q.key])}"`);
+        // Before an emergency answer, a question nobody answered is recorded as not asked.
+        if (stopAt >= 0 && (agent || blank(source[q.key]))) continue;
+        throw new BadRequestException(`Choose an answer for: ${q.en}`);
+      }
       answers[q.key] = choice.key;
       if (choice.level === 'worrying') worrying.push(q.key);
-      if (choice.level === 'emergency') {
-        emergency.push(q.key);
-        stopped = true;
-      }
+      if (choice.level === 'emergency') emergency.push(q.key);
       if (q.key === 'question' && choice.key === 'yes') {
         const text = typeof input.questionText === 'string' ? input.questionText.trim() : '';
         if (!text || text.length > 500) throw new BadRequestException("Write the patient's question (up to 500 letters).");
         questionText = text;
       }
     }
-    return { answers, worrying, emergency, rating, questionText };
+    return { answers, worrying, emergency, rating, questionText, dropped };
   }
 
   private shortOf(group: CareGroup, key: string, answers: Record<string, string>): string {
@@ -444,9 +492,12 @@ export class SupportCheckupsService implements OnModuleInit {
   async submit(actor: Actor, id: string, input: SubmitCheckupInput): Promise<CheckupDetail> {
     this.checkActor(actor);
     const c = await this.load(id);
-    if (c.state === 'completed' || c.state === 'not-reached' || c.state === 'skipped') throw new ConflictException(DONE);
-    if (!OPEN_STATES.includes(c.state)) throw new ConflictException(WAITING);
-    if (c.state === 'calling' && actor !== SUPPORT_ACTOR) throw new ConflictException(ON_CALL);
+    const agent = actor === SUPPORT_ACTOR;
+    if (c.state === 'completed' || c.state === 'skipped') throw new ConflictException(DONE);
+    if (c.state === 'calling' && !agent) throw new ConflictException(ON_CALL);
+    // A person may also record a patient who rings back before the next try, or after the last one.
+    const from = agent ? OPEN_STATES : PERSON_STATES;
+    if (!from.includes(c.state)) throw new ConflictException(c.state === 'not-reached' ? DONE : WAITING);
     if (await this.facts.isDeceased(String(c.patient))) throw new ConflictException(DIED);
     // A person may switch the question list before starting (design 4.5), so a missed cardiac patient still gets the
     // blood-thinner question; the agent keeps the list its call was placed with.
@@ -456,14 +507,17 @@ export class SupportCheckupsService implements OnModuleInit {
     const group = (actor !== SUPPORT_ACTOR && input?.group ? input.group : c.group) as CareGroup;
     const comment = typeof input.comment === 'string' ? input.comment.trim() : '';
     if (comment.length > 500) throw new BadRequestException('Keep the comment under 500 characters.');
-    const read = this.readAnswers(group, input.answers, input);
+    const read = this.readAnswers(group, input.answers, input, agent);
     const result = read.emergency.length ? 'sent-to-er' : read.worrying.length ? 'needs-doctor' : 'fine';
     const at = this.clock();
+    // The check-up keeps a note of the agent's answers that could not be read; the rating's comment stays the patient's own.
+    const stored = [comment, read.dropped.length ? `Answers not understood: ${read.dropped.join(', ')}` : ''].filter(Boolean).join(' · ').slice(0, 500);
 
     const claimed = await this.checkups
       .findOneAndUpdate(
-        { _id: c._id, state: { $in: OPEN_STATES } },
+        { _id: c._id, state: { $in: from } },
         {
+          $unset: { nextTryAt: 1 },
           $set: {
             state: 'completed',
             group,
@@ -476,7 +530,7 @@ export class SupportCheckupsService implements OnModuleInit {
             ...(actor === SUPPORT_ACTOR && input.agentCallId ? { resultCall: input.agentCallId } : {}),
             ...(read.questionText ? { questionText: read.questionText } : {}),
             ...(read.rating ? { rating: read.rating } : {}),
-            ...(comment ? { comment } : {})
+            ...(stored ? { comment: stored } : {})
           }
         },
         { new: true }

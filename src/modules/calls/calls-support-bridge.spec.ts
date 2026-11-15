@@ -614,6 +614,20 @@ describe('Calls and the support bridge', () => {
       assert.equal(parsed({}).answers, undefined);
     });
 
+    test('check-up data is read leniently: keys and choices trimmed and lower-cased, odd keys dropped, a yes/no rating ignored', () => {
+      const parsed = (fields: Record<string, unknown>) => parseSnapServeResult({ id: 9, dispositionResult: { outcome: 'Information given', ...fields } });
+      assert.deepEqual(parsed({ checkup_answers: { ' Symptoms ': ' SEVERE ', Medicines: 'Yes', 'bad key!': 'x', followup_2: 'no' } }).answers, {
+        symptoms: 'severe',
+        medicines: 'yes'
+      });
+      const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`k${String.fromCharCode(97 + (i % 26))}${i >= 26 ? 'z' : ''}`, 'yes']));
+      assert.equal(Object.keys(parsed({ checkup_answers: many }).answers!).length, 20);
+      assert.equal(parsed({ rating: true }).rating, undefined, 'a boolean is no rating');
+      assert.equal(parsed({ rating: 'true' }).rating, undefined);
+      assert.equal(parsed({ rating: ' 3 ' }).rating, 3);
+      assert.equal(parsed({ rating: 0 }).rating, undefined);
+    });
+
     /** An answered check-up call with an emergency answer, delivered as SnapServe would. */
     const answered = (callId: string) =>
       parseSnapServeResult({

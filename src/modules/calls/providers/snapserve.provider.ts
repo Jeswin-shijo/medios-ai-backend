@@ -188,7 +188,13 @@ function field(fields: Record<string, unknown>, ...names: string[]): unknown {
 
 const present = (value: unknown) => (value === null || value === undefined || value === '' ? undefined : value);
 
-/** The check-up answers: a JSON object (or its text) of question key → choice key. Unreadable gives {}; only text values are kept. */
+/** Answers read from one check-up result at most. */
+const MAX_CHECKUP_ANSWERS = 20;
+
+/**
+ * The check-up answers: a JSON object (or its text) of question key → choice key. Unreadable gives {}. Keys and values
+ * are trimmed and lower-cased; only word keys (a-z, up to 20 letters) with a text value are kept, at most 20 of them.
+ */
 function checkupAnswers(raw: unknown): Record<string, string> | undefined {
   if (present(raw) === undefined) return undefined;
   let value = raw;
@@ -200,7 +206,19 @@ function checkupAnswers(raw: unknown): Record<string, string> | undefined {
     }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+  const answers: Record<string, string> = {};
+  for (const [name, choice] of Object.entries(value).slice(0, MAX_CHECKUP_ANSWERS)) {
+    const k = name.trim().toLowerCase();
+    if (typeof choice !== 'string' || !/^[a-z]{1,20}$/.test(k) || Object.prototype.hasOwnProperty.call(answers, k)) continue;
+    answers[k] = choice.trim().toLowerCase().slice(0, 40);
+  }
+  return answers;
+}
+
+/** A rating only from a number or a "1"–"5" text: a yes/no flag is no rating. */
+function ratingOf(raw: unknown): number | undefined {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\s*[1-5]\s*$/.test(raw) ? Number(raw) : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= 5 ? n : undefined;
 }
 
 function transcriptLines(raw: unknown): CallResult['transcript'] {
@@ -244,7 +262,7 @@ export function parseSnapServeResult(body: any): CallResult {
   const callbackRaw = present(field(fields, 'callback_time'));
   const callback = callbackRaw ? new Date(String(callbackRaw)) : undefined;
   const notes = present(field(fields, 'notes'));
-  const rating = Number(present(field(fields, 'rating')));
+  const rating = ratingOf(field(fields, 'rating'));
   const duration = Number(p.durationSeconds ?? p.duration ?? p.durationSec ?? p.callDuration);
   const direction = key(p.direction);
 
@@ -256,7 +274,7 @@ export function parseSnapServeResult(body: any): CallResult {
     callbackAt: callback && !Number.isNaN(callback.getTime()) ? callback : undefined,
     notes: notes ? String(notes).slice(0, 500) : undefined,
     answers: checkupAnswers(field(fields, 'checkup_answers')),
-    rating: Number.isInteger(rating) && rating >= 1 && rating <= 5 ? rating : undefined,
+    rating,
     summary: String(p.callSummary ?? p.summary ?? '').slice(0, 2000),
     transcript: transcriptLines(p.transcript),
     durationSec: Number.isFinite(duration) ? Math.round(duration) : undefined,

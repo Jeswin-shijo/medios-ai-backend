@@ -630,9 +630,111 @@ describe('SupportCheckupsService', () => {
     const id2 = await makeOne();
     await m.Patient.updateOne({ _id: patient._id }, { $set: { status: 'Deceased' } });
     await assert.rejects(svc.submit(NURSE, id2, { group: 'general', answers: FINE }), /has died/);
-    // Not yet due.
+    // Not yet due: the agent cannot record it (a person can, when the patient rings first).
     const early = await makeOne(false);
-    await assert.rejects(svc.submit(NURSE, early, { group: 'general', answers: FINE }), ConflictException);
+    await assert.rejects(svc.submit(SUPPORT_ACTOR, early, { group: 'general', answers: FINE }), /once it is due/);
+  });
+
+  test('R22: an emergency answer saves at once, with earlier questions not asked and later ones left out', async () => {
+    await holder();
+    const id = await makeOne();
+    // A person: the medicines question was never reached, and the follow-up answer after the emergency is not kept.
+    const d = await svc.submit(NURSE, id, { group: 'general', answers: { symptoms: 'severe', followup: 'yes' } });
+    assert.deepEqual([d.state, d.result, d.answers, d.emergency], ['completed', 'sent-to-er', { symptoms: 'severe' }, ['symptoms']]);
+    assert.equal(expected.length, 1, 'the ER is told');
+    assert.ok(await alertOf(`support-checkup:${id}:er`));
+    // On the cardiac list, an emergency on the fourth question with nothing before it.
+    const id2 = await makeOne();
+    const c = await svc.submit(NURSE, id2, { group: 'cardiac', answers: { exertion: 'rest' } });
+    assert.deepEqual([c.result, c.answers], ['sent-to-er', { exertion: 'rest' }]);
+    // Still strict for a person: a wrong value before the emergency, or a missing answer with no emergency.
+    const id3 = await makeOne();
+    await assert.rejects(svc.submit(NURSE, id3, { group: 'general', answers: { medicines: 'maybe', symptoms: 'severe' } }), /Choose an answer/);
+    await assert.rejects(svc.submit(NURSE, id3, { group: 'general', answers: { symptoms: 'mild' } }), /Choose an answer for: Are you taking/);
+    assert.equal((await rowOf(id3)).state, 'due');
+  });
+
+  test('the agent path is lenient: a garbled or extra answer never stops an emergency, and a boolean rating is ignored', async () => {
+    await holder();
+    const id = await makeOne();
+    await bridge.handlers.checkupResult!(id, {
+      outcome: 'enquiry',
+      answers: { medicines: 'perhaps', ' Symptoms ': ' SEVERE ', exertion: 'rest', followup: 'yes', extra: 'x' },
+      rating: true as unknown as number,
+      agentCallId: String(oid())
+    });
+    const r = await rowOf(id);
+    assert.deepEqual([r.state, r.result, r.answers, r.emergency, r.rating], ['completed', 'sent-to-er', { symptoms: 'severe' }, ['symptoms'], undefined]);
+    assert.equal(r.comment, 'Answers not understood: medicines "perhaps"');
+    assert.equal(expected.length, 1, 'the ER card is made');
+    assert.equal((await alertOf(`support-checkup:${id}:er`))!.title, `Check-up ${r.number} sent to the ER`);
+    assert.equal(await m.SupportFeedback.countDocuments(), 0, 'no rating from a yes/no flag');
+
+    // Letter case and spaces are forgiven; a rating out of range or as text is ignored, not a refusal.
+    const id2 = await makeOne();
+    await bridge.handlers.checkupResult!(id2, {
+      outcome: 'enquiry',
+      answers: { Medicines: 'Yes', symptoms: ' None ', followup: 'YES', question: 'no', rating: 'great' },
+      rating: 0,
+      agentCallId: String(oid())
+    });
+    const r2 = await rowOf(id2);
+    assert.deepEqual([r2.state, r2.result, r2.rating, r2.comment], ['completed', 'fine', undefined, undefined]);
+    const id3 = await makeOne();
+    await bridge.handlers.checkupResult!(id3, { outcome: 'enquiry', answers: { ...FINE, rating: ' 4 ' }, agentCallId: String(oid()) });
+    assert.equal((await rowOf(id3)).rating, 4);
+
+    // Without an emergency, an answer that cannot be read still refuses the result (Calls keeps it for a person).
+    const id4 = await makeOne();
+    const call4 = String(oid());
+    await assert.rejects(
+      bridge.handlers.checkupResult!(id4, { outcome: 'enquiry', answers: { ...FINE, medicines: 'perhaps' }, agentCallId: call4 }),
+      /Choose an answer/
+    );
+    // An emergency on a question of the other list is not ignored quietly either.
+    await assert.rejects(
+      bridge.handlers.checkupResult!(id4, { outcome: 'enquiry', answers: { ...FINE, exertion: 'rest' }, agentCallId: call4 }),
+      /not on this list: exertion/
+    );
+    assert.equal((await rowOf(id4)).state, 'due');
+    // Only the first 20 keys are read.
+    const id5 = await makeOne();
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 25; i++) many[`junk${i}`] = 'x';
+    await assert.rejects(
+      bridge.handlers.checkupResult!(id5, { outcome: 'enquiry', answers: { ...many, ...FINE }, agentCallId: String(oid()) }),
+      /Choose an answer/
+    );
+  });
+
+  test('a patient who rings back can be recorded by a person before the next try, or after the last one', async () => {
+    const id = await makeOne();
+    await svc.noAnswer(NURSE, id);
+    assert.equal((await rowOf(id)).state, 'scheduled');
+    const call = await deferredCall(id);
+    const d = await svc.submit(NURSE, id, { group: 'general', answers: { symptoms: 'severe' } });
+    assert.deepEqual([d.state, d.result, d.tries, d.nextTryAt], ['completed', 'sent-to-er', 1, null]);
+    assert.deepEqual(canceledCalls, [String(call._id)], 'a linked call not yet placed is canceled');
+    assert.equal(expected.length, 1);
+    // After three tries: not reached, then the patient rings back.
+    const id2 = await makeOne();
+    for (let i = 0; i < 3; i++) {
+      await svc.noAnswer(NURSE, id2);
+      now = at(10, 0, 29 + i);
+      await svc.makeDue(now);
+    }
+    assert.equal((await rowOf(id2)).state, 'not-reached');
+    const n = await svc.submit(DESK, id2, { group: 'general', answers: FINE, rating: 5 });
+    assert.deepEqual([n.state, n.result, n.rating], ['completed', 'fine', 5]);
+    assert.deepEqual(
+      (await sent('support.checkup-done')).filter((x) => x.payload.checkupId === id2).map((x) => x.payload.outcome),
+      ['not-reached', 'fine']
+    );
+    await assert.rejects(svc.submit(NURSE, id2, { group: 'general', answers: FINE }), ConflictException);
+    // The agent still records only a due call.
+    const id3 = await makeOne();
+    await svc.noAnswer(NURSE, id3);
+    await assert.rejects(svc.submit(SUPPORT_ACTOR, id3, { group: 'general', answers: FINE }), /once it is due/);
   });
 
   test('detail has both languages, the follow-up to read out and the emergency line', async () => {
