@@ -42,6 +42,7 @@ import { LAB_DEMO_ACCOUNTS, seedLab } from './seed-lab';
 import { seedPharmacy } from './seed-pharmacy';
 import { seedRevenue } from './seed-revenue';
 import { seedScheduling } from './seed-scheduling';
+import { seedSupport } from './seed-support';
 import { resolveDemoPassword } from './seed-password';
 import { appointmentStart, isoDate } from '../common/utils/clinic-time';
 import { DEMO_CARDS, buildCounters, buildDepartments, buildDoctors } from './seed-opd';
@@ -268,6 +269,8 @@ async function seed() {
   // The fixture appointments are Dr. Shajin's (the Scheduling seed below gives them his id), so their tokens are on his line.
   const departmentName = buildDepartments().find((d) => d.code === shajin.departmentCode)!.name;
   await seedQueue({ _id: shajin._id, name: shajin.name, room: shajin.room, tokenPrefix: shajin.tokenPrefix, departmentName });
+  // When the agent seeds start: Patient Support replays the messages they store from here on.
+  const seedStartedAt = Date.now();
   // Wards, beds and the two real admissions (the patients come first); also clears admissions and bed suggestions.
   // Their times fall on the clinic day: CLINIC_DATE may be unset (the seed reads .env only when MONGODB_URI is not passed).
   await seedBeds(process.env.CLINIC_DATE ?? DEMO_DAY);
@@ -285,8 +288,11 @@ async function seed() {
   // The revenue day: the price list and about 20 bills in every state, on the visits, stays, tests, medicines and appointments above (it starts billing from now).
   await seedRevenue(process.env.CLINIC_DATE ?? DEMO_DAY);
   // The discharge day: David Raj's discharge and ten more stays in every checklist state, billed by Revenue's own services, and snapshots.
-  // Last: it sets both the Discharge and the Revenue start stamps after its records, so neither minute pass back-bills or repairs them.
+  // It sets both the Discharge and the Revenue start stamps after its records, so neither minute pass back-bills or repairs them.
   await seedDischarge(process.env.CLINIC_DATE ?? DEMO_DAY);
+  // Patient Support, last: contact and consent, family updates replayed from the messages the seeds above stored, tickets, check-up
+  // calls and ratings. It stamps its own start after them, so its minute pass replays nothing.
+  await seedSupport(process.env.CLINIC_DATE ?? DEMO_DAY, seedStartedAt);
 
   console.log(
     `🎉 Seeding complete. Sign in as ${DEMO_EMAIL} (doctor), ${ADMIN_EMAIL} (admin) or ${STAFF_ACCOUNTS.map((a) => a.email).join(', ')}; ${process.env.SEED_DEMO_PASSWORD ? 'password from SEED_DEMO_PASSWORD' : `password ${DEMO_PASSWORD}`}`,
