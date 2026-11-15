@@ -70,6 +70,14 @@ export class CallResultData {
 
   @Prop()
   notes?: string;
+
+  /** Checkup: question key → choice key, kept so a result Patient Support could not take is not lost. */
+  @Prop({ type: Object })
+  answers?: Record<string, string>;
+
+  /** Checkup: how the patient rated the stay, 1 to 5. */
+  @Prop()
+  rating?: number;
 }
 
 /** One phone call placed by the AI agent. A retry is a new record with attempt + 1. */

@@ -600,7 +600,12 @@ export class CallsService implements OnModuleInit {
             transcript: result.transcript,
             durationSec: result.durationSec,
             endedAt: result.endedAt ?? new Date(),
-            result: { chosenSlot: result.chosenSlot, callbackAt: result.callbackAt, notes: result.notes },
+            result: {
+              chosenSlot: result.chosenSlot,
+              callbackAt: result.callbackAt,
+              notes: result.notes,
+              ...(found.purpose === 'checkup' && { answers: result.answers ?? {}, rating: result.rating }),
+            },
             ...(providerCallId && { providerCallId }),
             ...(result.raw && { rawResult: result.raw }),
           },
@@ -659,24 +664,43 @@ export class CallsService implements OnModuleInit {
       }
     }
     const passed = await this.toPatientSupport(call, r);
-    await this.calls.updateOne({ _id: call._id }, { outcome: r.outcome, actionTaken: marked + passed }).exec();
+    if (!passed.taken) {
+      // The answers are kept on the call; a person records them (an emergency answer must not be lost).
+      try {
+        await this.alert(call, {
+          title: 'Review a check-up call: the answers could not be recorded',
+          subtitle: "Open the call's transcript and fill the check-up form by hand.",
+          priority: 'High',
+          category: 'Critical',
+        });
+      } catch (err) {
+        this.logger.error(`Could not raise the review alert for check-up call ${call._id}: ${(err as Error).message}`);
+      }
+    }
+    await this.calls.updateOne({ _id: call._id }, { outcome: r.outcome, actionTaken: marked + passed.text }).exec();
     this.logger.log(`checkup call ${call._id} ended: ${r.outcome}`);
     return { matched: true };
   }
 
-  /** Hands a check-up call's end to Patient Support; returns what happened, for the call log. Never throws. */
-  private async toPatientSupport(call: AgentCallDocument, r: Pick<CallResult, 'outcome' | 'answers' | 'rating' | 'notes'>): Promise<string> {
+  /**
+   * Hands a check-up call's end to Patient Support. `taken` is false when nobody is
+   * listening or the handler failed; `text` says what happened, for the call log. Never throws.
+   */
+  private async toPatientSupport(
+    call: AgentCallDocument,
+    r: Pick<CallResult, 'outcome' | 'answers' | 'rating' | 'notes'>,
+  ): Promise<{ taken: boolean; text: string }> {
     const handler = this.bridge?.handlers.checkupResult;
     if (!handler) {
       this.logger.warn(`Check-up call ${call._id} ended (${r.outcome}), but Patient Support is not listening.`);
-      return 'Patient Support is not running, so the result is only logged here.';
+      return { taken: false, text: 'Patient Support is not running, so the result is only logged here. Staff asked to review it.' };
     }
     try {
       await handler(call.checkupId ?? '', { outcome: r.outcome, answers: r.answers ?? {}, rating: r.rating, notes: r.notes, agentCallId: String(call._id) });
-      return 'Result passed to Patient Support.';
+      return { taken: true, text: 'Result passed to Patient Support.' };
     } catch (err) {
       this.logger.error(`Patient Support could not take the result of check-up call ${call._id}: ${(err as Error).message}`);
-      return `Patient Support could not take the result: ${(err as Error).message}`;
+      return { taken: false, text: `Patient Support could not take the result: ${(err as Error).message.replace(/\.?$/, '.')} Staff asked to review it.` };
     }
   }
 

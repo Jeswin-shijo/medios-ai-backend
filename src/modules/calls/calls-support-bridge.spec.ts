@@ -590,6 +590,8 @@ describe('Calls and the support bridge', () => {
       assert.equal(row.outcome, 'enquiry');
       assert.equal(row.activeKey, undefined);
       assert.match(row.actionTaken, /Patient Support/);
+      assert.deepEqual(row.result.answers, { medicines: 'yes', symptoms: 'mild', followup: 'no', question: 'no' }, 'the answers are kept on the call');
+      assert.equal(row.result.rating, 4);
       assert.equal(await m.AgentCall.countDocuments().exec(), 1, 'no booking or retry call');
       assert.equal(await m.Appointment.countDocuments().exec(), 0);
       assert.deepEqual(await calls.recordResult(parseSnapServeResult(payload)), { matched: true, duplicate: true });
@@ -610,6 +612,64 @@ describe('Calls and the support bridge', () => {
       assert.equal(parsed({ rating: 2.5 }).rating, undefined);
       assert.equal(parsed({ rating: 5 }).rating, 5);
       assert.equal(parsed({}).answers, undefined);
+    });
+
+    /** An answered check-up call with an emergency answer, delivered as SnapServe would. */
+    const answered = (callId: string) =>
+      parseSnapServeResult({
+        id: 'fake_1',
+        status: 'completed',
+        callSummary: 'Chest pain at rest since this morning.',
+        dispositionResult: { outcome: 'Information given', checkup_answers: { medicines: 'yes', symptoms: 'severe' }, rating: 3 },
+        variables: { call_ref: callId }
+      });
+    const reviewAlerts = () => m.TaskAlertItem.find({ title: 'Review a check-up call: the answers could not be recorded' }).lean().exec() as Promise<any[]>;
+
+    test('a check-up result whose handler throws keeps the answers on the call and raises a review alert', async () => {
+      const bridge = new SupportBridge();
+      bridge.register({
+        checkupResult: async () => {
+          throw new Error('Choose one of the allowed answers.');
+        }
+      });
+      const calls = callsWith(new FakeProvider(), bridge);
+      await m.Patient.create(MEENAKSHI);
+      const call = await calls.requestCheckup(checkup('ck9'), 'Patient Support Agent');
+      assert.deepEqual(await calls.recordResult(answered(String(call._id))), { matched: true });
+
+      const row = (await m.AgentCall.findById(call._id).lean().exec()) as any;
+      assert.equal(row.status, 'completed');
+      assert.deepEqual(row.result.answers, { medicines: 'yes', symptoms: 'severe' });
+      assert.equal(row.result.rating, 3);
+      assert.match(row.actionTaken, /Choose one of the allowed answers/);
+      const alerts = await reviewAlerts();
+      assert.equal(alerts.length, 1);
+      assert.deepEqual(
+        [alerts[0].subtitle, alerts[0].type, alerts[0].category, alerts[0].priority, alerts[0].patientName, alerts[0].uhid],
+        ["Open the call's transcript and fill the check-up form by hand.", 'Patient Communication', 'Critical', 'High', 'Meenakshi T', MEENAKSHI.uhid]
+      );
+      assert.doesNotMatch(alerts[0].title, /Meenakshi/, 'no name in the title');
+      // Delivered again: still one alert.
+      await calls.recordResult(answered(String(call._id)));
+      assert.equal((await reviewAlerts()).length, 1);
+    });
+
+    test('a check-up result with no handler raises the same alert', async () => {
+      for (const bridge of [undefined, new SupportBridge()]) {
+        await m.AgentCall.deleteMany({}).exec();
+        await m.TaskAlertItem.deleteMany({}).exec();
+        await m.Patient.deleteMany({}).exec();
+        const calls = callsWith(new FakeProvider(), bridge);
+        await m.Patient.create(MEENAKSHI);
+        const call = await calls.requestCheckup(checkup('ck10'), 'Patient Support Agent');
+        await calls.recordResult(answered(String(call._id)));
+        const row = (await m.AgentCall.findById(call._id).lean().exec()) as any;
+        assert.deepEqual(row.result.answers, { medicines: 'yes', symptoms: 'severe' });
+        assert.match(row.actionTaken, /Patient Support is not running/);
+        const alerts = await reviewAlerts();
+        assert.equal(alerts.length, 1);
+        assert.deepEqual([alerts[0].category, alerts[0].priority, alerts[0].uhid], ['Critical', 'High', MEENAKSHI.uhid]);
+      }
     });
 
     test('a checkup result with nobody listening is logged; "do not call" still marks the patient', async () => {
