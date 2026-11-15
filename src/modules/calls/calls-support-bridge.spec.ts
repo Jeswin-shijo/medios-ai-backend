@@ -313,7 +313,7 @@ describe('Calls and the support bridge', () => {
         seen.opened.map((o) => [o.source, o.providerCallId, o.urgent]),
         [
           ['call-back', 'c7', false],
-          ['call-unanswered', 'c7', false]
+          ['call-unanswered', 'c7', true]
         ]
       );
       assert.equal(seen.opened[1].reason, 'Caller asked about the bill.');
@@ -324,7 +324,7 @@ describe('Calls and the support bridge', () => {
       assert.equal(await m.TaskAlertItem.countDocuments().exec(), 0, 'no backup task');
     });
 
-    test('Needs staff with no call-back opens a call-unanswered ticket; a failing handler falls back to the High task', async () => {
+    test('Needs staff with no call-back opens an urgent call-unanswered ticket (R24); a failing handler falls back to the High task', async () => {
       const { bridge, seen } = testBridge();
       await rekha();
       const inbound = inboundWith(bridge);
@@ -334,7 +334,7 @@ describe('Calls and the support bridge', () => {
       assert.equal(seen.opened.length, 1);
       assert.deepEqual(
         [seen.opened[0].source, seen.opened[0].reason, seen.opened[0].urgent, seen.opened[0].uhid, seen.opened[0].callerName, seen.opened[0].providerCallId],
-        ['call-unanswered', "The caller's question was not answered", false, 'MHK202600301', 'Rekha Suresh', 'c8']
+        ['call-unanswered', "The caller's question was not answered", true, 'MHK202600301', 'Rekha Suresh', 'c8']
       );
       assert.equal(seen.attached.length, 1);
 
@@ -362,9 +362,11 @@ describe('Calls and the support bridge', () => {
         message: 'பார்வையாளர் நேரம் மாலை 4 முதல் 7 வரை.'
       });
       await inbound.run('hospital_info', { topic: 'visiting hours', language: 'tamil' }, {});
+      await inbound.run('hospital_info', { topic: 'visiting hours', language: ' TA ' }, {});
+      await inbound.run('hospital_info', { topic: 'visiting hours', language: 'hindi' }, {});
       assert.deepEqual(
         seen.info.map(([, language]) => language),
-        ['en', 'ta', 'en']
+        ['en', 'ta', 'ta', 'ta', 'en']
       );
       assert.deepEqual(await inbound.run('hospital_info', { topic: 'helipad' }, {}), {
         ok: false,
@@ -410,19 +412,19 @@ describe('Calls and the support bridge', () => {
       assert.equal(seen.opened.length, 1);
       assert.match((await logged('c10')).actionTaken, /ER/);
 
-      // Minutes: at least 1, whole, 30 when not said. Ambulance only when said exactly.
+      // Minutes: at least 1, whole, 30 when not said. Ambulance in any letter case.
       await inbound.run(
         'expected_arrival',
         { complaint: 'Fall at home', age_sex: '70 F', minutes: 0, mode: 'ambulance' },
         { callerNumber: NUM.other, providerCallId: 'c11' }
       );
-      await inbound.run('expected_arrival', { complaint: 'Fall at home', age_sex: '70 F', minutes: '12.6' }, { providerCallId: 'c12' });
+      await inbound.run('expected_arrival', { complaint: 'Fall at home', age_sex: '70 F', minutes: '12.6', mode: ' Ambulance ' }, { providerCallId: 'c12' });
       await inbound.run('expected_arrival', { complaint: 'Fall at home', age_sex: '70 F' }, { providerCallId: 'c13' });
       assert.deepEqual(
         seen.arrivals.slice(1).map((a) => [a.minutes, a.mode, a.uhid, a.phone]),
         [
           [1, 'ambulance', undefined, e164(NUM.other)],
-          [13, 'walk-in', undefined, undefined],
+          [13, 'ambulance', undefined, undefined],
           [30, 'walk-in', undefined, undefined]
         ]
       );
@@ -660,7 +662,14 @@ describe('Calls and the support bridge', () => {
       assert.equal(alerts.length, 1);
       assert.deepEqual(
         [alerts[0].subtitle, alerts[0].type, alerts[0].category, alerts[0].priority, alerts[0].patientName, alerts[0].uhid],
-        ["Open the call's transcript and fill the check-up form by hand.", 'Patient Communication', 'Critical', 'High', 'Meenakshi T', MEENAKSHI.uhid]
+        [
+          "Open the call's transcript; record the answers on the check-up if it is still open.",
+          'Patient Communication',
+          'Critical',
+          'High',
+          'Meenakshi T',
+          MEENAKSHI.uhid
+        ]
       );
       assert.doesNotMatch(alerts[0].title, /Meenakshi/, 'no name in the title');
       // Delivered again: still one alert.

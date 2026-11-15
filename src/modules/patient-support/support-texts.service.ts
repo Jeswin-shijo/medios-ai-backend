@@ -220,12 +220,22 @@ export class SupportTextsService {
     return rows.filter((r) => r.topic === q || (r.keywords ?? []).some((k) => words.includes(k.toLowerCase())));
   }
 
+  /**
+   * The phone agent's hospital fact, read out exactly. Tamil only once a person has checked it (Q42), else English. A
+   * fact with an empty value ("The hospital's number is .") is never read out: the caller is offered a call back.
+   */
   async findFaq(topic: string, language: Language): Promise<{ found: boolean; topic?: string; text: string }> {
     const hit = (await this.matches(String(topic ?? '')))[0];
     if (!hit) return { found: false, text: FAQ_NOT_FOUND };
-    const useTa = language === 'ta' && !!hit.ta?.trim();
+    const useTa = language === 'ta' && hit.taChecked === true && !!hit.ta?.trim();
     const facts = await this.facts();
-    const text = (useTa ? hit.ta : hit.en).replace(/\{(\w+)\}/g, (_m: string, n: string) => facts[n] ?? '');
+    let gap = false;
+    const text = (useTa ? hit.ta : hit.en).replace(/\{(\w+)\}/g, (_m: string, n: string) => {
+      const v = Object.prototype.hasOwnProperty.call(facts, n) ? String(facts[n] ?? '').trim() : '';
+      if (!v) gap = true;
+      return v;
+    });
+    if (gap) return { found: false, text: FAQ_NOT_FOUND };
     return { found: true, topic: hit.topic, text: text.replace(/ {2,}/g, ' ').trim() };
   }
 

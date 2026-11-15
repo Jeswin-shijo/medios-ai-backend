@@ -669,7 +669,7 @@ export class CallsService implements OnModuleInit {
       try {
         await this.alert(call, {
           title: 'Review a check-up call: the answers could not be recorded',
-          subtitle: "Open the call's transcript and fill the check-up form by hand.",
+          subtitle: "Open the call's transcript; record the answers on the check-up if it is still open.",
           priority: 'High',
           category: 'Critical',
         });

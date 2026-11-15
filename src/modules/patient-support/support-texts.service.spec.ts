@@ -109,6 +109,23 @@ describe('SupportTextsService', () => {
     assert.equal((await svc.faqs()).length, DEFAULT_FAQS.length);
   });
 
+  test('findFaq never reads out an empty fact, and gives Tamil only once it is checked (Q42)', async () => {
+    assert.match((await svc.findFaq('emergency', 'en')).text, /number is 04652 123456\./);
+    await m.HospitalSettings.updateOne({}, { $set: { 'hospital.phone': '  ' } });
+    assert.deepEqual(await svc.findFaq('emergency', 'en'), { found: false, text: "I don't have that information. Offer to arrange a call back." });
+    await m.HospitalSettings.updateOne({}, { $unset: { 'hospital.address': '' } });
+    assert.equal((await svc.findFaq('directions', 'en')).found, false);
+    // A placeholder with no fact behind it at all is a gap too.
+    await svc.saveFaq(ADMIN, 'parking', { en: 'Parking: {nothing}.' });
+    assert.equal((await svc.findFaq('parking', 'en')).found, false);
+
+    await svc.saveFaq(ADMIN, 'visiting-hours', { ta: 'பார்வையாளர் நேரம் {visiting}.' });
+    const unchecked = await svc.findFaq('visiting-hours', 'ta');
+    assert.match(unchecked.text, /^Visiting hours are /, 'English until the Tamil is checked');
+    await svc.saveFaq(ADMIN, 'visiting-hours', { taChecked: true });
+    assert.match((await svc.findFaq('visiting-hours', 'ta')).text, /^பார்வையாளர் நேரம் /);
+  });
+
   test('a nurse cannot save a template', async () => {
     await assert.rejects(() => svc.saveTemplate(NURSE, 'procedure-done', { en: 'x' }), status(403));
     await assert.rejects(() => svc.saveFaq(NURSE, 'parking', { en: 'x' }), status(403));

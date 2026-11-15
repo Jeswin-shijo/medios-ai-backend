@@ -333,6 +333,107 @@ describe('SupportTicketsService', () => {
     ]);
   });
 
+  /** A phone ticket for one provider call, as the bridge opens it. */
+  const call = (extra: Record<string, unknown>) =>
+    svc.open(
+      SUPPORT_ACTOR,
+      input({ source: 'call-back', providerCallId: 'call-u', patientId: undefined, ticketType: 'reports', question: 'Are my reports ready?', ...extra })
+    );
+
+  test('R23: an urgent request on a call that already opened a normal ticket makes it urgent, with the alert, an earlier due time and a note', async () => {
+    const a = await call({});
+    assert.deepEqual([a.priority, a.dueAt.getTime()], ['normal', at(14).getTime()]);
+    now = at(10, 5);
+    const b = await call({ ticketType: 'other', question: 'Chest pain since this morning', urgent: true });
+    assert.equal(b.id, a.id);
+    assert.equal(await m.SupportTicket.countDocuments(), 1);
+    assert.deepEqual([b.priority, b.ticketType, b.owner, b.round, b.state], ['urgent', 'reports', 'desk', 2, 'open']);
+    assert.equal(b.dueAt.getTime(), at(10, 35).getTime(), 'the urgent due time, earlier than 14:00');
+    assert.deepEqual(
+      (await svc.detail(b.id)).notes.map((n) => [n.kind, n.text, n.byName]),
+      [['system', 'Now urgent: Chest pain since this morning', 'Patient Support Agent']]
+    );
+    const al = (await alertOf(b.id))!;
+    assert.deepEqual([al.title, al.status], ['Urgent ticket SP-0001 for Front desk: Reports', 'Pending']);
+    // The normal round's clock stops; the urgent round has its own, due at 10:35.
+    assert.deepEqual(
+      (await clocksOf(`${a.id}:1`)).map((c) => [c.def, c.state]),
+      [['support-response', 'met']]
+    );
+    assert.deepEqual(
+      (await clocksOf(`${a.id}:2`)).map((c) => [c.def, c.state, c.dueAt.getTime()]),
+      [['support-response', 'running', at(10, 35).getTime()]]
+    );
+    assert.equal((await sent('support.ticket-opened')).at(-1)!.summary, 'SP-0001 now urgent: Reports');
+    assert.equal((await sent('support.ticket-answered')).at(-1)!.summary, 'SP-0001 round 1 closed');
+    // Asked again in the same call: nothing more changes.
+    await call({ question: 'Chest pain since this morning', urgent: true });
+    assert.equal((await svc.detail(a.id)).round, 2);
+
+    // An earlier due time is kept: a normal ticket due at 14:00 made urgent at 13:45 stays due at 14:00.
+    now = at(10);
+    const c = await call({ providerCallId: 'call-v' });
+    now = at(13, 45);
+    assert.equal((await call({ providerCallId: 'call-v', urgent: true })).dueAt.getTime(), at(14).getTime());
+    assert.equal((await svc.detail(c.id)).round, 2);
+
+    // Already past due and unanswered: the round and its climbing escalation stay; it only becomes urgent.
+    now = at(10);
+    const d = await call({ providerCallId: 'call-w' });
+    now = at(14, 30);
+    await svc.markEscalated(now);
+    const e = await call({ providerCallId: 'call-w', urgent: true });
+    assert.deepEqual([e.id, e.round, e.priority, e.dueAt.getTime(), e.shown], [d.id, 1, 'urgent', at(14).getTime(), 'Escalated']);
+    assert.equal((await alertOf(d.id))!.status, 'Pending');
+  });
+
+  test('R23: an emergency arrival in a call that opened a billing ticket hands it on to Clinical; a resolved one opens again', async () => {
+    const holder = await m.User.create({ name: 'Dr Duty', email: 'duty@x.in', passwordHash: 'x', role: UserRole.DOCTOR });
+    await m.DutyTitle.updateOne({ key: 'duty-doctor' }, { $set: { holders: [holder._id] } });
+    const a = await call({ ticketType: 'billing' });
+    now = at(10, 10);
+    const b = await call({
+      source: 'emergency-call',
+      ticketType: 'clinical',
+      question: 'Emergency call: Chest pain (58 M, ambulance, in about 20 minutes)',
+      urgent: true
+    });
+    assert.equal(b.id, a.id);
+    assert.deepEqual([b.ticketType, b.owner, b.ladder, b.round, b.priority], ['clinical', 'clinical', 'support-clinical', 2, 'urgent']);
+    assert.equal(b.dueAt.getTime(), at(10, 40).getTime());
+    assert.deepEqual(
+      (await svc.detail(b.id)).notes.map((n) => n.kind),
+      ['system', 'hand-on']
+    );
+    assert.deepEqual(
+      (await clocksOf(`${a.id}:2`)).map((c) => [c.def, c.state]),
+      [['support-response-clinical', 'running']]
+    );
+    assert.equal((await sent('support.ticket-opened')).at(-1)!.summary, 'SP-0001 handed on to Duty doctor');
+    assert.deepEqual([(await alertOf(b.id))!.title, (await alertOf(b.id))!.subtitle], ['Urgent ticket SP-0001 for Duty doctor: Clinical', 'Dr Duty · Phone']);
+
+    // Resolved before the urgent request came: it opens again as a new urgent round.
+    const c = await call({ providerCallId: 'call-r' });
+    await svc.resolve(frontDesk, c.id, 'Reports are ready at the counter');
+    const r = await call({ providerCallId: 'call-r', urgent: true, question: 'Bleeding at the wound' });
+    assert.deepEqual([r.state, r.round, r.priority, r.resolvedAt, r.resolution], ['open', 2, 'urgent', null, '']);
+    assert.deepEqual(
+      (await clocksOf(`${c.id}:2`)).map((x) => [x.def, x.state]),
+      [['support-response', 'running']]
+    );
+    assert.equal((await alertOf(c.id))!.status, 'Pending');
+  });
+
+  test('R24: the unanswered-call backup is urgent on its own, but never upgrades a ticket the call already raised', async () => {
+    const a = await call({});
+    const b = await call({ source: 'call-unanswered', ticketType: 'other', urgent: true, question: 'Asked for a person' });
+    assert.deepEqual([b.id, b.priority, b.round], [a.id, 'normal', 1]);
+    assert.equal(await alertOf(a.id), null);
+    const c = await call({ providerCallId: 'call-x', source: 'call-unanswered', ticketType: 'other', urgent: true, question: 'Asked for a person' });
+    assert.deepEqual([c.priority, c.source, c.dueAt.getTime()], ['urgent', 'call-unanswered', at(10, 30).getTime()]);
+    assert.equal((await alertOf(c.id))!.status, 'Pending');
+  });
+
   test('a caller named like a summary word ("Doctor") with no patient still gets its messages and clocks, also after a hand-on to Clinical', async () => {
     const t = await svc.open(frontDesk, input({ patientId: undefined, callerName: 'Doctor', ticketType: 'other', question: 'A referral question' }));
     assert.deepEqual(

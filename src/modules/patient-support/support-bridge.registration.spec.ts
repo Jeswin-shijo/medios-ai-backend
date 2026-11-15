@@ -177,6 +177,34 @@ describe('SupportBridgeRegistration (Patient Support up behind the phone agent)'
     assert.match(t.question, /could not be told/);
   });
 
+  test('R23 through the phone tools: a call-back then an urgent call-back is one urgent ticket; then an arrival hands it to Clinical', async () => {
+    const ctx = { providerCallId: 'prov-u' };
+    await inbound.run('request_callback', { phone: '9876543210', reason: 'A question about my reports', topic: 'reports' }, ctx);
+    const urgent = await inbound.run('request_callback', { phone: '9876543210', reason: 'Now chest pain', urgent: true }, ctx);
+    assert.match(String(urgent.message), /SP-0001/);
+    let t: any = await m.SupportTicket.findOne().lean();
+    assert.deepEqual([t.priority, t.ticketType, t.round], ['urgent', 'reports', 2]);
+    assert.equal(await m.SupportTicket.countDocuments(), 1);
+    assert.equal(((await m.TaskAlertItem.findOne({ link: `support-ticket:${t._id}:urgent` }).lean()) as any)?.status, 'Pending');
+    const reply = await bridge.handlers.expectedArrival!({ complaint: 'Chest pain', ageSex: '58 M', minutes: 20, mode: 'walk-in', providerCallId: 'prov-u' });
+    assert.equal(reply.ok, true);
+    t = await m.SupportTicket.findOne().lean();
+    assert.deepEqual([t.ticketType, t.owner, t.ladder, t.round], ['clinical', 'clinical', 'support-clinical', 3]);
+    assert.equal(await m.SupportTicket.countDocuments(), 1);
+  });
+
+  test('if the ER was told but the ticket step fails, the caller still hears the ER expects them', async () => {
+    tickets.open = async () => {
+      throw new Error('database down');
+    };
+    const reply = await bridge.handlers.expectedArrival!({ complaint: 'Chest pain', ageSex: '58 M', minutes: 20, mode: 'walk-in', providerCallId: 'prov-7' });
+    assert.deepEqual(reply, { ok: true, message: 'The ER has been told you are coming. Please come straight to the ER entrance.' });
+    assert.equal(expected.length, 1);
+    // With neither the ER nor the ticket, the failure goes back to Calls, which answers with its own fallback.
+    failEr = true;
+    await assert.rejects(bridge.handlers.expectedArrival!({ complaint: 'Chest pain', ageSex: '58 M', minutes: 20, mode: 'walk-in' }), /database down/);
+  });
+
   test('hospital facts come from the approved FAQ, and a call is attached to its ticket', async () => {
     const found = await bridge.handlers.hospitalInfo!('visiting-hours', 'en');
     assert.equal(found.found, true);

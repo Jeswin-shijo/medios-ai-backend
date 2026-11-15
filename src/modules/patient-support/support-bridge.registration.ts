@@ -73,14 +73,20 @@ export class SupportBridgeRegistration implements OnModuleInit {
       told = false;
       this.logger.error(`The ER could not be told about an expected arrival: ${(e as Error)?.message ?? e}`);
     }
-    await this.openCallTicket({
-      phone: i.phone ?? '',
-      uhid: i.uhid,
-      reason: `Emergency call: ${i.complaint} (${i.ageSex}, ${i.mode}, in about ${i.minutes} minutes)${told ? '' : '. The ER could not be told: please ring back.'}`,
-      urgent: true,
-      providerCallId: i.providerCallId,
-      source: 'emergency-call'
-    });
+    try {
+      await this.openCallTicket({
+        phone: i.phone ?? '',
+        uhid: i.uhid,
+        reason: `Emergency call: ${i.complaint} (${i.ageSex}, ${i.mode}, in about ${i.minutes} minutes)${told ? '' : '. The ER could not be told: please ring back.'}`,
+        urgent: true,
+        providerCallId: i.providerCallId,
+        source: 'emergency-call'
+      });
+    } catch (e) {
+      // The ER already expects the caller, so the caller still hears that; with neither, Calls' own fallback answers.
+      this.logger.error(`The ticket for an expected arrival was not opened: ${(e as Error)?.message ?? e}`);
+      if (!told) throw e;
+    }
     return told ? { ok: true, message: ARRIVED } : { ok: false, message: OFFER_CALLBACK };
   }
 }

@@ -609,7 +609,8 @@ export class InboundService {
     if (!lookUp) return { ok: false, message: OFFER_CALLBACK };
     const topic = str(args.topic, 120);
     if (!topic) throw new Refusal('Ask what the caller would like to know, then call hospital_info again.');
-    const { found, text } = await lookUp(topic, args.language === 'ta' ? 'ta' : 'en');
+    const language = str(args.language, 20).toLowerCase();
+    const { found, text } = await lookUp(topic, language === 'ta' || language === 'tamil' ? 'ta' : 'en');
     return { ok: found, message: text };
   }
 
@@ -624,7 +625,7 @@ export class InboundService {
       complaint: str(args.complaint, 200) || 'Emergency (phone call)',
       ageSex: str(args.age_sex, 40) || 'Not known',
       minutes,
-      mode: args.mode === 'ambulance' ? 'ambulance' : 'walk-in',
+      mode: str(args.mode, 20).toLowerCase() === 'ambulance' ? 'ambulance' : 'walk-in',
       phone: toE164India(ctx.callerNumber) ?? undefined,
       uhid: session?.uhid,
       providerCallId: ctx.providerCallId,
@@ -719,9 +720,10 @@ export class InboundService {
   }
 
   /**
-   * The backup for a call that ended "Needs staff" with nobody asked to call back, as a
-   * Patient Support ticket (one per call id). False when there is no handler or it
-   * failed, so the caller writes today's task instead.
+   * The backup for a call that ended "Needs staff" with nobody asked to call back, as an
+   * urgent Patient Support ticket (one per call id: a ticket the call already opened is
+   * reused as it is). False when there is no handler or it failed, so the caller writes
+   * today's task instead.
    */
   private async unansweredTicket(
     result: CallResult,
@@ -737,7 +739,8 @@ export class InboundService {
         uhid: session?.uhid,
         callerName: session?.patientName,
         reason: result.summary?.slice(0, 300) || "The caller's question was not answered",
-        urgent: false,
+        // Urgent, as today's High task was (R24); a ticket the call already raised keeps its own priority.
+        urgent: true,
         providerCallId: logged.providerCallId,
         source: 'call-unanswered',
       });

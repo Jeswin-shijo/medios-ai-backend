@@ -105,6 +105,8 @@ export interface SupportTicketDetail extends SupportTicketView {
   transcript: { speaker: string; text: string }[];
 }
 
+type TicketNoteInput = { kind: 'system' | 'hand-on'; text: string; by: string; byName: string; at: Date };
+
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const typeLabel = (t: string) => TICKET_TYPE_LABEL[t as TicketType] ?? t;
@@ -227,10 +229,11 @@ export class SupportTicketsService {
     const channel = source === 'desk' ? (input.channel ?? 'desk') : channelOf(source);
     const onTheSpot = input.onTheSpot === true;
     const resolution = onTheSpot ? text(input.resolution, 'The answer given', 1, 1000) : '';
+    const urgent = input.urgent === true || input.urgent === ('true' as unknown);
 
     if (input.providerCallId) {
-      const existing = await this.tickets.findOne({ providerCallId: input.providerCallId }).lean().exec();
-      if (existing) return this.view(existing);
+      const existing = await this.tickets.findOne({ providerCallId: input.providerCallId }).exec();
+      if (existing) return this.view((await this.reuse(actor, existing, source, urgent, question)).toObject());
     }
 
     let patient: PatientDocument | null = null;
@@ -247,7 +250,7 @@ export class SupportTicketsService {
     const cfg = await this.settings.get();
     const ticketType = input.ticketType as TicketType;
     const owner = cfg.ownerByType[ticketType];
-    const priority = input.urgent === true || input.urgent === ('true' as unknown) ? 'urgent' : 'normal';
+    const priority = urgent ? 'urgent' : 'normal';
     const now = this.now();
     let ticket: SupportTicketDocument;
     try {
@@ -279,8 +282,8 @@ export class SupportTicketsService {
       });
     } catch (e) {
       if ((e as { code?: number }).code === DUPLICATE_KEY && input.providerCallId) {
-        const existing = await this.tickets.findOne({ providerCallId: input.providerCallId }).lean().exec();
-        if (existing) return this.view(existing);
+        const existing = await this.tickets.findOne({ providerCallId: input.providerCallId }).exec();
+        if (existing) return this.view((await this.reuse(actor, existing, source, urgent, question)).toObject());
       }
       throw e;
     }
@@ -297,17 +300,96 @@ export class SupportTicketsService {
     return this.view(ticket.toObject());
   }
 
+  /**
+   * The ticket a call already opened, met again in the same call (R23). An urgent request makes it urgent: a system note
+   * with the new reason, the urgent alert, and a due time never later than it was; an emergency call also hands it on to
+   * Clinical. A round still unanswered and already past due keeps its round, since its escalation is climbing; otherwise
+   * a new round starts, so the urgent need has a clock of its own. The unanswered-call backup only fills a gap, so it
+   * never upgrades a ticket the call already raised (R24).
+   */
+  private async reuse(actor: Actor, t: SupportTicketDocument, source: TicketSource, urgent: boolean, reason: string): Promise<SupportTicketDocument> {
+    const toClinical = source === 'emergency-call' && t.ticketType !== 'clinical';
+    if (!urgent || source === 'call-unanswered') return t;
+    if (t.priority === 'urgent' && !toClinical && t.state !== 'resolved') return t;
+    const cfg = await this.settings.get();
+    const now = this.now();
+    const ticketType: TicketType = toClinical ? 'clinical' : (t.ticketType as TicketType);
+    const owner: OwnerKey = toClinical ? cfg.ownerByType.clinical : (t.owner as OwnerKey);
+    const live = t.state !== 'resolved' && !t.roundAnsweredAt;
+    const by = { by: actor.id, byName: actor.name, at: now };
+    const notes: TicketNoteInput[] = [{ kind: 'system', text: cut(`Now urgent: ${reason}`, 1000), ...by }];
+    if (!toClinical && live && new Date(t.dueAt).getTime() <= now.getTime()) {
+      const saved = await this.tickets
+        .findOneAndUpdate(
+          { _id: t._id, round: t.round, state: { $ne: 'resolved' }, roundAnsweredAt: null },
+          { $set: { priority: 'urgent' }, $push: { notes: { $each: notes } } },
+          { new: true }
+        )
+        .exec();
+      if (saved) await this.writeUrgentAlert(saved, 'Pending');
+      return saved ?? (await this.tickets.findById(t._id).exec()) ?? t;
+    }
+    if (toClinical) notes.push({ kind: 'hand-on', text: `Handed on to ${ownerLabel(owner)} (${typeLabel(ticketType)}): emergency call`, ...by });
+    const fresh = ticketDueAt(now, { priority: 'urgent', ticketType }, cfg);
+    const old = new Date(t.dueAt).getTime();
+    const dueAt = live && old > now.getTime() && old < fresh.getTime() ? new Date(old) : fresh;
+    const next = await this.nextRound(
+      t,
+      { ticketType, owner, ladder: OWNER_LADDER[owner], priority: 'urgent', dueAt },
+      notes,
+      toClinical ? undefined : `${t.number} now urgent: ${typeLabel(ticketType)}`
+    );
+    return next ?? (await this.tickets.findById(t._id).exec()) ?? t;
+  }
+
+  /**
+   * Starts the next round: the current one closes (a stop for its clock, when it was still unanswered) and the new owner's
+   * round opens with its own clock. A resolved ticket is opened again. Null when the ticket changed meanwhile.
+   */
+  private async nextRound(
+    t: SupportTicketDocument,
+    set: Record<string, unknown>,
+    notes: TicketNoteInput[],
+    summary?: string
+  ): Promise<SupportTicketDocument | null> {
+    const reopen = t.state === 'resolved';
+    const before = await this.tickets
+      .findOneAndUpdate(
+        { _id: t._id, round: t.round, state: reopen ? 'resolved' : { $ne: 'resolved' } },
+        {
+          $set: { ...set, round: t.round + 1, state: 'open' },
+          $unset: { roundAnsweredAt: 1, escalatedAt: 1, ...(reopen ? { resolvedAt: 1, resolvedByName: 1, resolution: 1 } : {}) },
+          $push: { notes: { $each: notes } }
+        },
+        { new: false }
+      )
+      .exec();
+    if (!before) return null;
+    if (!before.roundAnsweredAt && !reopen) await this.announce(before, 'answered', true, false, summary && `${before.number} round ${before.round} closed`);
+    const next = (await this.tickets.findById(t._id).exec())!;
+    await this.announce(next, 'opened', false, false, summary);
+    if (next.priority === 'urgent') await this.writeUrgentAlert(next, 'Pending');
+    return next;
+  }
+
   /** Sends a ticket message; records `<kind>:<round>` on the ticket only when it went, so `reannounce` can repair a lost one. */
-  private async announce(t: SupportTicketDocument, kind: 'opened' | 'answered' | 'resolved', handedOn = false, repeat = false): Promise<boolean> {
+  private async announce(
+    t: SupportTicketDocument,
+    kind: 'opened' | 'answered' | 'resolved',
+    handedOn = false,
+    repeat = false,
+    summaryOf?: string
+  ): Promise<boolean> {
     const id = String(t._id);
     // A deliberate repeat must not be dropped as a same-minute duplicate of the stop that went too early.
     const dedupeKey = repeat ? `support-repeat:${id}:${kind}:${t.round}:${Date.now()}` : undefined;
     let ok: boolean;
     if (kind === 'opened') {
       const summary =
-        t.round > 1
+        summaryOf ??
+        (t.round > 1
           ? `${t.number} handed on to ${ownerLabel(t.owner)}`
-          : `${t.number} opened: ${typeLabel(t.ticketType)}${t.priority === 'urgent' ? ' (Urgent)' : ''}`;
+          : `${t.number} opened: ${typeLabel(t.ticketType)}${t.priority === 'urgent' ? ' (Urgent)' : ''}`);
       ok = await this.registration.send(
         'support.ticket-opened',
         this.caseOf(t),
@@ -321,7 +403,7 @@ export class SupportTicketsService {
         'support.ticket-answered',
         this.caseOf(t),
         { ticketId: id, number: t.number, round: t.round, handedOn },
-        handedOn ? `${t.number} handed on` : `${t.number} answered`,
+        summaryOf ?? (handedOn ? `${t.number} handed on` : `${t.number} answered`),
         this.nameOf(t),
         dedupeKey
       );
@@ -491,38 +573,21 @@ export class SupportTicketsService {
     const cfg = await this.settings.get();
     const now = this.now();
     const owner = cfg.ownerByType[ticketType];
-    const updated = await this.tickets
-      .findOneAndUpdate(
-        { _id: t._id, state: { $ne: 'resolved' }, round: t.round },
-        {
-          $set: {
-            ticketType,
-            owner,
-            ladder: OWNER_LADDER[owner],
-            round: t.round + 1,
-            state: 'open',
-            dueAt: ticketDueAt(now, { priority: t.priority, ticketType }, cfg)
-          },
-          $unset: { roundAnsweredAt: 1, escalatedAt: 1 },
-          $push: {
-            notes: {
-              kind: 'hand-on',
-              text: `Handed on to ${ownerLabel(owner)} (${typeLabel(ticketType)})${extra ? `: ${extra}` : ''}`,
-              by: actor.id,
-              byName: actor.name,
-              at: now
-            }
-          }
-        },
-        { new: false }
-      )
-      .exec();
-    if (!updated) throw new ConflictException('This ticket changed meanwhile. Reload and try again.');
     // The old round closes (its clock and any escalation); then the new owner's round starts.
-    if (!updated.roundAnsweredAt) await this.announce(updated, 'answered', true);
-    const next = (await this.tickets.findById(t._id).exec())!;
-    await this.announce(next, 'opened');
-    if (next.priority === 'urgent') await this.writeUrgentAlert(next, 'Pending');
+    const next = await this.nextRound(
+      t,
+      { ticketType, owner, ladder: OWNER_LADDER[owner], dueAt: ticketDueAt(now, { priority: t.priority, ticketType }, cfg) },
+      [
+        {
+          kind: 'hand-on',
+          text: `Handed on to ${ownerLabel(owner)} (${typeLabel(ticketType)})${extra ? `: ${extra}` : ''}`,
+          by: actor.id,
+          byName: actor.name,
+          at: now
+        }
+      ]
+    );
+    if (!next) throw new ConflictException('This ticket changed meanwhile. Reload and try again.');
     return this.detail(id);
   }
 
