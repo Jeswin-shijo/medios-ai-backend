@@ -45,6 +45,20 @@ const BOOKING_RESPONSES: Record<Exclude<SimulatedResponse, 'random'>, string> = 
   do_not_call: 'do_not_call',
 };
 
+/**
+ * A check-up call's questions in asking order, each with its first (all is well)
+ * choice; `cardiac` ones are asked only on the cardiac list. Patient Support owns the
+ * questions; the rating is a field of its own.
+ */
+const CHECKUP_OK_ANSWERS: { key: string; ask: string; answer: string; choice: string; cardiac?: boolean }[] = [
+  { key: 'medicines', ask: 'Are you taking your medicines as written on the discharge summary?', answer: 'Yes, every day.', choice: 'yes' },
+  { key: 'symptoms', ask: 'Any new pain, fever or breathlessness since going home?', answer: 'No, nothing like that.', choice: 'none' },
+  { key: 'antiplatelets', ask: 'Are you taking both blood thinners every day?', answer: 'Yes, both of them.', choice: 'yes', cardiac: true },
+  { key: 'exertion', ask: 'Any chest pain or breathlessness when walking?', answer: 'No.', choice: 'no', cardiac: true },
+  { key: 'followup', ask: 'Do you know when your follow-up is?', answer: 'Yes, it is on the paper.', choice: 'yes' },
+  { key: 'question', ask: 'Any questions for the doctor?', answer: 'No, thank you.', choice: 'no' },
+];
+
 export class SimulatedProvider implements VoiceProvider {
   readonly name = 'simulated';
   readonly live = false;
@@ -69,6 +83,7 @@ export class SimulatedProvider implements VoiceProvider {
   }
 
   private converse({ purpose, variables: v, simulation }: StartCallRequest): CallResult {
+    if (purpose === 'checkup') return this.checkup(v);
     const pick =
       simulation === 'random'
         ? purpose === 'confirmation'
@@ -195,5 +210,29 @@ export class SimulatedProvider implements VoiceProvider {
           'Does not want an appointment now.',
         );
     }
+  }
+
+  /** A check-up call where all is well: every first choice, and a rating of 5. */
+  private checkup(v: Record<string, string>): CallResult {
+    const questions = CHECKUP_OK_ANSWERS.filter((q) => !q.cardiac || v.question_list === 'cardiac');
+    const transcript: Line[] = [
+      agent(
+        `Hello, this is an AI assistant calling from the hospital to check on ${v.patient_name} after going home. Is this a good time for a few questions?`,
+      ),
+      patient('Yes, go ahead.'),
+      ...questions.flatMap((q) => [agent(q.ask), patient(q.answer)]),
+      agent('How would you rate your stay, 1 to 5?'),
+      patient('Five.'),
+      agent('Thank you. Take care, and call the hospital if anything changes. Goodbye!'),
+    ];
+    const words = transcript.reduce((n, l) => n + l.text.split(/\s+/).length, 0);
+    return {
+      outcome: 'enquiry',
+      summary: 'Check-up call: all answers were fine; rated the stay 5.',
+      transcript,
+      durationSec: Math.round(words / 2.5) + transcript.length * 2,
+      answers: Object.fromEntries(questions.map((q) => [q.key, q.choice])),
+      rating: 5,
+    };
   }
 }

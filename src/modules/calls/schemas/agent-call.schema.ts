@@ -3,8 +3,11 @@ import { Document } from 'mongoose';
 
 export type AgentCallDocument = AgentCall & Document;
 
-/** confirmation and booking calls go out; inbound ones are patients phoning the hospital. */
-export const CALL_PURPOSES = ['confirmation', 'booking', 'inbound'] as const;
+/**
+ * confirmation, booking and checkup calls go out (checkup: Patient Support's call a few
+ * days after going home); inbound ones are patients phoning the hospital.
+ */
+export const CALL_PURPOSES = ['confirmation', 'booking', 'inbound', 'checkup'] as const;
 export type CallPurpose = (typeof CALL_PURPOSES)[number];
 
 /** scheduled → calling → completed | failed; or canceled before it is placed. */
@@ -98,6 +101,10 @@ export class AgentCall {
 
   @Prop()
   followUpId?: string;
+
+  /** Checkup: Patient Support's check-up this call is for. */
+  @Prop()
+  checkupId?: string;
 
   @Prop({ default: '' })
   visitReason: string;

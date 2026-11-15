@@ -7,6 +7,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -22,6 +23,7 @@ import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
 import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
 import { SchedulingWaitlistService } from '../scheduling/scheduling-waitlist.service';
+import { SupportBridge } from '../support-bridge/support-bridge';
 import { CallAgentSettings, nextCallingTime, resolveCallAgentSettings, withinCallingHours } from './call-agent-settings';
 import { CallResult, ProviderCheck, ProviderError, VOICE_PROVIDER, VoiceProvider } from './providers/voice-provider';
 import { InboundService } from './inbound.service';
@@ -63,6 +65,14 @@ export interface BookingRequest {
   appointmentType?: string;
   fromDate?: string;
   followUpId?: string;
+}
+
+/** Patient Support's check-up call a few days after going home. */
+export interface CheckupRequest {
+  checkupId: string;
+  patientUhid: string;
+  group: 'general' | 'cardiac';
+  language: 'en' | 'ta';
 }
 
 export interface ListCallsFilter {
@@ -109,6 +119,7 @@ export class CallsService implements OnModuleInit {
     @Inject(VOICE_PROVIDER) private readonly provider: VoiceProvider,
     private readonly scheduling?: SchedulingAppointmentsService,
     private readonly waitlist?: SchedulingWaitlistService,
+    @Optional() private readonly bridge?: SupportBridge,
   ) {}
 
   onModuleInit() {
@@ -129,6 +140,12 @@ export class CallsService implements OnModuleInit {
     return Object.values(AGENT_SCRIPTS).map((script) =>
       script.purpose === 'inbound' ? { ...script, defaults: Object.fromEntries(script.variables.map((v) => [v, common[v as keyof typeof common] ?? ''])) } : script,
     );
+  }
+
+  /** Whether check-up calls can be automated: simulated calls, or SnapServe with a check-up agent. */
+  canCheckupCall(): boolean {
+    if (this.provider.name === 'simulated') return true;
+    return this.provider.name === 'snapserve' && !!this.config.get<string>('callAgent.snapserve.checkupAgentId');
   }
 
   /** Proves the provider's key and agent ids without placing a call. */
@@ -289,6 +306,39 @@ export class CallsService implements OnModuleInit {
     );
   }
 
+  /**
+   * Patient Support's check-up call. The checks of every call apply (do-not-call, a
+   * usable number, the test safety list); a check-up with a live call gets that call back.
+   */
+  async requestCheckup(input: CheckupRequest, requestedBy: string): Promise<AgentCallDocument> {
+    this.assertProvider();
+    if (!input.checkupId) throw new BadRequestException('A check-up call needs its check-up.');
+    const patient = await this.patients.findOne({ uhid: input.patientUhid }).exec();
+    if (!patient) throw new NotFoundException(`Patient ${input.patientUhid} not found`);
+    const phone = await this.callablePhone(patient.uhid, patient.phone, patient.name);
+    const live = await this.calls.findOne({ activeKey: `checkup:${input.checkupId}` }).exec();
+    if (live) return live;
+
+    const { cfg } = await this.context();
+    return this.schedule(
+      {
+        purpose: 'checkup',
+        uhid: patient.uhid,
+        patientName: patient.name,
+        phone,
+        checkupId: input.checkupId,
+        trigger: 'scheduler',
+        requestedBy,
+        variables: {
+          patient_name: patient.name,
+          question_list: input.group === 'cardiac' ? 'cardiac' : 'general',
+          language: input.language === 'ta' ? 'ta' : 'en',
+        },
+      },
+      cfg,
+    );
+  }
+
   /** Withdraws a call that has not been placed yet. */
   async cancel(id: string, by: string) {
     const call = await this.findOne(id);
@@ -375,7 +425,7 @@ export class CallsService implements OnModuleInit {
   private async expireStale(): Promise<number> {
     const stale = await this.calls.find({ status: 'calling', startedAt: { $lt: new Date(Date.now() - RESULT_TIMEOUT_MS) } }).exec();
     for (const call of stale) {
-      await this.finish(
+      const ended = await this.finish(
         call,
         {
           status: 'failed',
@@ -385,6 +435,8 @@ export class CallsService implements OnModuleInit {
         },
         'calling',
       );
+      // Patient Support counts it as a try nobody answered, so the check-up is not left waiting.
+      if (call.purpose === 'checkup' && ended.status === 'failed') await this.toPatientSupport(ended, { outcome: 'failed' });
     }
     return stale.length;
   }
@@ -404,14 +456,16 @@ export class CallsService implements OnModuleInit {
         status: 'scheduled',
         scheduledFor,
         provider: this.provider.name,
-        activeKey: `${data.purpose}:${data.purpose === 'confirmation' ? data.appointmentId : data.uhid}`,
+        activeKey: `${data.purpose}:${data.purpose === 'confirmation' ? data.appointmentId : data.purpose === 'checkup' ? data.checkupId : data.uhid}`,
       });
     } catch (err) {
       if ((err as { code?: number }).code === 11000) {
         throw new ConflictException(
           data.purpose === 'confirmation'
             ? 'A confirmation call for this appointment is already scheduled or in progress.'
-            : `A booking call to ${data.patientName} is already scheduled or in progress.`,
+            : data.purpose === 'checkup'
+              ? `A check-up call to ${data.patientName} is already scheduled or in progress.`
+              : `A booking call to ${data.patientName} is already scheduled or in progress.`,
         );
       }
       throw err;
@@ -471,6 +525,8 @@ export class CallsService implements OnModuleInit {
   private async reasonNotToCall(call: AgentCallDocument, cfg: CallAgentSettings): Promise<string | null> {
     const patient = await this.patients.findOne({ uhid: call.uhid }, { doNotCall: 1, doNotCallReason: 1 }).lean().exec();
     if (patient?.doNotCall) return `Not called: ${patient.doNotCallReason || 'the patient is marked do-not-call'}.`;
+    // A check-up offers no appointment slots.
+    if (call.purpose === 'checkup') return null;
 
     let changed = false;
     let aptDoctorId: string | undefined;
@@ -554,6 +610,7 @@ export class CallsService implements OnModuleInit {
       )
       .exec();
     if (!call) return { matched: true, duplicate: true };
+    if (call.purpose === 'checkup') return this.checkupResult(call, result);
 
     const { cfg } = await this.context();
     let effect: Effect;
@@ -585,6 +642,42 @@ export class CallsService implements OnModuleInit {
       .exec();
     this.logger.log(`${call.purpose} call ${call._id} ended: ${effect.outcome}`);
     return { matched: true };
+  }
+
+  /**
+   * A check-up call's result, answered or not, goes to Patient Support, which decides
+   * what follows (no booking and no retry here). Do-not-call and a wrong number still
+   * mark the patient, as on every call.
+   */
+  private async checkupResult(call: AgentCallDocument, r: CallResult): Promise<{ matched: boolean }> {
+    let marked = '';
+    if (r.outcome === 'wrong_number' || r.outcome === 'do_not_call') {
+      try {
+        marked = `${(await this.otherOutcome(call, r)).action} `;
+      } catch (err) {
+        this.logger.error(`Marking the patient of check-up call ${call._id} do-not-call failed: ${(err as Error).message}`);
+      }
+    }
+    const passed = await this.toPatientSupport(call, r);
+    await this.calls.updateOne({ _id: call._id }, { outcome: r.outcome, actionTaken: marked + passed }).exec();
+    this.logger.log(`checkup call ${call._id} ended: ${r.outcome}`);
+    return { matched: true };
+  }
+
+  /** Hands a check-up call's end to Patient Support; returns what happened, for the call log. Never throws. */
+  private async toPatientSupport(call: AgentCallDocument, r: Pick<CallResult, 'outcome' | 'answers' | 'rating' | 'notes'>): Promise<string> {
+    const handler = this.bridge?.handlers.checkupResult;
+    if (!handler) {
+      this.logger.warn(`Check-up call ${call._id} ended (${r.outcome}), but Patient Support is not listening.`);
+      return 'Patient Support is not running, so the result is only logged here.';
+    }
+    try {
+      await handler(call.checkupId ?? '', { outcome: r.outcome, answers: r.answers ?? {}, rating: r.rating, notes: r.notes, agentCallId: String(call._id) });
+      return 'Result passed to Patient Support.';
+    } catch (err) {
+      this.logger.error(`Patient Support could not take the result of check-up call ${call._id}: ${(err as Error).message}`);
+      return `Patient Support could not take the result: ${(err as Error).message}`;
+    }
   }
 
   private async applyConfirmation(call: AgentCallDocument, r: CallResult, cfg: CallAgentSettings): Promise<Effect> {

@@ -57,5 +57,7 @@ import { SchedulingModule } from '../scheduling/scheduling.module';
       },
     },
   ],
+  // Patient Support places its check-up calls through CallsService.
+  exports: [CallsService],
 })
 export class CallsModule {}

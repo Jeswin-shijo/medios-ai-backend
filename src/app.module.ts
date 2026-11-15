@@ -33,6 +33,7 @@ import { VoiceToNotesModule } from './modules/voice-to-notes/voice-to-notes.modu
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { CallsModule } from './modules/calls/calls.module';
+import { SupportBridgeModule } from './modules/support-bridge/support-bridge.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { AiModule } from './modules/ai/ai.module';
 import { BedsModule } from './modules/beds/beds.module';
@@ -87,6 +88,8 @@ import { HealthController } from './health.controller';
     VoiceToNotesModule,
     DashboardModule,
     SettingsModule,
+    // Global: where Calls meets Patient Support (each works without the other).
+    SupportBridgeModule,
     CallsModule,
     QueueModule,
     AiModule,

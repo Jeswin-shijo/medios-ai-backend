@@ -27,6 +27,10 @@ export interface CallResult {
   chosenSlot?: number;
   callbackAt?: Date;
   notes?: string;
+  /** Checkup: question key → choice key, as the agent captured them. */
+  answers?: Record<string, string>;
+  /** Checkup: how the patient rated the stay, 1 to 5. */
+  rating?: number;
   summary: string;
   transcript: { speaker: 'agent' | 'patient'; text: string }[];
   durationSec?: number;

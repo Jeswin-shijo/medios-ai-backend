@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { randomInt } from 'crypto';
@@ -12,6 +12,7 @@ import { TasksAlertsService } from '../tasks-alerts/tasks-alerts.service';
 import { SettingsService } from '../settings/settings.service';
 import { SlotsService } from './slots.service';
 import { SchedulingAppointmentsService } from '../scheduling/scheduling-appointments.service';
+import { SupportBridge } from '../support-bridge/support-bridge';
 import { CallAgentSettings, resolveCallAgentSettings } from './call-agent-settings';
 import { CallResult } from './providers/voice-provider';
 import { toE164India } from './phone';
@@ -46,6 +47,8 @@ const MATCH_MARGIN_MS = 2 * 60_000;
 const DAY_MS = 86_400_000;
 /** The agent's verdicts that outrank whatever the call changed. */
 const PROVIDER_FIRST: CallOutcome[] = ['escalated', 'wrong_number', 'unverified'];
+/** What the call log says when the backup task for a "Needs staff" call is written. */
+const BACKUP_ALERT = ' Care team alerted (high priority) to call back.';
 
 // The replies to a failed check never say which detail was wrong, or how many tries are left.
 const ASK_DOB = "Ask the caller for the patient's date of birth, then try again.";
@@ -54,6 +57,8 @@ const NO_MATCH =
 const LOCKED_NOW = 'Those details do not match our records. Do not share anything. Tell the caller the front desk will call them back, then end politely.';
 const LOCKED = 'Too many unsuccessful checks for this number. Do not share any details. Tell the caller the front desk will call them back, then end politely.';
 const NO_SESSION = 'Verify the caller first with find_patient, then pass the caller_ref it returns.';
+/** Our side failed, or cannot help: the agent apologises and offers a call back. */
+const OFFER_CALLBACK = 'Something went wrong on our side. Apologise and offer a call back from the front desk (request_callback).';
 /** Codes avoid look-alike characters (0/O, 1/I) so they survive being read aloud. */
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -66,8 +71,27 @@ export const INBOUND_TOOLS = [
   'cancel_appointment',
   'confirm_appointment',
   'request_callback',
+  'hospital_info',
+  'expected_arrival',
 ] as const;
 export type InboundTool = (typeof INBOUND_TOOLS)[number];
+
+/** What a call-back is about: Patient Support's ticket types. Anything else is `other`. */
+export const CALL_BACK_TOPICS = [
+  'appointment',
+  'billing',
+  'reports',
+  'admission',
+  'discharge',
+  'directions',
+  'medicines',
+  'clinical',
+  'complaint',
+  'other',
+] as const;
+/** The longest wait the ER takes for an expected arrival, in minutes; 30 when the caller didn't say. */
+const MAX_ARRIVAL_MINUTES = 240;
+const DEFAULT_ARRIVAL_MINUTES = 30;
 
 export type ToolReply = { ok: boolean; message: string } & Record<string, unknown>;
 
@@ -166,6 +190,7 @@ export class InboundService {
     private readonly settings: SettingsService,
     private readonly slots: SlotsService,
     private readonly scheduling?: SchedulingAppointmentsService,
+    @Optional() private readonly bridge?: SupportBridge,
   ) {}
 
   async run(tool: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolReply> {
@@ -188,11 +213,15 @@ export class InboundService {
           return await this.confirm(await this.session(args, ctx), args);
         case 'request_callback':
           return await this.requestCallback(args, ctx);
+        case 'hospital_info':
+          return await this.hospitalInfo(args);
+        case 'expected_arrival':
+          return await this.expectedArrival(args, ctx);
       }
     } catch (err) {
       if (err instanceof Refusal) return { ok: false, message: err.message, ...err.extra };
       this.logger.error(`Tool ${tool} failed: ${(err as Error).message}`);
-      return { ok: false, message: 'Something went wrong on our side. Apologise and offer a call back from the front desk (request_callback).' };
+      return { ok: false, message: OFFER_CALLBACK };
     }
   }
 
@@ -532,6 +561,32 @@ export class InboundService {
     if (!phone) throw new Refusal('Ask for a 10-digit mobile number to call back on, then call request_callback again.');
     const urgent = args.urgent === true || str(args.urgent).toLowerCase() === 'true';
     const reason = str(args.reason, 300) || 'Asked for a call back.';
+    const openTicket = this.bridge?.handlers.openCallTicket;
+    if (openTicket) {
+      try {
+        const topic = str(args.topic, 40).toLowerCase();
+        const ticket = await openTicket({
+          phone,
+          uhid: session?.uhid,
+          callerName: session?.patientName,
+          reason,
+          urgent,
+          topic: (CALL_BACK_TOPICS as readonly string[]).includes(topic) ? topic : 'other',
+          providerCallId: ctx.providerCallId,
+          source: 'call-back',
+        });
+        if (session)
+          await this.note(
+            session,
+            `Call back requested${urgent ? ' (urgent)' : ''}, ticket ${ticket.number}: ${reason}`,
+            urgent ? { urgent: true } : undefined,
+          );
+        return { ok: true, message: `I've asked the ${ticket.ownerLabel} to call you back. Your reference is ${ticket.number}.` };
+      } catch (err) {
+        // Never lose a call-back: the front desk gets today's task instead.
+        this.logger.error(`Could not open a call-back ticket, so a task is written: ${(err as Error).message}`);
+      }
+    }
     const who = session?.patientName ?? `caller ${phone}`;
     await this.task(urgent ? `Call back urgently: ${who}` : `Call back ${who}`, `${reason} (inbound AI call, ${phone})`, urgent ? 'High' : 'Medium', session?.uhid ?? '', session?.patientName);
     if (session) await this.note(session, `Call back requested${urgent ? ' (urgent)' : ''}: ${reason}`, urgent ? { urgent: true } : undefined);
@@ -541,6 +596,39 @@ export class InboundService {
         ? 'Staff have been alerted to call back urgently. If it is an emergency, tell them to call 108 now.'
         : 'The front desk will call back. Tell the caller, then end politely.',
     };
+  }
+
+  // ---------------------------------------------------------------- Patient Support
+
+  /** An approved hospital fact (visiting hours, directions…), read out exactly; none means a call back. */
+  private async hospitalInfo(args: Record<string, unknown>): Promise<ToolReply> {
+    const lookUp = this.bridge?.handlers.hospitalInfo;
+    if (!lookUp) return { ok: false, message: OFFER_CALLBACK };
+    const topic = str(args.topic, 120);
+    if (!topic) throw new Refusal('Ask what the caller would like to know, then call hospital_info again.');
+    const { found, text } = await lookUp(topic, args.language === 'ta' ? 'ta' : 'en');
+    return { ok: found, message: text };
+  }
+
+  /** The caller is coming to the ER: the ER is told to expect them. */
+  private async expectedArrival(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolReply> {
+    const tellEr = this.bridge?.handlers.expectedArrival;
+    if (!tellEr) return { ok: false, message: OFFER_CALLBACK };
+    const session = await this.liveSession(args, ctx);
+    const said = Number(str(args.minutes));
+    const minutes = str(args.minutes) && Number.isFinite(said) ? Math.min(Math.max(Math.round(said), 1), MAX_ARRIVAL_MINUTES) : DEFAULT_ARRIVAL_MINUTES;
+    const reply = await tellEr({
+      complaint: str(args.complaint, 200) || 'Emergency (phone call)',
+      ageSex: str(args.age_sex, 40) || 'Not known',
+      minutes,
+      mode: args.mode === 'ambulance' ? 'ambulance' : 'walk-in',
+      phone: toE164India(ctx.callerNumber) ?? undefined,
+      uhid: session?.uhid,
+      providerCallId: ctx.providerCallId,
+    });
+    // An urgent ticket is open now, so the call needs no backup one.
+    if (session && reply.ok) await this.note(session, `ER told to expect the patient in ${minutes} minutes.`, { urgent: true });
+    return { ok: reply.ok, message: reply.message };
   }
 
   /** Records what the call did; `set` holds the last change (outcome, appointmentId) or the urgent flag. */
@@ -579,10 +667,11 @@ export class InboundService {
     let action = session?.actions.length ? session.actions.join(' ') : 'No changes made.';
     // The backup for an agent that ended with "Needs staff" without raising an urgent callback.
     const backupAlert = outcome === 'escalated' && !session?.urgent;
-    if (backupAlert) action += ' Care team alerted (high priority) to call back.';
+    if (backupAlert) action += BACKUP_ALERT;
 
+    let logged: AgentCallDocument;
     try {
-      await this.calls.create({
+      logged = await this.calls.create({
         purpose: 'inbound',
         status: 'completed',
         outcome,
@@ -610,11 +699,52 @@ export class InboundService {
     }
     // The call is over: its session ends with it.
     if (session) await this.sessions.updateOne({ _id: session._id }, { $set: { loggedAt: new Date(), expiresAt: new Date() } }).exec();
-    if (backupAlert) {
+    if (backupAlert && !(await this.unansweredTicket(result, session, caller, logged))) {
       await this.task(`Call back urgently: ${session?.patientName ?? `caller ${caller ?? 'unknown'}`}`, result.notes || result.summary || 'Asked for a person during an AI call to the hospital line.', 'High', session?.uhid ?? '', session?.patientName);
+    }
+    const attach = this.bridge?.handlers.attachCall;
+    if (attach && providerCallId) {
+      // The transcript joins the call's ticket, if it has one.
+      try {
+        await attach(providerCallId, String(logged._id));
+      } catch (err) {
+        this.logger.error(`Could not attach call ${providerCallId} to its ticket: ${(err as Error).message}`);
+      }
     }
     this.logger.log(`Inbound call ${providerCallId ?? ''} logged: ${outcome}`);
     return { matched: true };
+  }
+
+  /**
+   * The backup for a call that ended "Needs staff" with nobody asked to call back, as a
+   * Patient Support ticket (one per call id). False when there is no handler or it
+   * failed, so the caller writes today's task instead.
+   */
+  private async unansweredTicket(
+    result: CallResult,
+    session: InboundSessionDocument | null,
+    caller: string | undefined,
+    logged: AgentCallDocument,
+  ): Promise<boolean> {
+    const openTicket = this.bridge?.handlers.openCallTicket;
+    if (!openTicket) return false;
+    try {
+      const ticket = await openTicket({
+        phone: session?.phone ?? caller ?? '',
+        uhid: session?.uhid,
+        callerName: session?.patientName,
+        reason: result.summary?.slice(0, 300) || "The caller's question was not answered",
+        urgent: false,
+        providerCallId: logged.providerCallId,
+        source: 'call-unanswered',
+      });
+      const actionTaken = logged.actionTaken.replace(BACKUP_ALERT, ` Ticket ${ticket.number} opened for the ${ticket.ownerLabel} to call back.`);
+      await this.calls.updateOne({ _id: logged._id }, { $set: { actionTaken } }).exec();
+      return true;
+    } catch (err) {
+      this.logger.error(`Could not open a ticket for call ${logged.providerCallId ?? ''}, so a task is written: ${(err as Error).message}`);
+      return false;
+    }
   }
 
   /**

@@ -1,5 +1,5 @@
 import { CallPurpose } from './schemas/agent-call.schema';
-import { InboundTool } from './inbound.service';
+import { CALL_BACK_TOPICS, InboundTool } from './inbound.service';
 
 // The voice agents' scripts. A hosted voice platform (SnapServe) needs them pasted
 // into its agent builder; GET /api/calls/scripts serves them so the web app can show
@@ -51,6 +51,12 @@ const SHARED_RULES = `RULES
   answers, say you will call back later and share nothing else. Outcome
   "Call back later".
 - Read dates and times slowly. Never read out links or email addresses.`;
+
+/** What the agent says in an emergency (Patient Support's approved emergency line). */
+const EMERGENCY_LINE = {
+  en: 'Please come to the ER now, or call 108 for an ambulance.',
+  ta: 'தயவுசெய்து உடனே அவசர சிகிச்சைப் பிரிவுக்கு வாருங்கள், அல்லது ஆம்புலன்சுக்கு 108 ஐ அழைக்கவும்.',
+};
 
 const CONFIRMATION: AgentScript = {
   purpose: 'confirmation',
@@ -242,6 +248,29 @@ const INBOUND_TOOLS: AgentTool[] = [
       { name: 'phone', type: 'string', description: 'Number to call back on, if the caller was not verified.', required: false },
       { name: 'reason', type: 'string', description: 'What they need, in one sentence.', required: true },
       { name: 'urgent', type: 'boolean', description: 'True for symptoms, pain or anything that cannot wait.', required: false },
+      { name: 'topic', type: 'string', description: `What it is about, so the right team calls back: one of ${CALL_BACK_TOPICS.join(', ')}.`, required: false },
+    ],
+  },
+  {
+    name: 'hospital_info',
+    description:
+      'Look up an approved hospital fact: visiting hours, directions, parking, report collection, billing desk hours, OPD timings, the pharmacy or the canteen. Read its answer exactly.',
+    preToolMessage: 'Let me check that for you.',
+    parameters: [
+      { name: 'topic', type: 'string', description: 'What the caller wants to know, in a few English words (e.g. visiting hours, parking).', required: true },
+      { name: 'language', type: 'string', description: '"ta" when the call is in Tamil, otherwise "en".', required: false },
+    ],
+  },
+  {
+    name: 'expected_arrival',
+    description: 'Tell the ER to expect the patient, when a caller with an emergency says they are coming to the hospital.',
+    preToolMessage: "I'll let the emergency team know.",
+    parameters: [
+      { ...CALLER_REF, description: 'The caller_ref from find_patient, if the caller was verified.', required: false },
+      { name: 'complaint', type: 'string', description: 'What is wrong, in a few words (e.g. chest pain since morning).', required: true },
+      { name: 'age_sex', type: 'string', description: 'The patient\'s age and sex, e.g. "58 M". Say "not known" if the caller does not know.', required: true },
+      { name: 'minutes', type: 'number', description: 'Minutes until they reach the hospital, 1 to 240.', required: true },
+      { name: 'mode', type: 'string', description: '"ambulance" when coming by ambulance, otherwise "walk-in".', required: false },
     ],
   },
 ];
@@ -260,8 +289,11 @@ words the way people really talk.
 WHAT YOU CAN DO
 - Tell callers about their upcoming appointment with {{doctor_name}}, confirm it,
   move it, cancel it, or book a new visit.
+- For hospital facts (visiting hours, directions, report times, billing desk
+  hours, OPD timings), call hospital_info first and read its answer exactly; if
+  it has none, offer a call back.
 - For anything else (fees, reports, test results, medicines, admissions), use
-  request_callback so the front desk calls back.
+  request_callback with the topic it is about, so the right team calls back.
 
 VERIFY THE CALLER FIRST
 1. Ask for the patient's full name, the mobile number registered with the
@@ -289,9 +321,10 @@ RULES
 - Never give medical advice, diagnoses, test results, medicine or dosage
   instructions. Say the doctor will discuss it at the visit.
 - If the caller mentions chest pain, breathing difficulty, fainting, heavy
-  bleeding or any emergency: tell them to call 108 or go to the nearest
-  emergency department now, call request_callback with urgent true, and end with
-  outcome "Needs staff".
+  bleeding or any emergency, say: "${EMERGENCY_LINE.en}"
+  In Tamil: "${EMERGENCY_LINE.ta}"
+  If they say they are coming, call expected_arrival; otherwise call
+  request_callback with urgent true. End with outcome "Needs staff".
 - If they ask for a person, call request_callback and say the front desk will
   call back. Outcome "Needs staff".
 - Never discuss fees or insurance. Say the front desk on {{hospital_phone}} can help.
@@ -310,7 +343,79 @@ RULES
   tools: INBOUND_TOOLS,
 };
 
-export const AGENT_SCRIPTS: Record<CallPurpose, AgentScript> = { confirmation: CONFIRMATION, booking: BOOKING, inbound: INBOUND };
+// Patient Support's call a few days after going home. The questions, their choice keys
+// and their order are Patient Support's check-up questions; the answers come back as
+// data (checkup_answers) and Patient Support decides what follows.
+const CHECKUP: AgentScript = {
+  purpose: 'checkup',
+  title: 'Check-up call after going home',
+  goal: 'Ask a patient who went home a few days ago the set check-up questions, and capture each answer',
+  variables: ['patient_name', 'question_list', 'language'],
+  welcome: `Hello, this is an AI assistant calling from the hospital to see how {{patient_name}}
+is doing after going home. Am I speaking with {{patient_name}} or a family member?`,
+  instructions: `You are an AI assistant calling for the hospital. Speak Tamil when {{language}}
+is "ta", otherwise English. Be warm and brief.
+
+WHY YOU ARE CALLING
+{{patient_name}} went home from the hospital a few days ago. Ask the questions
+below, one at a time, and map each answer onto one of its choices (the key
+before the dash). You may speak with the patient or a family member.
+
+THE QUESTIONS, IN THIS ORDER
+{{question_list}} is "general" or "cardiac". Ask the questions marked
+(cardiac) only when it is "cardiac".
+1. medicines: "Are you taking your medicines as written on the discharge summary?"
+   yes - Yes; no - No, or not sure.
+2. symptoms: "Any new pain, fever or breathlessness since going home?"
+   none - No; mild - Fever or new pain; severe - Chest pain, breathlessness at
+   rest, fainting, heavy bleeding or weakness of the face, arm or leg (EMERGENCY).
+3. (cardiac) antiplatelets: "Are you taking both blood thinners every day?"
+   yes - Yes; no - No, or not sure.
+4. (cardiac) exertion: "Any chest pain or breathlessness when walking?"
+   no - No; walking - Yes, when walking; rest - Yes, even at rest (EMERGENCY).
+5. followup: "Do you know when your follow-up is?"
+   yes - Yes; no - No (say the follow-up is on the discharge summary).
+6. question: "Any questions for the doctor?"
+   no - No; yes - Yes (write the question in notes for the doctor).
+7. rating: "How would you rate your stay, 1 to 5?"
+   Put the number in rating. Skip it if they would rather not say.
+
+EMERGENCY
+If an answer is an emergency, stop and say the emergency line in the
+patient's language, then end the call:
+English: "${EMERGENCY_LINE.en}"
+Tamil: "${EMERGENCY_LINE.ta}"
+Send the answers given so far, with outcome "Information given".
+
+RULES
+- You are an AI assistant. Say so in your greeting and whenever asked.
+- Keep every turn under 25 words. This is a phone call.
+- Never give medical advice; if they ask a medical question, note it for the
+  doctor (question - yes, with the question in notes). Never discuss results,
+  medicines or doses.
+- If the patient or a family member cannot talk now, say you will call again.
+  Outcome "Call back later".
+- If they do not know the patient, apologise and end. Outcome "Wrong number".
+- If they say stop or do not call: apologise once, confirm you will not call
+  again, end the call. Outcome "Do not call".`,
+  outcomes: [
+    { label: 'Information given', outcome: 'enquiry (the answers are in checkup_answers)' },
+    { label: 'Call back later', outcome: 'callback (not answered; Patient Support tries again the next day)' },
+    { label: 'Wrong number', outcome: 'wrong_number' },
+    { label: 'Do not call', outcome: 'do_not_call' },
+  ],
+  dataFields: [
+    {
+      name: 'checkup_answers',
+      description:
+        'A JSON object of question key to choice key for every question asked except rating, e.g. {"medicines":"yes","symptoms":"none","followup":"yes","question":"no"}.',
+    },
+    { name: 'rating', description: '1 to 5: how they rated the stay. Empty if they did not say.' },
+    { name: 'notes', description: 'Their question for the doctor, or anything staff should know, in one sentence.' },
+  ],
+};
+
+export const AGENT_SCRIPTS: Record<CallPurpose, AgentScript> = { confirmation: CONFIRMATION, booking: BOOKING, inbound: INBOUND, checkup: CHECKUP };
 
 /** Replaces {{name}} with the call's value; unknown names are left visible on purpose. */
 export const fillTemplate = (template: string, variables: Record<string, string>) =>

@@ -23,6 +23,8 @@ export interface SnapServeConfig {
   confirmationAgentId: string;
   bookingAgentId: string;
   inboundAgentId: string;
+  /** Patient Support's check-up calls; optional (without it they are made by hand). */
+  checkupAgentId: string;
   signingSecret: string;
 }
 
@@ -48,7 +50,10 @@ export class SnapServeProvider implements VoiceProvider {
   }
 
   async startCall({ purpose, toNumber, variables }: StartCallRequest): Promise<{ providerCallId: string }> {
-    const agentId = purpose === 'confirmation' ? this.config.confirmationAgentId : this.config.bookingAgentId;
+    const agentId =
+      purpose === 'confirmation' ? this.config.confirmationAgentId : purpose === 'checkup' ? this.config.checkupAgentId : this.config.bookingAgentId;
+    // Never a check-up through another agent's script.
+    if (purpose === 'checkup' && !agentId) throw new ProviderError('No SnapServe check-up agent is set (SNAPSERVE_CHECKUP_AGENT_ID).');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), START_TIMEOUT_MS);
     let res: Response;
@@ -86,6 +91,7 @@ export class SnapServeProvider implements VoiceProvider {
       ['confirmation', this.config.confirmationAgentId],
       ['booking', this.config.bookingAgentId],
       ['inbound', this.config.inboundAgentId],
+      ['checkup', this.config.checkupAgentId],
     ];
     const agents = await Promise.all(
       roles
@@ -182,6 +188,21 @@ function field(fields: Record<string, unknown>, ...names: string[]): unknown {
 
 const present = (value: unknown) => (value === null || value === undefined || value === '' ? undefined : value);
 
+/** The check-up answers: a JSON object (or its text) of question key → choice key. Unreadable gives {}; only text values are kept. */
+function checkupAnswers(raw: unknown): Record<string, string> | undefined {
+  if (present(raw) === undefined) return undefined;
+  let value = raw;
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
 function transcriptLines(raw: unknown): CallResult['transcript'] {
   const speaker = (role: unknown) => (/^(agent|assistant|bot|ai)/i.test(String(role)) ? 'agent' : 'patient');
   if (Array.isArray(raw)) {
@@ -223,6 +244,7 @@ export function parseSnapServeResult(body: any): CallResult {
   const callbackRaw = present(field(fields, 'callback_time'));
   const callback = callbackRaw ? new Date(String(callbackRaw)) : undefined;
   const notes = present(field(fields, 'notes'));
+  const rating = Number(present(field(fields, 'rating')));
   const duration = Number(p.durationSeconds ?? p.duration ?? p.durationSec ?? p.callDuration);
   const direction = key(p.direction);
 
@@ -233,6 +255,8 @@ export function parseSnapServeResult(body: any): CallResult {
     chosenSlot,
     callbackAt: callback && !Number.isNaN(callback.getTime()) ? callback : undefined,
     notes: notes ? String(notes).slice(0, 500) : undefined,
+    answers: checkupAnswers(field(fields, 'checkup_answers')),
+    rating: Number.isInteger(rating) && rating >= 1 && rating <= 5 ? rating : undefined,
     summary: String(p.callSummary ?? p.summary ?? '').slice(0, 2000),
     transcript: transcriptLines(p.transcript),
     durationSec: Number.isFinite(duration) ? Math.round(duration) : undefined,
