@@ -72,6 +72,12 @@ import { DischargePlan, DischargePlanDocument, DischargePlanSchema } from '../mo
 import { DischargeOrder, DischargeOrderDocument, DischargeOrderSchema } from '../modules/discharge/schemas/discharge-order.schema';
 import { DischargeSummary, DischargeSummaryDocument, DischargeSummarySchema } from '../modules/discharge/schemas/discharge-summary.schema';
 import { DischargeSnapshot, DischargeSnapshotDocument, DischargeSnapshotSchema } from '../modules/discharge/schemas/discharge-snapshot.schema';
+import { PatientUpdate, PatientUpdateDocument, PatientUpdateSchema } from '../modules/patient-support/schemas/patient-update.schema';
+import { SupportTicket, SupportTicketDocument, SupportTicketSchema } from '../modules/patient-support/schemas/support-ticket.schema';
+import { SupportTemplate, SupportTemplateDocument, SupportTemplateSchema } from '../modules/patient-support/schemas/support-template.schema';
+import { SupportFaq, SupportFaqDocument, SupportFaqSchema } from '../modules/patient-support/schemas/support-faq.schema';
+import { CheckupCall, CheckupCallDocument, CheckupCallSchema } from '../modules/patient-support/schemas/checkup-call.schema';
+import { SupportFeedback, SupportFeedbackDocument, SupportFeedbackSchema } from '../modules/patient-support/schemas/support-feedback.schema';
 import { QueueDisplay, QueueDisplayDocument, QueueDisplaySchema } from '../modules/queue/schemas/queue-display.schema';
 import { BillInvoice, BillInvoiceDocument, BillInvoiceSchema } from '../modules/billing/schemas/bill.schema';
 import { ReceptionSession, ReceptionSessionDocument, ReceptionSessionSchema } from '../modules/reception/schemas/reception-session.schema';
@@ -175,6 +181,12 @@ export function models() {
     DischargeOrder: model(DischargeOrder, DischargeOrderSchema) as Model<DischargeOrderDocument>,
     DischargeSummary: model(DischargeSummary, DischargeSummarySchema) as Model<DischargeSummaryDocument>,
     DischargeSnapshot: model(DischargeSnapshot, DischargeSnapshotSchema) as Model<DischargeSnapshotDocument>,
+    PatientUpdate: model(PatientUpdate, PatientUpdateSchema) as Model<PatientUpdateDocument>,
+    SupportTicket: model(SupportTicket, SupportTicketSchema) as Model<SupportTicketDocument>,
+    SupportTemplate: model(SupportTemplate, SupportTemplateSchema) as Model<SupportTemplateDocument>,
+    SupportFaq: model(SupportFaq, SupportFaqSchema) as Model<SupportFaqDocument>,
+    CheckupCall: model(CheckupCall, CheckupCallSchema) as Model<CheckupCallDocument>,
+    SupportFeedback: model(SupportFeedback, SupportFeedbackSchema) as Model<SupportFeedbackDocument>,
     QueueDisplay: model(QueueDisplay, QueueDisplaySchema) as Model<QueueDisplayDocument>,
     BillInvoice: model(BillInvoice, BillInvoiceSchema) as Model<BillInvoiceDocument>,
     ReceptionSession: model(ReceptionSession, ReceptionSessionSchema) as Model<ReceptionSessionDocument>,
