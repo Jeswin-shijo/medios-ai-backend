@@ -61,6 +61,9 @@ export class SupportTicket {
   @Prop({ required: true }) openedById: string;
   @Prop({ required: true }) openedByName: string;
   @Prop({ type: Date, required: true }) openedAt: Date;
+  /** Messages sent to the Coordinator, as `opened:<round>`, `answered:<round>`, `resolved:<round>`; a missing one is re-sent. */
+  @Prop({ type: [String], default: [] }) announced: string[];
+
   /** Opened at the desk as already answered. */
   @Prop({ required: true, default: false }) onTheSpot: boolean;
 }

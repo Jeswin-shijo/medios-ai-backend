@@ -346,4 +346,84 @@ describe('SupportTicketsService', () => {
     const alerts = await m.TaskAlertItem.find({ link: /^support-ticket:/ }).lean();
     for (const a of alerts) assert.doesNotMatch(a.title, /ravi|kumar|suresh/i);
   });
+
+  test('a note racing a hand-on never answers the new round', async () => {
+    const t = await svc.open(frontDesk, input({ urgent: true }));
+    await svc.handOn(frontDesk, t.id, 'admission');
+    // A late first response for round 1 arrives after the hand-on committed.
+    assert.equal(await (svc as any).answerRound(new Types.ObjectId(t.id), 1, new Date(), true), false);
+    const row = await m.SupportTicket.findById(t.id).lean();
+    assert.equal(row!.roundAnsweredAt ?? null, null);
+    assert.deepEqual(
+      (await sent('support.ticket-answered')).map((x) => [x.payload.round, x.payload.handedOn]),
+      [[1, true]]
+    );
+    assert.deepEqual(
+      (await clocksOf(`${t.id}:2`)).map((c) => c.state),
+      ['running']
+    );
+    assert.equal((await alertOf(t.id))!.status, 'Pending');
+  });
+
+  test('handOn after a concurrent answer sends no second answered', async () => {
+    const t = await svc.open(frontDesk, input());
+    const orig = (svc as any).load.bind(svc);
+    (svc as any).load = async (id: string) => {
+      const stale = await orig(id);
+      (svc as any).load = orig;
+      await svc.note(frontDesk, id, 'quick answer'); // lands between the read and the hand-on's update
+      return stale;
+    };
+    await svc.handOn(frontDesk, t.id, 'admission');
+    assert.deepEqual(
+      (await sent('support.ticket-answered')).map((x) => [x.payload.round, x.payload.handedOn]),
+      [[1, false]]
+    );
+  });
+
+  const failOnce = (type: string) => {
+    const reg = (svc as any).registration;
+    const real = reg.send.bind(reg);
+    let failed = false;
+    reg.send = async (...a: any[]) => {
+      if (!failed && a[0] === type) {
+        failed = true;
+        return false;
+      }
+      return real(...a);
+    };
+  };
+
+  test('a failed opened send is re-sent by reannounce and the clock starts', async () => {
+    failOnce('support.ticket-opened');
+    const t = await svc.open(frontDesk, input());
+    assert.equal(await m.Clock.countDocuments(), 0);
+    assert.deepEqual((await m.SupportTicket.findById(t.id).lean())!.announced, []);
+    assert.equal(await svc.reannounce(), 1);
+    assert.deepEqual(
+      (await clocksOf(`${t.id}:1`)).map((c) => [c.def, c.state]),
+      [['support-response-billing', 'running']]
+    );
+    assert.deepEqual((await m.SupportTicket.findById(t.id).lean())!.announced, ['opened:1']);
+    assert.equal((await sent('support.ticket-opened'))[0].summary, 'SP-0001 opened: Billing');
+    assert.equal(String((await sent('support.ticket-opened'))[0].case), caseId);
+    assert.equal(await svc.reannounce(), 0);
+    // A lost resolved message is repaired too.
+    failOnce('support.ticket-resolved');
+    await svc.resolve(frontDesk, t.id, 'done');
+    assert.equal(await svc.reannounce(), 1);
+    assert.equal((await sent('support.ticket-resolved')).length, 1);
+  });
+
+  test("a stop sent before its round's opened still leaves no running clock", async () => {
+    failOnce('support.ticket-opened');
+    const t = await svc.open(frontDesk, input());
+    await svc.note(frontDesk, t.id, 'answered before the start went out');
+    assert.equal(await m.Clock.countDocuments(), 0);
+    await svc.reannounce();
+    assert.deepEqual(
+      (await clocksOf(`${t.id}:1`)).map((c) => c.state),
+      ['met']
+    );
+  });
 });

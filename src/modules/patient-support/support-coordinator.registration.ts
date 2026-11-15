@@ -152,13 +152,13 @@ export class SupportRegistration implements OnModuleInit {
    * `patientName` is given and the summary holds it, the message is refused (logged, false). True when it went (or
    * the same one went within the last minute); false, with a warning, when it was not sent.
    */
-  async send(messageType: string, caseId: string | null, payload: Record<string, unknown>, summary: string, patientName?: string): Promise<boolean> {
+  async send(messageType: string, caseId: string | null, payload: Record<string, unknown>, summary: string, patientName?: string, dedupeKey?: string): Promise<boolean> {
     try {
       if (patientName && namesPatient(summary, patientName)) {
         this.logger.warn(`${messageType} not sent${caseId ? ` (case ${caseId})` : ''}: its summary named the patient`);
         return false;
       }
-      await this.messages.send({ case: caseId, from: 'patient-support', to: ['coordinator'], type: messageType, priority: 'medium', summary, payload });
+      await this.messages.send({ case: caseId, from: 'patient-support', to: ['coordinator'], type: messageType, priority: 'medium', summary, payload, ...(dedupeKey ? { dedupeKey } : {}) });
       return true;
     } catch (e) {
       this.logger.warn(`${messageType} not sent${caseId ? ` (case ${caseId})` : ''}: ${(e as Error).message}`);
