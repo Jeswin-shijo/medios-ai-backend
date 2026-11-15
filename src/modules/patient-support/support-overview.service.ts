@@ -57,6 +57,8 @@ export interface SupportOverview {
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const ms = (d: unknown): number | null => (d ? new Date(d as Date).getTime() : null);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** The word that agrees with a count: `agree(1, 'needs', 'need')`. */
+const agree = (n: number, one: string, many: string) => (n === 1 ? one : many);
 const avg = (xs: number[], digits: 0 | 1): number | null => {
   if (!xs.length) return null;
   const a = xs.reduce((s, x) => s + x, 0) / xs.length;
@@ -266,14 +268,14 @@ export class SupportOverviewService {
     add(kpis.escalated, {
       key: 'escalated',
       tone: 'red',
-      title: `${plural(kpis.escalated, 'ticket')} past their target`,
-      sub: 'Waiting for a first answer after their due time.',
+      title: `${plural(kpis.escalated, 'ticket')} past ${agree(kpis.escalated, 'its', 'their')} target`,
+      sub: `Waiting for a first answer after ${agree(kpis.escalated, 'its', 'their')} due time.`,
       action: { label: 'Open tickets', tab: 'tickets', filter: 'escalated' }
     });
     add(needsDoctor, {
       key: 'needs-doctor',
       tone: 'red',
-      title: `${plural(needsDoctor, 'check-up call')} need a doctor`,
+      title: `${plural(needsDoctor, 'check-up call')} ${agree(needsDoctor, 'needs', 'need')} a doctor`,
       sub: 'The patient reported something worrying.',
       action: { label: 'Open check-ups', tab: 'checkups', filter: 'needs-doctor' }
     });
@@ -295,7 +297,7 @@ export class SupportOverviewService {
       key: 'held',
       tone: 'amber',
       title: `${plural(held, 'update')} held`,
-      sub: 'Waiting for a person to send them.',
+      sub: `Waiting for a person to send ${agree(held, 'it', 'them')}.`,
       action: { label: 'Open updates', tab: 'updates', filter: 'held' }
     });
     add(complaints, {

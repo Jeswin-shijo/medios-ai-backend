@@ -237,10 +237,20 @@ describe('SupportOverviewService', () => {
       ['escalated', 'needs-doctor', 'checkups-to-do', 'no-consent', 'held']
     );
     assert.equal(o.insights.length, 5);
-    assert.equal(o.insights[0].title, '1 ticket past their target');
+    assert.deepEqual(
+      o.insights.map((i) => i.title),
+      ['1 ticket past its target', '1 check-up call needs a doctor', '1 check-up call to do', '1 update skipped for no consent', '1 update held']
+    );
+    assert.deepEqual([o.insights[0].sub, o.insights[4].sub], ['Waiting for a first answer after its due time.', 'Waiting for a person to send it.']);
     assert.deepEqual(o.insights[0].action, { label: 'Open tickets', tab: 'tickets', filter: 'escalated' });
     assert.equal(o.insights[0].tone, 'red');
     assert.deepEqual(o.checkups, { due: 1, needsDoctor: 1, sentToEr: 0, comingUp: 0 });
+    await ticket(at(8, 30), { escalatedAt: at(12), dueAt: at(11) });
+    await checkup('completed', { result: 'needs-doctor', at: at(10, 30) });
+    assert.deepEqual(
+      (await overview.overview(admin, NOW)).insights.slice(0, 2).map((i) => i.title),
+      ['2 tickets past their target', '2 check-up calls need a doctor']
+    );
 
     // Without the escalation and the doctor check-up, the later rules show, and the Tamil one for an admin only.
     await m.SupportTicket.updateMany({}, { $unset: { escalatedAt: 1 } });
