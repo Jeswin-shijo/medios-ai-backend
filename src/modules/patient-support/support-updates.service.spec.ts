@@ -69,7 +69,8 @@ describe('SupportUpdatesService', () => {
       m.Appointment,
       m.FollowUpItem,
       m.DischargePlan,
-      m.DischargeOrder
+      m.DischargeOrder,
+      m.CoordinatorCounter
     );
     service.clock = () => now;
     return service;
@@ -611,5 +612,57 @@ describe('SupportUpdatesService', () => {
     assert.equal(await svc.catchUp(since), 0);
     assert.equal(await m.PatientUpdate.countDocuments(), 2);
     assert.equal(await svc.catchUp(new Date(Date.now() + 60_000)), 0);
+  });
+
+  /** Spreads the stored messages one second apart, oldest first, so the cursor can tell them apart. */
+  const spread = async () => {
+    const all = await m.AgentMessage.find().sort({ _id: 1 }).lean();
+    for (const [i, msg] of all.entries())
+      await m.AgentMessage.collection.updateOne({ _id: msg._id }, { $set: { createdAt: new Date(Date.UTC(2026, 8, 26, 0, 0, i)) } });
+  };
+
+  test('catchUp advances past messages that make no update', async () => {
+    reg.wake.clear();
+    svc.catchUpBatch = 2;
+    // Three sample occupants (no update, ever), then one real admission.
+    await m.Admission.updateOne({ _id: admission._id }, { $set: { sample: true } });
+    for (const n of [1, 2, 3])
+      await send('bed', 'bed.assigned', { bedId: String(bed._id), bedLabel: `Bed ${n}`, admissionId: String(admission._id), ward: ward.name });
+    const other = await m.Patient.create({
+      uhid: 'MHK2',
+      name: 'Ravi P',
+      age: 50,
+      gender: 'Male',
+      phone: '9876543299',
+      consent: { messages: true, calls: false }
+    });
+    const real = await raw(m.Admission, { patient: other._id, patientUhid: 'MHK1', patientName: 'Asha K', bed: bed._id, status: 'active', sample: false });
+    await send('bed', 'bed.assigned', { bedId: String(bed._id), bedLabel: 'Bed 9', admissionId: String(real._id), ward: ward.name });
+    await spread();
+    const since = new Date(Date.UTC(2026, 8, 25));
+    let made = 0;
+    for (let pass = 0; pass < 2 && !made; pass++) made += await svc.catchUp(since);
+    assert.equal(made, 1, 'the real message is reached within two passes');
+    assert.equal((await one()).dedupeKey, `admitted:${real._id}`);
+  });
+
+  test('catchUp does not re-examine messages before the cursor', async () => {
+    reg.wake.clear();
+    await assigned();
+    await spread();
+    const since = new Date(Date.UTC(2026, 8, 25));
+    assert.equal(await svc.catchUp(since), 1);
+    const seen: string[] = [];
+    const original = svc.fromMessage.bind(svc);
+    svc.fromMessage = async (id) => (seen.push(id), original(id));
+    assert.equal(await svc.catchUp(since), 0);
+    assert.equal(seen.length, 0, 'nothing before or at the cursor is replayed');
+    // A newer message after the cursor is examined.
+    await send('revenue', 'revenue.estimate-ready', { billId: String(oid()), billNumber: 'BL-1', low: 1, high: 2 });
+    await m.AgentMessage.collection.updateOne({ type: 'revenue.estimate-ready' }, { $set: { createdAt: new Date(Date.UTC(2026, 8, 26, 1)) } });
+    seen.length = 0;
+    await svc.catchUp(since);
+    assert.equal(seen.length, 1);
+    assert.equal((await m.CoordinatorCounter.findOne({ key: 'support-catchup' }).lean())!.last, Date.UTC(2026, 8, 26, 1));
   });
 });

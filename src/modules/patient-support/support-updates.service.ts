@@ -9,6 +9,7 @@ import { Appointment, AppointmentDocument } from '../appointments/schemas/appoin
 import { maskPhone } from '../calls/phone';
 import { MessagesService } from '../coordinator/messages.service';
 import { RulesService } from '../coordinator/rules.service';
+import { CoordinatorCounter, CoordinatorCounterDocument } from '../coordinator/schemas/coordinator-counter.schema';
 import { AgentMessage, MessageDocument } from '../coordinator/schemas/agent-message.schema';
 import { DischargeOrder, DischargeOrderDocument } from '../discharge/schemas/discharge-order.schema';
 import { DischargePlan, DischargePlanDocument } from '../discharge/schemas/discharge-plan.schema';
@@ -45,7 +46,7 @@ const CLAIM_MS = 5 * 60_000;
 const NO_FOLLOW_UP = 'as written on your discharge summary';
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 500;
-const CATCH_UP_LIMIT = 500;
+const CATCH_UP_KEY = 'support-catchup';
 
 /** What an event gives: the patient, the case, the once-per-event key, and the placeholder values read from records. */
 interface Source {
@@ -114,6 +115,9 @@ export class SupportUpdatesService implements OnModuleInit {
   /** The real clock; a spec replaces it. */
   clock: () => Date = () => new Date();
 
+  /** Messages examined per catch-up pass; a spec lowers it. */
+  catchUpBatch = 500;
+
   constructor(
     private readonly registration: SupportRegistration,
     private readonly messages: MessagesService,
@@ -132,7 +136,8 @@ export class SupportUpdatesService implements OnModuleInit {
     @InjectModel(Appointment.name) private readonly appointments: Model<AppointmentDocument>,
     @InjectModel(FollowUpItem.name) private readonly followUps: Model<FollowUpDocument>,
     @InjectModel(DischargePlan.name) private readonly plans: Model<DischargePlanDocument>,
-    @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>
+    @InjectModel(DischargeOrder.name) private readonly orders: Model<DischargeOrderDocument>,
+    @InjectModel(CoordinatorCounter.name) private readonly counters: Model<CoordinatorCounterDocument>
   ) {}
 
   onModuleInit(): void {
@@ -614,16 +619,32 @@ export class SupportUpdatesService implements OnModuleInit {
 
   // ---- Catch-up ----
 
-  /** Replays stored messages (oldest first, at most 500) that have no update yet. Returns how many new updates it made. */
+  /**
+   * Replays stored messages (oldest first, one batch) that have no update yet, starting at the later of `since` and a
+   * persisted cursor (the createdAt of the last message examined), so messages that make no update cannot stall the
+   * pass. Messages after the cursor are read with a strict `>`; a batch that ends inside a millisecond leaves that
+   * millisecond for the next pass, so a tie at the boundary is never skipped (a batch that is all one millisecond is kept whole). Returns how many new updates it made.
+   */
   async catchUp(since: Date): Promise<number> {
+    const cursor = await this.counters.findOne({ key: CATCH_UP_KEY }).lean().exec();
+    const from = new Date(Math.max(since.getTime(), cursor?.last ?? 0));
     const stored: any[] = await this.messageModel
-      .find({ type: { $in: [...WAKE_TYPES] }, createdAt: { $gte: since } })
+      .find({ type: { $in: [...WAKE_TYPES] }, createdAt: cursor && cursor.last >= since.getTime() ? { $gt: from } : { $gte: from } })
       .sort({ createdAt: 1, _id: 1 })
-      .limit(CATCH_UP_LIMIT)
-      .select('_id')
+      .limit(this.catchUpBatch + 1)
+      .select('_id createdAt')
       .lean()
       .exec();
     if (!stored.length) return 0;
+    // The extra row only tells whether the batch ends inside a millisecond: if so, leave that millisecond for the next pass.
+    if (stored.length > this.catchUpBatch) {
+      const extra = stored.pop();
+      const edge = new Date(stored[stored.length - 1].createdAt).getTime();
+      if (new Date(extra.createdAt).getTime() === edge) {
+        const kept = stored.filter((m) => new Date(m.createdAt).getTime() < edge);
+        if (kept.length) stored.splice(0, stored.length, ...kept);
+      }
+    }
     const seen = new Set(
       (
         await this.updates
@@ -635,6 +656,8 @@ export class SupportUpdatesService implements OnModuleInit {
     );
     const before = await this.updates.countDocuments().exec();
     for (const m of stored) if (!seen.has(String(m._id))) await this.fromMessage(String(m._id));
+    const last = new Date(stored[stored.length - 1].createdAt).getTime();
+    await this.counters.findOneAndUpdate({ key: CATCH_UP_KEY }, { $max: { last } }, { upsert: true }).exec();
     return (await this.updates.countDocuments().exec()) - before;
   }
 }
