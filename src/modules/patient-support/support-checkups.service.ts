@@ -38,7 +38,7 @@ const WAITING = 'A check-up call can only be recorded once it is due.';
 const DIED = 'This patient has died.';
 const OPEN_STATES = ['due', 'calling'];
 const TERMINAL_CALL = ['completed', 'failed', 'canceled'];
-const NOT_PLACED = ['scheduled', 'failed', 'canceled'];
+const QUESTION_FALLBACK = 'The patient has a question for the doctor (see the call transcript).';
 
 export type CheckupTab = 'to-do' | 'needs-doctor' | 'sent-to-er' | 'done' | 'not-reached' | 'coming-up';
 export const CHECKUP_TABS: CheckupTab[] = ['to-do', 'needs-doctor', 'sent-to-er', 'done', 'not-reached', 'coming-up'];
@@ -242,7 +242,39 @@ export class SupportCheckupsService implements OnModuleInit {
         this.logger.warn(`${c.number}: not made due: ${(e as Error).message}`);
       }
     }
+    await this.skipDueClosed();
     return made;
+  }
+
+  /** A check-up already due is still skipped when the patient dies or is marked do-not-contact. Its deferred call, if any, is canceled. */
+  private async skipDueClosed(): Promise<void> {
+    const rows = await this.checkups.find({ state: 'due' }).sort({ _id: 1 }).exec();
+    for (const c of rows) {
+      try {
+        if (await this.facts.isDeceased(String(c.patient))) {
+          if (await this.skip(c._id, 'deceased', ['due'])) {
+            await this.cancelDeferred(c.agentCall);
+            await this.updates.cancelForDeath(String(c.patient));
+          }
+          continue;
+        }
+        const patient: any = await this.patients.findById(c.patient).select('doNotCall').lean().exec();
+        if (patient?.doNotCall === true && (await this.skip(c._id, 'do-not-contact', ['due']))) await this.cancelDeferred(c.agentCall);
+      } catch (e) {
+        this.logger.warn(`${c.number}: not re-checked: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /** A linked call that has not been placed yet would still dial later: cancel it. A failure is logged. */
+  private async cancelDeferred(callId: unknown): Promise<void> {
+    if (!callId) return;
+    try {
+      const call: any = await this.agentCalls.findById(callId).select('status').lean().exec();
+      if (call?.status === 'scheduled') await this.calls.cancel(String(callId), SUPPORT_ACTOR.name);
+    } catch (e) {
+      this.logger.warn(`Deferred check-up call ${String(callId)} not canceled: ${(e as Error).message}`);
+    }
   }
 
   private async skip(id: unknown, reason: 'deceased' | 'do-not-contact' | 'no-phone', states: string[] = ['scheduled', 'due', 'calling']): Promise<boolean> {
@@ -438,10 +470,11 @@ export class SupportCheckupsService implements OnModuleInit {
       )
       .exec();
     if (!claimed) throw new ConflictException(DONE);
+    await this.cancelDeferred(c.agentCall);
 
     // The emergency and doctor paths first: nothing below may hold them up. Each step logs its own failure.
-    if (result === 'sent-to-er') await this.sendToEr(claimed, read.answers);
-    else if (result === 'needs-doctor') await this.needsDoctor(claimed, read.answers, at);
+    if (result === 'sent-to-er') await this.sendToEr(claimed);
+    else if (result === 'needs-doctor') await this.needsDoctor(claimed, at);
     await this.announceDone(claimed, result);
     if (read.rating) {
       try {
@@ -476,7 +509,7 @@ export class SupportCheckupsService implements OnModuleInit {
     }
   }
 
-  private async upsertAlert(link: string, c: CheckupCallDocument, title: string, subtitle: string): Promise<void> {
+  private async upsertAlert(link: string, c: CheckupCallDocument, title: string, subtitle: string): Promise<boolean> {
     try {
       const fields = {
         title,
@@ -495,13 +528,24 @@ export class SupportCheckupsService implements OnModuleInit {
         if ((e as { code?: number }).code !== DUPLICATE_KEY) throw e;
         await this.alerts.updateOne({ link }, { $set: fields }).exec();
       }
+      return true;
     } catch (e) {
       this.logger.error(`${c.number}: alert ${link} not written: ${(e as Error).message}`);
+      return false;
     }
   }
 
-  /** An emergency answer: the alert, an expected card in the ER, and the message. No doctor clock: the ER takes over. */
-  private async sendToEr(c: CheckupCallDocument, answers: Record<string, string>): Promise<void> {
+  private async mark(id: unknown, what: string): Promise<void> {
+    await this.checkups.updateOne({ _id: id }, { $addToSet: { announced: what } }).exec();
+  }
+
+  /** An emergency answer: the alert and an expected card in the ER. No doctor clock: the ER takes over. Each step is marked when done, so a repair can redo only what is missing. */
+  private async sendToEr(c: CheckupCallDocument): Promise<void> {
+    await this.erAlert(c);
+    await this.erCard(c);
+  }
+
+  private async erAlert(c: CheckupCallDocument): Promise<void> {
     let subtitle = `Duty doctor: ${await this.holderNames()}`;
     if (c.group === 'cardiac') {
       try {
@@ -511,12 +555,15 @@ export class SupportCheckupsService implements OnModuleInit {
         this.logger.warn(`${c.number}: cardiology on call not read: ${(e as Error).message}`);
       }
     }
-    await this.upsertAlert(alertLink(c._id, 'er'), c, `Check-up ${c.number} sent to the ER`, subtitle);
+    if (await this.upsertAlert(alertLink(c._id, 'er'), c, `Check-up ${c.number} sent to the ER`, subtitle)) await this.mark(c._id, 'er-alert');
+  }
+
+  private async erCard(c: CheckupCallDocument): Promise<void> {
     try {
       const patient: any = await this.patients.findById(c.patient).lean().exec();
       const letter = patient?.gender === 'Male' ? 'M' : patient?.gender === 'Female' ? 'F' : patient?.gender ? 'O' : '';
       const ageSex = `${typeof patient?.age === 'number' ? patient.age : ''} ${letter}`.trim() || 'Unknown';
-      const short = c.emergency.length ? this.shortOf(c.group as CareGroup, c.emergency[0], answers) : 'Emergency';
+      const short = c.emergency.length ? this.shortOf(c.group as CareGroup, c.emergency[0], c.answers) : 'Emergency';
       await this.erVisits.addExpected(SUPPORT_ACTOR, {
         complaint: `Check-up ${c.number}: ${short}`.slice(0, 200),
         ageSex: ageSex.slice(0, 40),
@@ -524,15 +571,25 @@ export class SupportCheckupsService implements OnModuleInit {
         etaMinutes: 30,
         patientId: String(c.patient)
       });
+      await this.mark(c._id, 'er-card');
     } catch (e) {
       this.logger.error(`${c.number}: ER expected card not made: ${(e as Error).message}`);
     }
   }
 
   /** A worrying answer: the alert and the 60-minute doctor clock (started by the support.checkup-worrying message). */
-  private async needsDoctor(c: CheckupCallDocument, answers: Record<string, string>, at: Date): Promise<void> {
-    const labels = c.worrying.map((k) => this.shortOf(c.group as CareGroup, k, answers)).join('; ');
-    await this.upsertAlert(alertLink(c._id, 'doctor'), c, `Check-up ${c.number} needs a doctor`, `${labels} · Duty doctor: ${await this.holderNames()}`);
+  private async needsDoctor(c: CheckupCallDocument, at: Date): Promise<void> {
+    await this.doctorAlert(c);
+    await this.announceWorrying(c, at);
+  }
+
+  private async doctorAlert(c: CheckupCallDocument): Promise<void> {
+    const labels = c.worrying.map((k) => this.shortOf(c.group as CareGroup, k, c.answers)).join('; ');
+    if (await this.upsertAlert(alertLink(c._id, 'doctor'), c, `Check-up ${c.number} needs a doctor`, `${labels} · Duty doctor: ${await this.holderNames()}`))
+      await this.mark(c._id, 'doctor-alert');
+  }
+
+  private async announceWorrying(c: CheckupCallDocument, at: Date): Promise<void> {
     const sent = await this.registration.send(
       'support.checkup-worrying',
       c.case ? String(c.case) : null,
@@ -540,7 +597,7 @@ export class SupportCheckupsService implements OnModuleInit {
       `${c.number}: check-up needs a doctor`,
       c.patientName
     );
-    if (sent) await this.checkups.updateOne({ _id: c._id }, { $addToSet: { announced: 'worrying' } }).exec();
+    if (sent) await this.mark(c._id, 'worrying');
   }
 
   private async announceDone(c: CheckupCallDocument, outcome: string): Promise<void> {
@@ -559,7 +616,9 @@ export class SupportCheckupsService implements OnModuleInit {
     this.checkActor(actor);
     const c = await this.load(id);
     if (!OPEN_STATES.includes(c.state)) throw new ConflictException(c.state === 'scheduled' ? WAITING : DONE);
-    if (!(await this.registerTry(c, undefined))) throw new ConflictException(DONE);
+    if (c.state === 'calling') throw new ConflictException('The agent is on this call now.');
+    if (await this.facts.isDeceased(String(c.patient))) throw new ConflictException(DIED);
+    if (!(await this.registerTry(c, c.agentCall ?? null))) throw new ConflictException(DONE);
     return this.detail(id);
   }
 
@@ -580,6 +639,7 @@ export class SupportCheckupsService implements OnModuleInit {
         )
         .exec();
       if (!done) return false;
+      await this.cancelDeferred(c.agentCall);
       await this.announceDone(done, 'not-reached');
       await this.facts.timeline(done, `Check-up call ${done.number}: not reached`, `Tried ${tries} times.`);
       return true;
@@ -594,6 +654,7 @@ export class SupportCheckupsService implements OnModuleInit {
         $unset: { agentCall: 1, providerCallId: 1 }
       })
       .exec();
+    if (r.modifiedCount > 0) await this.cancelDeferred(c.agentCall);
     return r.modifiedCount > 0;
   }
 
@@ -602,8 +663,16 @@ export class SupportCheckupsService implements OnModuleInit {
   /** The bridge's handler: every check-up call outcome reaches here. A throw keeps the answers on the call and raises a review alert. */
   private async fromCall(checkupId: string, r: CheckupCallResult): Promise<void> {
     const c = isValidObjectId(checkupId) ? await this.checkups.findById(checkupId).exec() : null;
-    if (!c || !OPEN_STATES.includes(c.state)) return;
-    if (c.agentCall && String(c.agentCall) !== r.agentCallId) return;
+    if (!c) return;
+    // Only a true duplicate is ignored quietly: this very call was already recorded.
+    if (c.state === 'completed' && c.agentCall && String(c.agentCall) === r.agentCallId) return;
+    const open = OPEN_STATES.includes(c.state);
+    const mine = !c.agentCall || String(c.agentCall) === r.agentCallId;
+    if (r.outcome === 'enquiry' && (!open || !mine)) {
+      // An answered call must never vanish: throwing keeps the answers on the call and raises Calls' review alert.
+      throw new ConflictException('This check-up was closed or is linked to another call, so the answers were not recorded.');
+    }
+    if (!open || !mine) return;
     if (r.outcome === 'wrong_number') {
       await this.skip(c._id, 'no-phone', OPEN_STATES);
     } else if (r.outcome === 'do_not_call') {
@@ -612,10 +681,63 @@ export class SupportCheckupsService implements OnModuleInit {
       if (isValidObjectId(r.agentCallId)) {
         await this.checkups.updateOne({ _id: c._id, state: { $in: OPEN_STATES } }, { $set: { agentCall: new Types.ObjectId(r.agentCallId) } }).exec();
       }
-      await this.submit(SUPPORT_ACTOR, checkupId, { group: c.group as CareGroup, answers: r.answers ?? {}, rating: r.rating });
+      const answers = r.answers ?? {};
+      const questionText = answers.question === 'yes' ? (r.notes?.trim() || QUESTION_FALLBACK).slice(0, 500) : undefined;
+      await this.submit(SUPPORT_ACTOR, checkupId, { group: c.group as CareGroup, answers, rating: r.rating, ...(questionText ? { questionText } : {}) });
     } else {
-      await this.registerTry(c, undefined);
+      await this.registerTry(c, c.agentCall ?? null);
     }
+  }
+
+  // ---- Repair ----
+
+  /**
+   * Redoes what a crash or a failed write left undone, once: the ER alert and the ER card of a sent-to-er check-up (the card
+   * only when it was never made, since adding one is not idempotent), the doctor alert of a needs-doctor one, and any lost
+   * announcement. Returns how many things were redone.
+   */
+  async repairEffects(): Promise<number> {
+    let fixed = 0;
+    const rows = await this.checkups
+      .find({
+        state: { $in: ['completed', 'not-reached'] },
+        $or: [
+          { announced: { $nin: ['done'] } },
+          { reviewedAt: null, result: { $in: ['sent-to-er', 'needs-doctor'] } },
+          { reviewedAt: { $ne: null }, announced: { $nin: ['reviewed'] } }
+        ]
+      })
+      .sort({ _id: 1 })
+      .limit(200)
+      .exec();
+    for (const c of rows) {
+      try {
+        const has = (k: string) => c.announced.includes(k);
+        const reviewed = !!c.reviewedAt;
+        if (!reviewed && c.result === 'sent-to-er') {
+          if (!has('er-alert')) (await this.erAlert(c), fixed++);
+          if (!has('er-card')) (await this.erCard(c), fixed++);
+        }
+        if (!reviewed && c.result === 'needs-doctor') {
+          if (!has('doctor-alert')) (await this.doctorAlert(c), fixed++);
+          if (!has('worrying')) (await this.announceWorrying(c, c.at ?? this.clock()), fixed++);
+        }
+        if (!has('done')) (await this.announceDone(c, c.state === 'not-reached' ? 'not-reached' : (c.result ?? 'fine')), fixed++);
+        if (reviewed && !has('reviewed')) {
+          const sent = await this.registration.send(
+            'support.checkup-reviewed',
+            c.case ? String(c.case) : null,
+            { checkupId: String(c._id), number: c.number },
+            `${c.number}: check-up reviewed`,
+            c.patientName
+          );
+          if (sent) (await this.mark(c._id, 'reviewed'), fixed++);
+        }
+      } catch (e) {
+        this.logger.warn(`${c.number}: effects not repaired: ${(e as Error).message}`);
+      }
+    }
+    return fixed;
   }
 
   // ---- Review ----

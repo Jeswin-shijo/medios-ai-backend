@@ -54,6 +54,7 @@ describe('SupportCheckupsService', () => {
   let failExpected: boolean;
   let cancelled: string[];
   let cardiologist: { name: string } | null;
+  let canceledCalls: string[];
 
   const sent = (type: string) => m.AgentMessage.find({ type }).sort({ createdAt: 1, _id: 1 }).lean();
   const alertOf = (link: string) => m.TaskAlertItem.findOne({ link }).lean();
@@ -107,6 +108,7 @@ describe('SupportCheckupsService', () => {
     failExpected = false;
     cancelled = [];
     cardiologist = null;
+    canceledCalls = [];
     nextCall = async () => ({ _id: oid(), status: 'calling', providerCallId: 'prov-1' });
     registry = new AgentRegistry();
     const events = new CoordinatorEvents();
@@ -153,7 +155,11 @@ describe('SupportCheckupsService', () => {
     const texts = new SupportTextsService(m.SupportTemplate, m.SupportFaq, settings, supportSettings);
     await texts.ensureDefaults();
     bridge = new SupportBridge();
-    const fakeCalls = { canCheckupCall: () => canCall, requestCheckup: async (i: any) => (dialed.push(i), nextCall(i)) };
+    const fakeCalls = {
+      canCheckupCall: () => canCall,
+      requestCheckup: async (i: any) => (dialed.push(i), nextCall(i)),
+      cancel: async (id: string) => (canceledCalls.push(id), {})
+    };
     const fakeEr = {
       addExpected: async (actor: any, input: any) => {
         if (failExpected) throw new Error('ER is down');
@@ -267,7 +273,7 @@ describe('SupportCheckupsService', () => {
     await m.Patient.updateOne({ _id: patient._id }, { $set: { status: 'Deceased' } });
     assert.equal(await svc.makeDue(at(10, 0, 28)), 0);
     assert.deepEqual([(await rowOf(id2)).state, (await rowOf(id2)).skipReason], ['skipped', 'deceased']);
-    assert.deepEqual(cancelled, [String(patient._id)]);
+    assert.deepEqual(cancelled, [String(patient._id), String(patient._id)], 'the earlier due check-up is skipped too');
   });
 
   test('makeDue skips do-not-contact and no phone', async () => {
@@ -508,10 +514,7 @@ describe('SupportCheckupsService', () => {
     // Wrong answers throw, so Calls keeps them on the call.
     const id2 = await makeOne();
     const call2 = String(oid());
-    await assert.rejects(
-      bridge.handlers.checkupResult!(id2, { outcome: 'enquiry', answers: { medicines: 'maybe' }, agentCallId: call2 }),
-      BadRequestException
-    );
+    await assert.rejects(bridge.handlers.checkupResult!(id2, { outcome: 'enquiry', answers: { medicines: 'maybe' }, agentCallId: call2 }), BadRequestException);
     assert.equal((await rowOf(id2)).state, 'due');
     // No answer, wrong number, do not call.
     await bridge.handlers.checkupResult!(id2, { outcome: 'no_answer', answers: {}, agentCallId: call2 });
@@ -637,6 +640,120 @@ describe('SupportCheckupsService', () => {
     assert.notEqual(d.emergencyLine.text, d.emergencyLine.en);
     await m.Patient.updateOne({ _id: patient._id }, { $set: { preferredLanguage: 'en' } });
     assert.equal((await svc.detail(id)).emergencyLine.text, d.emergencyLine.en);
+  });
+
+  const deferredCall = async (id: string, status = 'scheduled') => {
+    const call = await m.AgentCall.create({
+      purpose: 'checkup',
+      patientName: 'Ravi Kumar',
+      phone: '+919100000005',
+      scheduledFor: now,
+      provider: 'simulated',
+      checkupId: id,
+      status
+    });
+    await m.CheckupCall.updateOne({ _id: id }, { $set: { agentCall: call._id } });
+    return call;
+  };
+
+  test("an emergency enquiry arriving after a person's no-answer is not silent (the handler throws)", async () => {
+    const id = await makeOne();
+    const call = await deferredCall(id);
+    await svc.noAnswer(NURSE, id);
+    assert.deepEqual(canceledCalls, [String(call._id)], 'the deferred call is canceled');
+    await assert.rejects(
+      bridge.handlers.checkupResult!(id, { outcome: 'enquiry', answers: { medicines: 'yes', symptoms: 'severe' }, agentCallId: String(call._id) }),
+      ConflictException
+    );
+    // Another call's answer for a check-up linked elsewhere also throws; a true duplicate is quiet.
+    const id2 = await makeOne();
+    await m.CheckupCall.updateOne({ _id: id2 }, { $set: { state: 'calling', agentCall: oid() } });
+    await assert.rejects(bridge.handlers.checkupResult!(id2, { outcome: 'enquiry', answers: FINE, agentCallId: String(oid()) }), ConflictException);
+    const id3 = await makeOne();
+    const c3 = await deferredCall(id3, 'completed');
+    await m.CheckupCall.updateOne({ _id: id3 }, { $set: { state: 'calling' } });
+    await bridge.handlers.checkupResult!(id3, { outcome: 'enquiry', answers: FINE, agentCallId: String(c3._id) });
+    await bridge.handlers.checkupResult!(id3, { outcome: 'enquiry', answers: FINE, agentCallId: String(c3._id) });
+    assert.equal(await m.AgentMessage.countDocuments({ type: 'support.checkup-done', 'payload.checkupId': id3 }), 1);
+  });
+
+  test('noAnswer is refused while calling, and for a dead patient', async () => {
+    const id = await makeOne();
+    await m.CheckupCall.updateOne({ _id: id }, { $set: { state: 'calling' } });
+    await assert.rejects(svc.noAnswer(NURSE, id), /agent is on this call/);
+    await m.CheckupCall.updateOne({ _id: id }, { $set: { state: 'due' } });
+    await m.Patient.updateOne({ _id: patient._id }, { $set: { status: 'Deceased' } });
+    await assert.rejects(svc.noAnswer(NURSE, id), /has died/);
+  });
+
+  test('submit cancels a deferred linked call', async () => {
+    const id = await makeOne();
+    const call = await deferredCall(id);
+    await svc.submit(NURSE, id, { group: 'general', answers: FINE });
+    assert.deepEqual(canceledCalls, [String(call._id)]);
+    const id2 = await makeOne();
+    await deferredCall(id2, 'completed');
+    await svc.submit(NURSE, id2, { group: 'general', answers: FINE });
+    assert.equal(canceledCalls.length, 1, 'a call already placed is not canceled');
+  });
+
+  test('a bridge result with question yes and notes records the question and raises the doctor alert', async () => {
+    const id = await makeOne();
+    await bridge.handlers.checkupResult!(id, {
+      outcome: 'enquiry',
+      answers: { ...FINE, question: 'yes' },
+      notes: '  Can I take a bath?  ',
+      agentCallId: String(oid())
+    });
+    const c = await rowOf(id);
+    assert.deepEqual([c.result, c.questionText], ['needs-doctor', 'Can I take a bath?']);
+    assert.ok(await alertOf(`support-checkup:${id}:doctor`));
+    assert.equal((await sent('support.checkup-worrying')).length, 1);
+    const id2 = await makeOne();
+    await bridge.handlers.checkupResult!(id2, { outcome: 'enquiry', answers: { ...FINE, question: 'yes' }, agentCallId: String(oid()) });
+    assert.match((await rowOf(id2)).questionText, /see the call transcript/);
+  });
+
+  test('a patient who dies after the check-up is due is skipped (calls off)', async () => {
+    const id = await makeOne();
+    await m.Patient.updateOne({ _id: patient._id }, { $set: { status: 'Deceased' } });
+    await svc.makeDue(at(10, 5, 28));
+    assert.deepEqual([(await rowOf(id)).state, (await rowOf(id)).skipReason], ['skipped', 'deceased']);
+    assert.deepEqual(cancelled, [String(patient._id)]);
+    assert.equal((await svc.list('to-do')).length, 0);
+  });
+
+  test('doNotCall set after due skips it', async () => {
+    const id = await makeOne();
+    await m.Patient.updateOne({ _id: patient._id }, { $set: { doNotCall: true } });
+    await svc.makeDue(at(10, 5, 28));
+    assert.deepEqual([(await rowOf(id)).state, (await rowOf(id)).skipReason], ['skipped', 'do-not-contact']);
+  });
+
+  test('repairEffects restores a missing ER card and alert exactly once', async () => {
+    const id = await makeOne();
+    await svc.submit(NURSE, id, { group: 'general', answers: { medicines: 'yes', symptoms: 'severe' } });
+    assert.deepEqual(((await rowOf(id)).announced as string[]).sort(), ['done', 'er-alert', 'er-card']);
+    assert.equal(await svc.repairEffects(), 0, 'nothing to redo when all is marked');
+    // A crash left neither the alert nor the card.
+    await m.TaskAlertItem.deleteMany({});
+    expected.length = 0;
+    await m.CheckupCall.updateOne({ _id: id }, { $pull: { announced: { $in: ['er-alert', 'er-card'] } } });
+    assert.equal(await svc.repairEffects(), 2);
+    assert.equal(expected.length, 1);
+    assert.ok(await alertOf(`support-checkup:${id}:er`));
+    assert.equal(await svc.repairEffects(), 0);
+    assert.equal(expected.length, 1, 'the card is made once');
+    // A lost doctor alert and announcement of a needs-doctor check-up.
+    const id2 = await makeOne();
+    await svc.submit(NURSE, id2, { group: 'general', answers: { ...FINE, medicines: 'no' } });
+    await m.TaskAlertItem.deleteMany({ link: `support-checkup:${id2}:doctor` });
+    await m.CheckupCall.updateOne({ _id: id2 }, { $pull: { announced: { $in: ['doctor-alert', 'worrying', 'done'] } } });
+    assert.equal(await svc.repairEffects(), 3);
+    assert.ok(await alertOf(`support-checkup:${id2}:doctor`));
+    // Reviewed check-ups are left alone.
+    await svc.review(DOCTOR, id, 'Seen');
+    assert.equal(await svc.repairEffects(), 0);
   });
 
   test('coming-up lists scheduled check-ups', async () => {
