@@ -129,6 +129,15 @@ The Beds screen suggests where to admit a patient. The rules always work; AI onl
 4. **Tablet setup.** In the web app, open Token Queue > Displays & Settings, create a kiosk device and scan its setup QR from the tablet app. Removing the device revokes its key.
 5. **New collections.** The reception module adds `opvisits`, `opsequences`, `receptionsessions` and `otpchallenges`, and shares `departments` and `opdoctors` with the Scheduling Agent. They are created on first use; no migration is needed.
 
+## 9. Patient Support (family updates and check-up calls)
+
+1. **`MESSAGE_PROVIDER=sample`** for the client demo (`render.yaml` sets it; the Render service was made by hand, so set it in the dashboard too). Updates are logged and shown as Sample; nothing is sent to anyone. In production the default is `none`: every update shows "Skipped: messaging off". A real WhatsApp or SMS provider is not built yet, and it needs Meta template approval and DLT registration first. Never claim updates are being delivered while the mode is `sample` or `none`.
+2. **`TZ=Asia/Kolkata`.** Quiet hours (21:00 to 07:00), working hours and the check-up calling window follow the server's clock. Confirm `TZ` in the Render dashboard, or an update meant for the morning goes out at 02:30 to 12:30 IST.
+3. **`SNAPSERVE_CHECKUP_AGENT_ID`** only once a check-up agent exists in SnapServe (a later step). Until then check-ups are made by hand.
+4. **Update the SnapServe inbound agent.** In AI Call Agent → Agent Scripts, copy the new script and the tools into the agent: `hospital_info`, `expected_arrival` and the `topic` on `request_callback`. Without it, callers still work as before, but their call-backs open tickets with no topic (type Other).
+5. **Seed.** The demo seed also loads the Patient Support day; reseed right before a demo (clocks run on real time). The reconcile and update passes run each minute on the API.
+6. **New collections.** The Patient Support tickets, updates, check-up calls, ratings, templates and FAQs (see `src/modules/patient-support/schemas`), created on first use; no migration. Default templates and FAQs are written at start-up.
+
 ## Mobile app
 
 Build the Expo app with `EXPO_PUBLIC_API_URL=https://<api-address>/api`.

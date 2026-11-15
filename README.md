@@ -110,6 +110,8 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # pas
 | `CALL_SCHEDULER_INTERVAL_SECONDS` | `60` | How often due calls are placed (0 = scheduler off) |
 | `PAYMENT_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk payments: `sample` (simulated, marked SAMPLE) or `none` |
 | `SMS_PROVIDER` | `sample` (dev), `none` (production) | Reception kiosk OTP and tracking messages: `sample` or `none` |
+| `MESSAGE_PROVIDER` | `sample` (dev), `none` (production) | Patient Support family updates: `sample` (logged and shown as Sample) or `none` (every update is Skipped, "messaging off"). No real provider yet |
+| `SNAPSERVE_CHECKUP_AGENT_ID` | — | The SnapServe agent that makes the check-up calls. Unset, check-ups are made by hand (or wait in To do) |
 | `PUBLIC_WEB_URL` | unset | Base address of the web app, used for the public `/track` links (http or https) |
 
 The default port is 4000 because macOS's AirPlay Receiver holds port 5000.
@@ -432,6 +434,30 @@ The Discharge agent plans each inpatient's discharge from the day the bed is ass
 
 ---
 
+## 🎧 Patient Support Agent
+
+The Patient Support agent keeps families informed and answers their questions. It sends **family updates** from the other agents' messages, runs **inquiries and tickets** with an owner and a clock, answers simple questions and the emergency line, makes a **check-up call** two days after a patient goes home, and records ratings and complaints. Rules and approved templates decide everything. The agent never writes clinical text. It lives in `src/modules/patient-support`, and talks to Calls through a small bridge (`src/modules/support-bridge`), so the call agent works exactly as before when Patient Support is absent.
+
+- **Consent first.** Nothing reaches a family without consent. A patient has a list of family contacts, a language (English or Tamil, English when the Tamil text is missing) and two consent ticks (messages, and calls). Consent has its own route, `PUT /api/support/patients/:patientId/contact`, because `PUT /patients/:id` ignores the four support fields. An update is sent only when, **at send time**, consent is on, the recipient has a usable phone, "do not contact" is off, the patient is alive, the trigger's switch is on and the template is approved. Otherwise it is Skipped or Held, with the reason.
+- **Family updates:** ten triggers (Admitted, Moved to another ward or bed, Procedure booked, Procedure reminder, Procedure done, Estimate ready, Final bill ready, Discharge pack, Follow-up booked, Follow-up reminder). They are made from the agents' messages and records, once per event (a `dedupeKey`), and sent on the one-minute pass. Quiet hours (21:00 to 07:00) hold an update as **waiting** until morning. **Held** covers a missing detail, no approved template, or the "Send family updates automatically" switch being off; **Send now** (admin, front desk) or **Dismiss** is offered on a held update. A procedure or follow-up update whose booking has since been cancelled or moved is skipped as "No longer current".
+- **Sending:** `MESSAGE_PROVIDER` is `sample` (messages are only logged and shown as Sample) or `none` (production default: updates show "Skipped: messaging off"). No real WhatsApp or SMS provider is built yet (requirements log Q43). A family update's phone is masked for everyone except admins.
+- **Inquiries and tickets:** `SP-0001`, ... A ticket has a type (Appointment, Billing, Reports, Admission & ward, Discharge, Directions & visiting, Medicines, Clinical, Complaint, Other), an owner (Front desk, Billing in charge, Ward nurse in charge, Duty doctor, Patient relations officer; set per type in Settings), a priority and a state (Open, In progress, Waiting on caller, Resolved). The first response (a note, In progress, Waiting on caller or Resolve) ends the round's clock. **Hand on** starts a new round for the new owner with a fresh clock. An urgent ticket (or a Clinical or Complaint one) is due in 30 minutes, any hour; others in 4 working hours (08:00 to 20:00). Urgent tickets raise a Critical alert at once, so the header bell counts them. Tickets come from the desk, from a call-back request, from an unanswered call, from an emergency call, and from a poor rating (a complaint).
+- **The check-up call:** two days after discharge (default), between 10:00 and 18:00, to the patient's contact with call consent. A general or a cardiac question list is chosen from the patient's care; the person making the call can switch lists. A person records the answers by hand, or the AI call agent does. The answers are rated by fixed rules: **Fine**, **Needs doctor** (a worrying answer, with a 60-minute clock on the `support-clinical` ladder), **Sent to ER** (an emergency answer: an ER expected-arrival card is made and the Critical alert goes out) or **Not reached** (tried again later). A doctor or admin marks a worrying check-up **reviewed**, which stops the clock. A check-up goes to **To do** (by hand) unless `CallsService.canCheckupCall()` is true.
+- **Simple answers and the emergency line:** `hospital_info` answers from approved FAQs (visiting hours, directions, parking, report collection, billing desk hours, OPD timings, pharmacy, canteen). The emergency line always comes from an approved text, never from the AI.
+- **Ratings and complaints:** overall 1 to 5 plus optional aspects and a comment; a rating of 2 or less opens a Complaint ticket for the Patient relations officer (ladder `patient-support`) and sends `support.complaint`.
+- **With the Coordinator:** nine messages (`support.update-sent|update-skipped|ticket-opened|ticket-answered|ticket-resolved|checkup-done|checkup-worrying|checkup-reviewed|complaint`), with the UHID, ticket number or update id and never a name. The new duty title is `patient-relations` (Patient relations officer, placed before Billing in charge), and the new ladders are `patient-support` (Patient relations officer, then Duty administrator, then Medical superintendent), `support-billing`, `support-ward` and `support-clinical` (Duty doctor, then Medical superintendent), each ending at the Medical superintendent. Five clocks run (First response on each of the four ladders, and the check-up's Doctor review), and two rules are on the Coordinator's rules list (**Never send without consent**, locked on, and **Send family updates automatically**). The front desk login is the fixed holder of Patient relations officer in the demo.
+- **The AI:** it only writes a day summary from counts. It never receives a name, UHID, phone, ticket or check-up number, or free text.
+- **The call agent:** the inbound script and tools changed (copy them from AI Call Agent → Agent Scripts into the SnapServe inbound agent): `hospital_info(topic, language?)` is new, `expected_arrival(complaint, age_sex, minutes, mode?)` is new, and `request_callback` gains a `topic` (one of the ticket types, so the right team calls back). `request_callback` now opens a ticket (it used to create a task), once per provider call id. An unanswered inbound call becomes a ticket of source Unanswered call. `expected_arrival` adds an ER expected-arrival card (minutes clamped to 1 to 240; the agent acts as `Patient Support Agent`) and an Urgent Clinical ticket. The check-up call needs a SnapServe agent of its own: set `SNAPSERVE_CHECKUP_AGENT_ID` once it is created. Until then check-ups are made by hand, or left in To do.
+- **Roles:** admin, doctor, nurse and front desk read everything, open and work tickets, record contact and consent, make a check-up call by hand and record feedback. Admin and front desk Send now or Dismiss a held update. Admin and doctor mark a check-up reviewed. Admin alone edits Templates & FAQs and Settings → Patient Support, and sees an update's full phone number. Pharmacist and lab get 403 on every `/api/support` route.
+- **Routes** (all under `/api/support`, 29 in all): listed with their roles in the route catalogue below; see `support.controller.ts`.
+- **Settings** (Settings → Patient Support, admin): quiet hours (21:00 to 07:00), the stale window (12 hours), the evening reminder time (18:00), the visiting hours text, working hours (08:00 to 20:00), the urgent target (30 minutes), the normal target (4 hours), the check-up day (2) and its calling window (10:00 to 18:00), the owner of each ticket type, and one switch per trigger.
+- **Time zone:** quiet, working and calling hours are read from the **server's clock**. Set `TZ=Asia/Kolkata` on the host (`render.yaml` does; confirm it in the Render dashboard), or quiet hours fall at the wrong time of day.
+- **Demo data.** `npm run seed` also loads the Patient Support day (`src/database/seed-support.ts`, run last), by replaying the stored messages through the real handlers and never writing updates by hand: about 43 family updates (sample, held, skipped), 15 tickets (two already escalated), 7 check-up calls and 10 ratings, with consent recorded for 9 patients. Mohan Raj (in the ER) gets the angiography-booked and estimate-ready updates, David Raj gets his follow-up-booked update, and the three stays that left on the clinic day get discharge packs (Senthil Kumar R is skipped, no consent). One update is Held because the automatic-sending switch is off (`auto-off`). No patient is shown as admitted by an update, because no consenting patient has a bed assigned in the seed. Clocks run on real time, so reseed right before a demo.
+- **Checks for this module:** `MONGODB_TEST_URI=mongodb://localhost:27018/medios_support_test npm run test:file -- src/modules/patient-support/support-tickets.service.spec.ts` for one spec, `npm test` for everything (2,069 tests).
+- **Test copy for this branch:** API on 4930, web on 5192, database `medios_support_dev`.
+
+---
+
 ## 🎫 Token Queue
 
 Check-in gives the patient a numbered token for the day. Staff call tokens to a room, and a waiting-room screen shows who is being served and who is next. The module lives in `src/modules/queue`.
@@ -637,5 +663,34 @@ On `feat/discharge-agent` (9 Nov 2026) the suite has 1,834 tests and takes about
 |  | `POST` | `/api/discharge/orders/:id/body-released` | Body released, for Died (admin, nurse, front desk) |
 |  | `GET` | `/api/discharge/settings` | Settings → Discharge (admin, doctor, nurse, front desk) |
 |  | `PUT` | `/api/discharge/settings` | Change Settings → Discharge; an unknown key or a value out of range is a 400 (admin) |
+| **Patient Support** | `GET` | `/api/support/overview` | The cards, queue, flow and insights (admin, doctor, nurse, front desk) |
+|  | `POST` | `/api/support/day-summary` | Summarise today; the AI sees counts only |
+|  | `GET` | `/api/support/tickets?status=&type=&owner=&q=` | Tickets, filtered and searched |
+|  | `GET` | `/api/support/tickets/:id` | One ticket with its notes and history |
+|  | `POST` | `/api/support/tickets` | Open a ticket, or one answered on the spot (resolved at once) |
+|  | `POST` | `/api/support/tickets/:id/notes` | Add a note (a first response) |
+|  | `POST` | `/api/support/tickets/:id/state` | Change the state: In progress or Waiting on caller (a first response) |
+|  | `POST` | `/api/support/tickets/:id/hand-on` | Hand on to another owner: a new round with a fresh clock |
+|  | `POST` | `/api/support/tickets/:id/resolve` | Resolve, with what was told to the caller |
+|  | `GET` | `/api/support/updates?status=&reason=&trigger=` | Family updates; a phone is masked except for admins |
+|  | `POST` | `/api/support/updates/:id/send` | Send now: only a Held update with the automatic switch off (admin, front desk) |
+|  | `POST` | `/api/support/updates/:id/dismiss` | Dismiss a held update (admin, front desk) |
+|  | `GET` | `/api/support/checkups` | Check-up calls |
+|  | `GET` | `/api/support/checkups/:id` | One check-up with its questions (`?group=` switches the list) |
+|  | `POST` | `/api/support/checkups/:id/answers` | Record the answers by hand; the rules rate them |
+|  | `POST` | `/api/support/checkups/:id/no-answer` | Record a try with no answer |
+|  | `POST` | `/api/support/checkups/:id/review` | Mark a Needs doctor or Sent to ER check-up reviewed (admin, doctor) |
+|  | `GET` | `/api/support/feedback` | Ratings and complaints |
+|  | `POST` | `/api/support/feedback` | Record a rating; 2 stars or fewer opens a Complaint ticket |
+|  | `GET` | `/api/support/templates` | Family-update templates (English and Tamil) |
+|  | `PUT` | `/api/support/templates/:key` | Edit or approve a template (admin) |
+|  | `GET` | `/api/support/faqs` | Approved hospital facts |
+|  | `GET` | `/api/support/faqs/search?q=` | Search the approved FAQs |
+|  | `PUT` | `/api/support/faqs/:topic` | Edit a FAQ (admin) |
+|  | `POST` | `/api/support/faqs` | Add a FAQ (admin) |
+|  | `GET` | `/api/support/patients/:patientId/contact` | A patient's contacts, language and consent |
+|  | `PUT` | `/api/support/patients/:patientId/contact` | Save contacts, language and consent (the only writer of consent) |
+|  | `GET` | `/api/support/settings` | Settings → Patient Support |
+|  | `PUT` | `/api/support/settings` | Change Settings → Patient Support (admin) |
 | **Settings** | `GET` | `/api/settings` | Hospital profile, staff, and AI settings |
 | | `PUT` | `/api/settings` | Update settings and preferences |
