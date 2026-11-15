@@ -159,7 +159,8 @@ export class SupportTicketsService {
     return t;
   }
 
-  private view(t: any): SupportTicketView {
+  /** The list row of a ticket document; the overview reuses it so its rows match the list. */
+  view(t: any): SupportTicketView {
     const escalated = !!t.escalatedAt && !t.roundAnsweredAt && t.state !== 'resolved';
     return {
       id: String(t._id),
