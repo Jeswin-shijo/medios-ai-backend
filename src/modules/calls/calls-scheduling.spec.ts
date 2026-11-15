@@ -250,9 +250,11 @@ describe('Calls use the patient\'s own doctor\'s timetable', () => {
     await m.Appointment.collection.insertOne({ uhid: 'X1', patientName: 'Holder', age: 30, gender: 'Male', date: slot.date, time: slot.time, status: 'Canceled', doctorId: String(afternoon._id), slotKey: `${afternoon._id}|${slot.date}|${slot.time}`, createdAt: new Date(), updatedAt: new Date() });
     const r = await inbound.run('book_appointment', { caller_ref: ref, slot_id: 'S1', reason: 'Fever' }, STRONG);
     assert.equal(r.ok, true, String(r.message));
-    // And an outbound booking call.
-    await m.Appointment.collection.insertOne({ uhid: 'X2', patientName: 'Holder2', age: 30, gender: 'Male', date: slot.date, time: '04:00 PM', status: 'Canceled', doctorId: String(afternoon._id), slotKey: `${afternoon._id}|${slot.date}|04:00 PM`, createdAt: new Date(), updatedAt: new Date() });
-    await m.AgentCall.create({ purpose: 'booking', status: 'calling', uhid: 'U2', patientName: 'Bala Kumar', phone: '+919876543211', provider: 'simulated', scheduledFor: new Date(), providerCallId: 'x2', offeredSlots: [{ date: slot.date, time: '04:00 PM', label: 'x' }], visitReason: 'Review' });
+    // And an outbound booking call, a week out: a day the inbound booking above can never have taken (its first slot is
+    // today's 04:00 PM when the clock reads about 13:45 to 14:00).
+    const later = dayOffset(7);
+    await m.Appointment.collection.insertOne({ uhid: 'X2', patientName: 'Holder2', age: 30, gender: 'Male', date: later, time: '04:00 PM', status: 'Canceled', doctorId: String(afternoon._id), slotKey: `${afternoon._id}|${later}|04:00 PM`, createdAt: new Date(), updatedAt: new Date() });
+    await m.AgentCall.create({ purpose: 'booking', status: 'calling', uhid: 'U2', patientName: 'Bala Kumar', phone: '+919876543211', provider: 'simulated', scheduledFor: new Date(), providerCallId: 'x2', offeredSlots: [{ date: later, time: '04:00 PM', label: 'x' }], visitReason: 'Review' });
     await calls.recordResult({ providerCallId: 'x2', outcome: 'booked', chosenSlot: 1, summary: '', transcript: [] });
     assert.equal(await m.Appointment.countDocuments({ uhid: 'U2', status: 'Scheduled' }), 1);
   });
