@@ -35,6 +35,8 @@ const FORBIDDEN = 'Only a doctor, a nurse, the front desk or an admin can do thi
 const REVIEW_FORBIDDEN = 'Only a doctor or an admin can review a check-up.';
 const DONE = 'This check-up call is already recorded.';
 const WAITING = 'A check-up call can only be recorded once it is due.';
+const REPAIR_GRACE_MINUTES = 2;
+const ON_CALL = 'The agent is on this call now.';
 const DIED = 'This patient has died.';
 const OPEN_STATES = ['due', 'calling'];
 const TERMINAL_CALL = ['completed', 'failed', 'canceled'];
@@ -91,6 +93,8 @@ export interface SubmitCheckupInput {
   questionText?: string;
   rating?: number;
   comment?: string;
+  /** Set only by the agent's handler: the call this result came from. */
+  agentCallId?: string;
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -114,6 +118,8 @@ export class SupportCheckupsService implements OnModuleInit {
   /** The real clock and the clinic clock; a spec replaces them. */
   clock: () => Date = () => new Date();
   clinic: () => Date = () => clinicNow();
+  /** Check-ups examined per repair pass; a spec lowers it. */
+  repairBatch = 200;
 
   constructor(
     private readonly registration: SupportRegistration,
@@ -440,6 +446,7 @@ export class SupportCheckupsService implements OnModuleInit {
     const c = await this.load(id);
     if (c.state === 'completed' || c.state === 'not-reached' || c.state === 'skipped') throw new ConflictException(DONE);
     if (!OPEN_STATES.includes(c.state)) throw new ConflictException(WAITING);
+    if (c.state === 'calling' && actor !== SUPPORT_ACTOR) throw new ConflictException(ON_CALL);
     if (await this.facts.isDeceased(String(c.patient))) throw new ConflictException(DIED);
     if (input?.group && input.group !== c.group) throw new BadRequestException('This check-up uses the other list of questions.');
     const group = c.group as CareGroup;
@@ -461,6 +468,7 @@ export class SupportCheckupsService implements OnModuleInit {
             emergency: read.emergency,
             byName: actor.name,
             at,
+            ...(actor === SUPPORT_ACTOR && input.agentCallId ? { resultCall: input.agentCallId } : {}),
             ...(read.questionText ? { questionText: read.questionText } : {}),
             ...(read.rating ? { rating: read.rating } : {}),
             ...(comment ? { comment } : {})
@@ -545,7 +553,7 @@ export class SupportCheckupsService implements OnModuleInit {
     await this.erCard(c);
   }
 
-  private async erAlert(c: CheckupCallDocument): Promise<void> {
+  private async erAlert(c: CheckupCallDocument): Promise<boolean> {
     let subtitle = `Duty doctor: ${await this.holderNames()}`;
     if (c.group === 'cardiac') {
       try {
@@ -555,10 +563,12 @@ export class SupportCheckupsService implements OnModuleInit {
         this.logger.warn(`${c.number}: cardiology on call not read: ${(e as Error).message}`);
       }
     }
-    if (await this.upsertAlert(alertLink(c._id, 'er'), c, `Check-up ${c.number} sent to the ER`, subtitle)) await this.mark(c._id, 'er-alert');
+    if (!(await this.upsertAlert(alertLink(c._id, 'er'), c, `Check-up ${c.number} sent to the ER`, subtitle))) return false;
+    await this.mark(c._id, 'er-alert');
+    return true;
   }
 
-  private async erCard(c: CheckupCallDocument): Promise<void> {
+  private async erCard(c: CheckupCallDocument): Promise<boolean> {
     try {
       const patient: any = await this.patients.findById(c.patient).lean().exec();
       const letter = patient?.gender === 'Male' ? 'M' : patient?.gender === 'Female' ? 'F' : patient?.gender ? 'O' : '';
@@ -572,8 +582,10 @@ export class SupportCheckupsService implements OnModuleInit {
         patientId: String(c.patient)
       });
       await this.mark(c._id, 'er-card');
+      return true;
     } catch (e) {
       this.logger.error(`${c.number}: ER expected card not made: ${(e as Error).message}`);
+      return false;
     }
   }
 
@@ -583,13 +595,15 @@ export class SupportCheckupsService implements OnModuleInit {
     await this.announceWorrying(c, at);
   }
 
-  private async doctorAlert(c: CheckupCallDocument): Promise<void> {
+  private async doctorAlert(c: CheckupCallDocument): Promise<boolean> {
     const labels = c.worrying.map((k) => this.shortOf(c.group as CareGroup, k, c.answers)).join('; ');
-    if (await this.upsertAlert(alertLink(c._id, 'doctor'), c, `Check-up ${c.number} needs a doctor`, `${labels} · Duty doctor: ${await this.holderNames()}`))
-      await this.mark(c._id, 'doctor-alert');
+    if (!(await this.upsertAlert(alertLink(c._id, 'doctor'), c, `Check-up ${c.number} needs a doctor`, `${labels} · Duty doctor: ${await this.holderNames()}`)))
+      return false;
+    await this.mark(c._id, 'doctor-alert');
+    return true;
   }
 
-  private async announceWorrying(c: CheckupCallDocument, at: Date): Promise<void> {
+  private async announceWorrying(c: CheckupCallDocument, at: Date): Promise<boolean> {
     const sent = await this.registration.send(
       'support.checkup-worrying',
       c.case ? String(c.case) : null,
@@ -598,9 +612,10 @@ export class SupportCheckupsService implements OnModuleInit {
       c.patientName
     );
     if (sent) await this.mark(c._id, 'worrying');
+    return sent;
   }
 
-  private async announceDone(c: CheckupCallDocument, outcome: string): Promise<void> {
+  private async announceDone(c: CheckupCallDocument, outcome: string): Promise<boolean> {
     const sent = await this.registration.send(
       'support.checkup-done',
       c.case ? String(c.case) : null,
@@ -608,7 +623,8 @@ export class SupportCheckupsService implements OnModuleInit {
       `${c.number}: check-up done (${outcome})`,
       c.patientName
     );
-    if (sent) await this.checkups.updateOne({ _id: c._id }, { $addToSet: { announced: 'done' } }).exec();
+    if (sent) await this.mark(c._id, 'done');
+    return sent;
   }
 
   /** No answer: one more try tomorrow, or after 3 tries not reached. A person or the agent records it. */
@@ -616,7 +632,7 @@ export class SupportCheckupsService implements OnModuleInit {
     this.checkActor(actor);
     const c = await this.load(id);
     if (!OPEN_STATES.includes(c.state)) throw new ConflictException(c.state === 'scheduled' ? WAITING : DONE);
-    if (c.state === 'calling') throw new ConflictException('The agent is on this call now.');
+    if (c.state === 'calling') throw new ConflictException(ON_CALL);
     if (await this.facts.isDeceased(String(c.patient))) throw new ConflictException(DIED);
     if (!(await this.registerTry(c, c.agentCall ?? null))) throw new ConflictException(DONE);
     return this.detail(id);
@@ -664,8 +680,8 @@ export class SupportCheckupsService implements OnModuleInit {
   private async fromCall(checkupId: string, r: CheckupCallResult): Promise<void> {
     const c = isValidObjectId(checkupId) ? await this.checkups.findById(checkupId).exec() : null;
     if (!c) return;
-    // Only a true duplicate is ignored quietly: this very call was already recorded.
-    if (c.state === 'completed' && c.agentCall && String(c.agentCall) === r.agentCallId) return;
+    // Only a true duplicate is ignored quietly: this very call's result was already recorded by the agent.
+    if (c.state === 'completed' && c.resultCall && c.resultCall === r.agentCallId) return;
     const open = OPEN_STATES.includes(c.state);
     const mine = !c.agentCall || String(c.agentCall) === r.agentCallId;
     if (r.outcome === 'enquiry' && (!open || !mine)) {
@@ -683,7 +699,13 @@ export class SupportCheckupsService implements OnModuleInit {
       }
       const answers = r.answers ?? {};
       const questionText = answers.question === 'yes' ? (r.notes?.trim() || QUESTION_FALLBACK).slice(0, 500) : undefined;
-      await this.submit(SUPPORT_ACTOR, checkupId, { group: c.group as CareGroup, answers, rating: r.rating, ...(questionText ? { questionText } : {}) });
+      await this.submit(SUPPORT_ACTOR, checkupId, {
+        group: c.group as CareGroup,
+        answers,
+        rating: r.rating,
+        agentCallId: r.agentCallId,
+        ...(questionText ? { questionText } : {})
+      });
     } else {
       await this.registerTry(c, c.agentCall ?? null);
     }
@@ -698,31 +720,37 @@ export class SupportCheckupsService implements OnModuleInit {
    */
   async repairEffects(): Promise<number> {
     let fixed = 0;
+    const settled = new Date(this.clock().getTime() - REPAIR_GRACE_MINUTES * MIN);
     const rows = await this.checkups
       .find({
         state: { $in: ['completed', 'not-reached'] },
+        at: { $lte: settled },
         $or: [
           { announced: { $nin: ['done'] } },
-          { reviewedAt: null, result: { $in: ['sent-to-er', 'needs-doctor'] } },
+          { result: 'sent-to-er', reviewedAt: null, $or: [{ announced: { $nin: ['er-alert'] } }, { announced: { $nin: ['er-card'] } }] },
+          { result: 'needs-doctor', reviewedAt: null, $or: [{ announced: { $nin: ['doctor-alert'] } }, { announced: { $nin: ['worrying'] } }] },
           { reviewedAt: { $ne: null }, announced: { $nin: ['reviewed'] } }
         ]
       })
       .sort({ _id: 1 })
-      .limit(200)
+      .limit(this.repairBatch)
       .exec();
     for (const c of rows) {
       try {
         const has = (k: string) => c.announced.includes(k);
         const reviewed = !!c.reviewedAt;
+        const ok = (done: boolean) => {
+          if (done) fixed++;
+        };
         if (!reviewed && c.result === 'sent-to-er') {
-          if (!has('er-alert')) (await this.erAlert(c), fixed++);
-          if (!has('er-card')) (await this.erCard(c), fixed++);
+          if (!has('er-alert')) ok(await this.erAlert(c));
+          if (!has('er-card')) ok(await this.erCard(c));
         }
         if (!reviewed && c.result === 'needs-doctor') {
-          if (!has('doctor-alert')) (await this.doctorAlert(c), fixed++);
-          if (!has('worrying')) (await this.announceWorrying(c, c.at ?? this.clock()), fixed++);
+          if (!has('doctor-alert')) ok(await this.doctorAlert(c));
+          if (!has('worrying')) ok(await this.announceWorrying(c, c.at ?? this.clock()));
         }
-        if (!has('done')) (await this.announceDone(c, c.state === 'not-reached' ? 'not-reached' : (c.result ?? 'fine')), fixed++);
+        if (!has('done')) ok(await this.announceDone(c, c.state === 'not-reached' ? 'not-reached' : (c.result ?? 'fine')));
         if (reviewed && !has('reviewed')) {
           const sent = await this.registration.send(
             'support.checkup-reviewed',
@@ -731,7 +759,10 @@ export class SupportCheckupsService implements OnModuleInit {
             `${c.number}: check-up reviewed`,
             c.patientName
           );
-          if (sent) (await this.mark(c._id, 'reviewed'), fixed++);
+          if (sent) {
+            await this.mark(c._id, 'reviewed');
+            fixed++;
+          }
         }
       } catch (e) {
         this.logger.warn(`${c.number}: effects not repaired: ${(e as Error).message}`);

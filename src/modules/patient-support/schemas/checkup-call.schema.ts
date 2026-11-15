@@ -46,6 +46,8 @@ export class CheckupCall {
 
   @Prop({ type: MongooseSchema.Types.ObjectId }) agentCall?: Types.ObjectId;
   @Prop() providerCallId?: string;
+  /** The agent call whose result was recorded here; only the agent's result sets it. */
+  @Prop() resultCall?: string;
 
   @Prop({ type: Date }) reviewedAt?: Date;
   @Prop() reviewedByName?: string;

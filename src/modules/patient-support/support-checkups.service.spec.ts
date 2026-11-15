@@ -87,6 +87,7 @@ describe('SupportCheckupsService', () => {
     const u = await m.User.create({ name: 'Dr Duty', email: 'duty@x.in', passwordHash: 'x', role: UserRole.DOCTOR });
     await m.DutyTitle.updateOne({ key: 'duty-doctor' }, { $set: { holders: [u._id] } });
   };
+  const later = (minutes = 3) => (now = new Date(now.getTime() + minutes * MIN));
   const rowOf = (id: string) => m.CheckupCall.findById(id).lean() as Promise<any>;
 
   before(async () => {
@@ -533,6 +534,7 @@ describe('SupportCheckupsService', () => {
     await m.CheckupCall.updateOne({ _id: id }, { $set: { state: 'calling', agentCall: mine } });
     await bridge.handlers.checkupResult!(id, { outcome: 'failed', answers: {}, agentCallId: String(oid()) });
     assert.deepEqual([(await rowOf(id)).state, (await rowOf(id)).tries], ['calling', 0]);
+    await m.CheckupCall.updateOne({ _id: id }, { $set: { state: 'due' } });
     await svc.submit(NURSE, id, { group: 'general', answers: FINE });
     await bridge.handlers.checkupResult!(id, { outcome: 'no_answer', answers: {}, agentCallId: String(mine) });
     assert.equal((await rowOf(id)).state, 'completed');
@@ -734,6 +736,7 @@ describe('SupportCheckupsService', () => {
     const id = await makeOne();
     await svc.submit(NURSE, id, { group: 'general', answers: { medicines: 'yes', symptoms: 'severe' } });
     assert.deepEqual(((await rowOf(id)).announced as string[]).sort(), ['done', 'er-alert', 'er-card']);
+    later();
     assert.equal(await svc.repairEffects(), 0, 'nothing to redo when all is marked');
     // A crash left neither the alert nor the card.
     await m.TaskAlertItem.deleteMany({});
@@ -749,11 +752,53 @@ describe('SupportCheckupsService', () => {
     await svc.submit(NURSE, id2, { group: 'general', answers: { ...FINE, medicines: 'no' } });
     await m.TaskAlertItem.deleteMany({ link: `support-checkup:${id2}:doctor` });
     await m.CheckupCall.updateOne({ _id: id2 }, { $pull: { announced: { $in: ['doctor-alert', 'worrying', 'done'] } } });
+    later();
     assert.equal(await svc.repairEffects(), 3);
     assert.ok(await alertOf(`support-checkup:${id2}:doctor`));
     // Reviewed check-ups are left alone.
     await svc.review(DOCTOR, id, 'Seen');
     assert.equal(await svc.repairEffects(), 0);
+  });
+
+  test("a person completes the check-up while the linked call is placed; that call's emergency enquiry then throws", async () => {
+    const id = await makeOne();
+    const call = await deferredCall(id, 'calling');
+    await svc.submit(NURSE, id, { group: 'general', answers: FINE });
+    await assert.rejects(
+      bridge.handlers.checkupResult!(id, { outcome: 'enquiry', answers: { medicines: 'yes', symptoms: 'severe' }, agentCallId: String(call._id) }),
+      ConflictException
+    );
+  });
+
+  test("a person's submit is refused while calling", async () => {
+    const id = await makeOne();
+    await m.CheckupCall.updateOne({ _id: id }, { $set: { state: 'calling' } });
+    await assert.rejects(svc.submit(NURSE, id, { group: 'general', answers: FINE }), /agent is on this call/);
+    assert.equal((await rowOf(id)).state, 'calling');
+  });
+
+  test('repairEffects leaves a result alone within its first 2 minutes', async () => {
+    const id = await makeOne();
+    await svc.submit(NURSE, id, { group: 'general', answers: { medicines: 'yes', symptoms: 'severe' } });
+    await m.CheckupCall.updateOne({ _id: id }, { $pull: { announced: { $in: ['er-alert', 'er-card'] } } });
+    expected.length = 0;
+    later(1);
+    assert.equal(await svc.repairEffects(), 0);
+    later(2);
+    assert.equal(await svc.repairEffects(), 2);
+    assert.equal(expected.length, 1);
+  });
+
+  test('repairEffects still repairs a new emergency when many fully-marked unreviewed results exist', async () => {
+    svc.repairBatch = 2;
+    for (let i = 0; i < 3; i++) await svc.submit(NURSE, await makeOne(), { group: 'general', answers: { ...FINE, medicines: 'no' } });
+    const id = await makeOne();
+    await svc.submit(NURSE, id, { group: 'general', answers: { medicines: 'yes', symptoms: 'severe' } });
+    await m.CheckupCall.updateOne({ _id: id }, { $pull: { announced: 'er-card' } });
+    expected.length = 0;
+    later();
+    assert.equal(await svc.repairEffects(), 1);
+    assert.equal(expected.length, 1);
   });
 
   test('coming-up lists scheduled check-ups', async () => {
